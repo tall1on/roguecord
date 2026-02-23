@@ -37,7 +37,7 @@ const mediaCodecs: mediasoup.types.RtpCodecCapability[] = [
   {
     kind: 'audio',
     mimeType: 'audio/opus',
-    clockRate: 48000,
+    clockRate: 64000,
     channels: 2,
   } as mediasoup.types.RtpCodecCapability,
 ];
