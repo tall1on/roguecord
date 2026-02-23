@@ -62,6 +62,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'leave_voice_channel':
         await handleLeaveVoiceChannel(client, payload);
         break;
+      case 'get_producers':
+        await handleGetProducers(client, payload);
+        break;
       case 'submit_admin_key':
         await handleSubmitAdminKey(client, payload);
         break;
@@ -406,6 +409,29 @@ const handleLeaveVoiceChannel = async (client: ClientConnection, payload: { chan
 
   if (room.peers.size === 0) {
     rooms.delete(channel_id);
+  }
+};
+
+const handleGetProducers = async (client: ClientConnection, payload: { channel_id: string }) => {
+  if (!client.userId) return;
+  const { channel_id } = payload;
+  
+  const room = rooms.get(channel_id);
+  if (!room) return;
+  
+  for (const [peerId, peer] of room.peers) {
+    if (peerId !== client.userId) {
+      for (const [producerId, producer] of peer.producers) {
+        client.ws.send(JSON.stringify({
+          type: 'new_producer',
+          payload: {
+            channel_id,
+            producer_id: producerId,
+            user_id: peerId
+          }
+        }));
+      }
+    }
   }
 };
 
