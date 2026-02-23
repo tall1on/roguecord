@@ -8,24 +8,14 @@ export interface User {
   created_at: string;
 }
 
-export interface Server {
-  id: string;
-  name: string;
-  icon_url: string | null;
-  owner_id: string;
-  created_at: string;
-}
-
 export interface Category {
   id: string;
-  server_id: string;
   name: string;
   position: number;
 }
 
 export interface Channel {
   id: string;
-  server_id: string;
   category_id: string | null;
   name: string;
   type: 'text' | 'voice';
@@ -58,6 +48,12 @@ const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
   return window.btoa(binary);
 };
 
+const arrayBufferToHex = (buffer: ArrayBuffer) => {
+  return Array.from(new Uint8Array(buffer))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+};
+
 const generateKeyPair = async () => {
   return await window.crypto.subtle.generateKey(
     {
@@ -71,7 +67,8 @@ const generateKeyPair = async () => {
 
 const exportPublicKey = async (key: CryptoKey) => {
   const exported = await window.crypto.subtle.exportKey("spki", key);
-  return arrayBufferToBase64(exported);
+  const base64 = arrayBufferToBase64(exported);
+  return `-----BEGIN PUBLIC KEY-----\n${base64.match(/.{1,64}/g)?.join('\n')}\n-----END PUBLIC KEY-----`;
 };
 
 const exportPrivateKey = async (key: CryptoKey) => {
@@ -104,7 +101,7 @@ const signChallenge = async (privateKey: CryptoKey, challenge: string) => {
     privateKey,
     data
   );
-  return arrayBufferToBase64(signature);
+  return arrayBufferToHex(signature);
 };
 
 export const useChatStore = defineStore('chat', () => {
@@ -113,17 +110,20 @@ export const useChatStore = defineStore('chat', () => {
   const currentUser = ref<User | null>(null);
   const currentUserRole = ref<string>('user');
   
-  const savedConnections = ref<SavedConnection[]>(JSON.parse(localStorage.getItem('savedConnections') || '[]'));
+  const savedConnections = ref<SavedConnection[]>(
+    JSON.parse(localStorage.getItem('savedConnections') || '[]').map((c: SavedConnection) => ({
+      ...c,
+      address: c.address.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (match, p1) => `${p1 || ''}localhost`)
+    }))
+  );
   const activeConnectionId = ref<string | null>(null);
   const localUsername = ref<string | null>(localStorage.getItem('username'));
   const users = ref<User[]>([]);
   
-  const servers = ref<Server[]>([]);
-  const categories = ref<Record<string, Category[]>>({}); // server_id -> Category[]
-  const channels = ref<Record<string, Channel[]>>({}); // server_id -> Channel[]
+  const categories = ref<Category[]>([]);
+  const channels = ref<Channel[]>([]);
   const messages = ref<Record<string, Message[]>>({}); // channel_id -> Message[]
   
-  const activeServerId = ref<string | null>(null);
   const activeChannelId = ref<string | null>(null);
 
   const saveLocalUsername = (username: string) => {
@@ -132,6 +132,8 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const addSavedConnection = (name: string, address: string) => {
+    // Replace 0.0.0.0 with localhost to prevent browser connection errors
+    address = address.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (match, p1) => `${p1 || ''}localhost`);
     const newConnection: SavedConnection = {
       id: crypto.randomUUID(),
       name,
@@ -150,7 +152,7 @@ export const useChatStore = defineStore('chat', () => {
     const storedPriv = localStorage.getItem('privateKey');
     const storedPub = localStorage.getItem('publicKey');
     
-    if (storedPriv && storedPub) {
+    if (storedPriv && storedPub && storedPub.includes('-----BEGIN PUBLIC KEY-----')) {
       try {
         const privateKey = await importPrivateKey(storedPriv);
         return { privateKey, publicKeyBase64: storedPub };
@@ -161,27 +163,41 @@ export const useChatStore = defineStore('chat', () => {
     
     const keyPair = await generateKeyPair();
     const privateJwk = await exportPrivateKey(keyPair.privateKey);
-    const publicBase64 = await exportPublicKey(keyPair.publicKey);
+    const publicPem = await exportPublicKey(keyPair.publicKey);
     
     localStorage.setItem('privateKey', privateJwk);
-    localStorage.setItem('publicKey', publicBase64);
+    localStorage.setItem('publicKey', publicPem);
     
-    return { privateKey: keyPair.privateKey, publicKeyBase64: publicBase64 };
+    return { privateKey: keyPair.privateKey, publicKeyBase64: publicPem };
   };
 
   const connect = (address?: string) => {
-    if (ws.value) return;
+    console.log(`[DEBUG] connect called with address: ${address}`);
+    console.log(`[DEBUG] window.location.hostname: ${window.location.hostname}`);
     
     let wsUrl = address;
     if (!wsUrl) {
       // Use wss:// and the current hostname, fallback to localhost:1337
-      const host = window.location.hostname || 'localhost';
+      let host = window.location.hostname || 'localhost';
+      if (host === '0.0.0.0') {
+        host = 'localhost';
+      }
       const port = '1337'; // Assuming server is on 1337
       // Use wss:// if the page is loaded over https, otherwise ws://
       const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
       wsUrl = `${protocol}${host}:${port}`;
     } else if (wsUrl.startsWith('ws://') && window.location.protocol === 'https:') {
       wsUrl = wsUrl.replace(/^ws:\/\//i, 'wss://');
+    }
+
+    // Replace 0.0.0.0 with localhost in the final URL to prevent browser connection errors
+    wsUrl = wsUrl.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (match, p1) => `${p1 || ''}localhost`);
+
+    console.log(`[DEBUG] Final wsUrl: ${wsUrl}`);
+
+    if (ws.value) {
+      if (ws.value.url === wsUrl) return;
+      disconnect();
     }
     
     const connection = savedConnections.value.find(c => c.address === wsUrl);
@@ -221,14 +237,14 @@ export const useChatStore = defineStore('chat', () => {
 
   const disconnect = () => {
     if (ws.value) {
+      ws.value.onclose = null;
       ws.value.close();
       ws.value = null;
     }
     isConnected.value = false;
     activeConnectionId.value = null;
-    servers.value = [];
-    activeServerId.value = null;
-    channels.value = {};
+    categories.value = [];
+    channels.value = [];
     activeChannelId.value = null;
     messages.value = {};
     users.value = [];
@@ -265,29 +281,15 @@ export const useChatStore = defineStore('chat', () => {
       case 'authenticated':
         currentUser.value = payload.user;
         saveLocalUsername(payload.user.username);
-        getServers();
-        break;
-        
-      case 'servers_list':
-        servers.value = payload.servers || [];
-        if (servers.value.length > 0) {
-          setActiveServer(servers.value[0]!.id);
-        } else {
-          createServer('Default Server');
-        }
-        break;
-        
-      case 'server_created':
-        servers.value.push(payload.server);
-        setActiveServer(payload.server.id);
+        getChannels();
         break;
         
       case 'channels_list':
-        categories.value[payload.server_id] = payload.categories;
-        channels.value[payload.server_id] = payload.channels;
+        categories.value = payload.categories;
+        channels.value = payload.channels;
         
         // Auto-select first text channel if none selected
-        if (activeServerId.value === payload.server_id && !activeChannelId.value) {
+        if (!activeChannelId.value) {
           const firstTextChannel = payload.channels?.find((c: Channel) => c.type === 'text');
           if (firstTextChannel) {
             setActiveChannel(firstTextChannel.id);
@@ -296,10 +298,7 @@ export const useChatStore = defineStore('chat', () => {
         break;
         
       case 'channel_created':
-        if (!channels.value[payload.server_id]) {
-          channels.value[payload.server_id] = [];
-        }
-        channels.value[payload.server_id]?.push(payload.channel);
+        channels.value.push(payload.channel);
         break;
         
       case 'messages_list':
@@ -341,20 +340,12 @@ export const useChatStore = defineStore('chat', () => {
     }
   };
 
-  const getServers = () => {
-    send('get_servers');
+  const getChannels = () => {
+    send('get_channels');
   };
 
-  const createServer = (name: string) => {
-    send('create_server', { name });
-  };
-
-  const getChannels = (server_id: string) => {
-    send('get_channels', { server_id });
-  };
-
-  const createChannel = (server_id: string, category_id: string | null, name: string, type: 'text' | 'voice') => {
-    send('create_channel', { server_id, category_id, name, type });
+  const createChannel = (category_id: string | null, name: string, type: 'text' | 'voice') => {
+    send('create_channel', { category_id, name, type });
   };
 
   const getMessages = (channel_id: string) => {
@@ -369,25 +360,17 @@ export const useChatStore = defineStore('chat', () => {
     send('send_message', { channel_id, content });
   };
 
-  const setActiveServer = (server_id: string) => {
-    activeServerId.value = server_id;
-    activeChannelId.value = null; // Reset channel when switching servers
-    getChannels(server_id);
-  };
-
   const setActiveChannel = (channel_id: string) => {
     activeChannelId.value = channel_id;
     getMessages(channel_id);
   };
 
   const activeServerChannels = computed(() => {
-    if (!activeServerId.value) return [];
-    return channels.value[activeServerId.value] || [];
+    return channels.value || [];
   });
 
   const activeServerCategories = computed(() => {
-    if (!activeServerId.value) return [];
-    return categories.value[activeServerId.value] || [];
+    return categories.value || [];
   });
 
   const activeChannelMessages = computed(() => {
@@ -403,11 +386,9 @@ export const useChatStore = defineStore('chat', () => {
     activeConnectionId,
     localUsername,
     users,
-    servers,
     categories,
     channels,
     messages,
-    activeServerId,
     activeChannelId,
     activeServerChannels,
     activeServerCategories,
@@ -418,11 +399,9 @@ export const useChatStore = defineStore('chat', () => {
     connect,
     disconnect,
     authenticate,
-    createServer,
     createChannel,
     sendMessage,
     submitAdminKey,
-    setActiveServer,
     setActiveChannel,
     send,
     ws,

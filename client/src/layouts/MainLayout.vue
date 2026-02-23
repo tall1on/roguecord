@@ -50,9 +50,8 @@ const openCreateChannelModal = (categoryId: string | null) => {
 }
 
 const handleCreateChannel = () => {
-  if (newChannelName.value.trim() && chatStore.activeServerId) {
+  if (newChannelName.value.trim()) {
     chatStore.createChannel(
-      chatStore.activeServerId,
       selectedCategoryId.value,
       newChannelName.value.trim(),
       newChannelType.value
@@ -85,7 +84,7 @@ const handleChannelClick = (channel: any) => {
 }
 
 const activeServer = computed(() => {
-  return chatStore.servers.find(s => s.id === chatStore.activeServerId)
+  return { name: 'RogueCord Server' }
 })
 </script>
 
@@ -295,7 +294,7 @@ const activeServer = computed(() => {
 
     <!-- Channel List Sidebar -->
     <aside class="w-60 bg-[#2b2d31] flex flex-col shrink-0">
-      <template v-if="chatStore.activeConnectionId && chatStore.activeServerId">
+      <template v-if="chatStore.activeConnectionId">
         <!-- Server Header -->
         <header 
           v-if="activeServer"
@@ -312,7 +311,7 @@ const activeServer = computed(() => {
 
         <!-- Channels -->
         <div class="flex-1 overflow-y-auto p-2 space-y-[2px] custom-scrollbar">
-          <template v-if="chatStore.activeServerId">
+          <template v-if="true">
           <div v-for="category in chatStore.activeServerCategories" :key="category.id">
             <!-- Category Header -->
             <div class="pt-4 pb-1 px-2 flex items-center justify-between group cursor-pointer">

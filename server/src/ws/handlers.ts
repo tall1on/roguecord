@@ -3,16 +3,12 @@ import {
   createUser,
   getUserByUsername,
   getUserByPublicKey,
-  getUserServers,
-  createServer,
-  addServerMember,
   createCategory,
   createChannel,
-  getServerCategories,
-  getServerChannels,
+  getCategories,
+  getChannels,
   getChannelMessages,
   createMessage,
-  getServerMembers,
   getUserById,
   updateUserRole
 } from '../models';
@@ -24,6 +20,7 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
   try {
     const message = JSON.parse(messageStr);
     const { type, payload } = message;
+    console.log(`[WS DEBUG] Handling message type: ${type} for user: ${client.userId || 'unauthenticated'}`);
 
     switch (type) {
       case 'auth:request':
@@ -32,14 +29,8 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'auth:response':
         await handleAuthResponse(client, payload);
         break;
-      case 'get_servers':
-        await handleGetServers(client);
-        break;
-      case 'create_server':
-        await handleCreateServer(client, payload);
-        break;
       case 'get_channels':
-        await handleGetChannels(client, payload);
+        await handleGetChannels(client);
         break;
       case 'create_channel':
         await handleCreateChannel(client, payload);
@@ -75,10 +66,10 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         await handleSubmitAdminKey(client, payload);
         break;
       default:
-        console.warn(`Unknown message type: ${type}`);
+        console.warn(`[WS DEBUG] Unknown message type: ${type}`);
     }
   } catch (error) {
-    console.error('Error handling message:', error);
+    console.error('[WS DEBUG] Error handling message:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Internal server error' } }));
   }
 };
@@ -110,11 +101,17 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
   }
 
   try {
-    const verify = crypto.createVerify('SHA256');
-    verify.update(client.challenge);
-    verify.end();
-
-    const isValid = verify.verify(client.pendingPublicKey, signature, 'hex');
+    const isValid = crypto.verify(
+      'SHA256',
+      Buffer.from(client.challenge),
+      {
+        key: client.pendingPublicKey,
+        format: 'pem',
+        type: 'spki',
+        dsaEncoding: 'ieee-p1363'
+      },
+      Buffer.from(signature, 'hex')
+    );
 
     if (isValid) {
       const user = await getUserByPublicKey(client.pendingPublicKey);
@@ -139,62 +136,30 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
   }
 };
 
-const handleGetServers = async (client: ClientConnection) => {
+const handleGetChannels = async (client: ClientConnection) => {
   if (!client.userId) return;
-  
-  const servers = await getUserServers(client.userId);
-  client.ws.send(JSON.stringify({
-    type: 'servers_list',
-    payload: { servers }
-  }));
-};
 
-const handleCreateServer = async (client: ClientConnection, payload: { name: string }) => {
-  if (!client.userId) return;
-  const { name } = payload;
-  if (!name) return;
+  const categories = await getCategories();
+  const channels = await getChannels();
 
-  // Create server
-  const server = await createServer(name, client.userId);
-  
-  // Add user as member
-  await addServerMember(server.id, client.userId);
-  
-  // Create default category
-  const category = await createCategory(server.id, 'Text Channels', 0);
-  
-  // Create default text channel
-  await createChannel(server.id, category.id, 'general', 'text', 0);
-
-  // Send the new server to the user
-  client.ws.send(JSON.stringify({
-    type: 'server_created',
-    payload: { server }
-  }));
-};
-
-const handleGetChannels = async (client: ClientConnection, payload: { server_id: string }) => {
-  if (!client.userId) return;
-  const { server_id } = payload;
-  if (!server_id) return;
-
-  // Verify user is a member of the server
-  const servers = await getUserServers(client.userId);
-  if (!servers.some(s => s.id === server_id)) return;
-
-  const categories = await getServerCategories(server_id);
-  const channels = await getServerChannels(server_id);
+  // Create default category and channel if none exist
+  if (categories.length === 0 && channels.length === 0) {
+    const category = await createCategory('Text Channels', 0);
+    const channel = await createChannel(category.id, 'general', 'text', 0);
+    categories.push(category);
+    channels.push(channel);
+  }
 
   client.ws.send(JSON.stringify({
     type: 'channels_list',
-    payload: { server_id, categories, channels }
+    payload: { categories, channels }
   }));
 };
 
-const handleCreateChannel = async (client: ClientConnection, payload: { server_id: string, category_id: string | null, name: string, type: 'text' | 'voice' }) => {
+const handleCreateChannel = async (client: ClientConnection, payload: { category_id: string | null, name: string, type: 'text' | 'voice' }) => {
   if (!client.userId) return;
-  const { server_id, category_id, name, type } = payload;
-  if (!server_id || !name || !type) return;
+  const { category_id, name, type } = payload;
+  if (!name || !type) return;
 
   const user = await getUserById(client.userId);
   if (!user || user.role !== 'admin') {
@@ -202,22 +167,13 @@ const handleCreateChannel = async (client: ClientConnection, payload: { server_i
     return;
   }
 
-  // Verify user is a member (and ideally owner/admin, but skipping for simplicity)
-  const servers = await getUserServers(client.userId);
-  if (!servers.some(s => s.id === server_id)) return;
+  const channel = await createChannel(category_id, name, type);
 
-  const channel = await createChannel(server_id, category_id, name, type);
-
-  // Broadcast to all server members
-  const members = await getServerMembers(server_id);
-  const message = {
+  // Broadcast to all authenticated users
+  connectionManager.broadcastToAuthenticated({
     type: 'channel_created',
-    payload: { server_id, channel }
-  };
-
-  for (const member of members) {
-    connectionManager.sendToUser(member.id, message);
-  }
+    payload: { channel }
+  });
 };
 
 const handleGetMessages = async (client: ClientConnection, payload: { channel_id: string }) => {

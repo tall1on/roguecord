@@ -1,6 +1,7 @@
 import sqlite3 from 'sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 
 const dbDir = path.join(__dirname, '..', 'data');
 if (!fs.existsSync(dbDir)) {
@@ -32,38 +33,12 @@ function initializeDatabase() {
       )
     `);
 
-    // Servers Table
-    db.run(`
-      CREATE TABLE IF NOT EXISTS servers (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        icon_url TEXT,
-        owner_id TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (owner_id) REFERENCES users(id)
-      )
-    `);
-
-    // Server Members Table
-    db.run(`
-      CREATE TABLE IF NOT EXISTS server_members (
-        server_id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (server_id, user_id),
-        FOREIGN KEY (server_id) REFERENCES servers(id),
-        FOREIGN KEY (user_id) REFERENCES users(id)
-      )
-    `);
-
     // Categories Table
     db.run(`
       CREATE TABLE IF NOT EXISTS categories (
         id TEXT PRIMARY KEY,
-        server_id TEXT NOT NULL,
         name TEXT NOT NULL,
-        position INTEGER NOT NULL DEFAULT 0,
-        FOREIGN KEY (server_id) REFERENCES servers(id)
+        position INTEGER NOT NULL DEFAULT 0
       )
     `);
 
@@ -71,12 +46,10 @@ function initializeDatabase() {
     db.run(`
       CREATE TABLE IF NOT EXISTS channels (
         id TEXT PRIMARY KEY,
-        server_id TEXT NOT NULL,
         category_id TEXT,
         name TEXT NOT NULL,
         type TEXT NOT NULL CHECK(type IN ('text', 'voice')),
         position INTEGER NOT NULL DEFAULT 0,
-        FOREIGN KEY (server_id) REFERENCES servers(id),
         FOREIGN KEY (category_id) REFERENCES categories(id)
       )
     `);
@@ -93,6 +66,24 @@ function initializeDatabase() {
         FOREIGN KEY (user_id) REFERENCES users(id)
       )
     `);
+
+    // Ensure default channel exists
+    db.get('SELECT count(*) as count FROM channels', (err, row: any) => {
+      if (err) {
+        console.error('Error checking channels:', err);
+        return;
+      }
+      if (row.count === 0) {
+        const id = crypto.randomUUID();
+        db.run('INSERT INTO channels (id, category_id, name, type, position) VALUES (?, NULL, ?, ?, ?)', [id, 'general', 'text', 0], (err) => {
+          if (err) {
+            console.error('Error creating default channel:', err);
+          } else {
+            console.log('Created default "general" text channel.');
+          }
+        });
+      }
+    });
 
     console.log('Database tables initialized.');
   });
