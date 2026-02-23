@@ -27,6 +27,9 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const pingHistory = ref<number[]>([]);
   const connectionQuality = ref<'good' | 'warning' | 'bad'>('good');
   
+  const isMuted = ref(false);
+  const isDeafened = ref(false);
+  
   let statsInterval: number | null = null;
   let lastBytesSent = 0;
   let lastBytesReceived = 0;
@@ -122,6 +125,100 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     connectionQuality.value = 'good';
   };
 
+  const toggleMute = () => {
+    if (isDeafened.value) {
+      // If deafened, clicking mute will undeafen but keep muted
+      isDeafened.value = false;
+      isMuted.value = true;
+      
+      // Unmute all incoming audio
+      audioElements.forEach(audio => {
+        audio.muted = false;
+      });
+      
+      // Mic stays disabled because isMuted is true
+      if (localStream.value) {
+        localStream.value.getAudioTracks().forEach(track => {
+          track.enabled = false;
+        });
+      }
+      if (producer.value) {
+        producer.value.pause();
+      }
+    } else {
+      isMuted.value = !isMuted.value;
+      
+      if (localStream.value) {
+        localStream.value.getAudioTracks().forEach(track => {
+          track.enabled = !isMuted.value;
+        });
+      }
+      if (producer.value) {
+        if (isMuted.value) {
+          producer.value.pause();
+        } else {
+          producer.value.resume();
+        }
+      }
+    }
+
+    if (activeVoiceChannelId.value) {
+      chatStore.send('voice_state_update', {
+        channel_id: activeVoiceChannelId.value,
+        isMuted: isMuted.value,
+        isDeafened: isDeafened.value
+      });
+    }
+  };
+
+  const toggleDeafen = () => {
+    isDeafened.value = !isDeafened.value;
+    
+    if (isDeafened.value) {
+      // When deafened, also mute the mic
+      if (localStream.value) {
+        localStream.value.getAudioTracks().forEach(track => {
+          track.enabled = false;
+        });
+      }
+      if (producer.value) {
+        producer.value.pause();
+      }
+      
+      // Mute all incoming audio
+      audioElements.forEach(audio => {
+        audio.muted = true;
+      });
+    } else {
+      // Restore mic state
+      if (localStream.value) {
+        localStream.value.getAudioTracks().forEach(track => {
+          track.enabled = !isMuted.value;
+        });
+      }
+      if (producer.value) {
+        if (isMuted.value) {
+          producer.value.pause();
+        } else {
+          producer.value.resume();
+        }
+      }
+      
+      // Unmute all incoming audio
+      audioElements.forEach(audio => {
+        audio.muted = false;
+      });
+    }
+
+    if (activeVoiceChannelId.value) {
+      chatStore.send('voice_state_update', {
+        channel_id: activeVoiceChannelId.value,
+        isMuted: isMuted.value,
+        isDeafened: isDeafened.value
+      });
+    }
+  };
+
   const initDevice = async (routerRtpCapabilities: any) => {
     try {
       device.value = new Device();
@@ -136,7 +233,11 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       leaveVoiceChannel();
     }
     activeVoiceChannelId.value = channelId;
-    chatStore.send('join_voice_channel', { channel_id: channelId });
+    chatStore.send('join_voice_channel', { 
+      channel_id: channelId,
+      isMuted: isMuted.value,
+      isDeafened: isDeafened.value
+    });
   };
 
   const leaveVoiceChannel = () => {
@@ -269,6 +370,26 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         }
         break;
         
+      case 'voice_state_updated':
+        if (payload.channel_id === activeVoiceChannelId.value) {
+          const user = voiceParticipants.value.find(u => u.id === payload.user_id);
+          if (user) {
+            user.isMuted = payload.isMuted;
+            user.isDeafened = payload.isDeafened;
+          }
+        }
+        
+        const stateParticipants = channelParticipants.value.get(payload.channel_id);
+        if (stateParticipants) {
+          const user = stateParticipants.find(u => u.id === payload.user_id);
+          if (user) {
+            user.isMuted = payload.isMuted;
+            user.isDeafened = payload.isDeafened;
+            channelParticipants.value = new Map(channelParticipants.value);
+          }
+        }
+        break;
+
       case 'webrtc_transport_created':
         if (payload.channel_id !== activeVoiceChannelId.value || !device.value) return;
         
@@ -313,7 +434,19 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           try {
             localStream.value = await navigator.mediaDevices.getUserMedia({ audio: true });
             const audioTrack = localStream.value.getAudioTracks()[0];
-            producer.value = await sendTransport.value.produce({ track: audioTrack });
+            
+            if (audioTrack) {
+              // Apply current mute/deafen state
+              if (isMuted.value || isDeafened.value) {
+                audioTrack.enabled = false;
+              }
+              
+              producer.value = await sendTransport.value.produce({ track: audioTrack });
+              
+              if (isMuted.value || isDeafened.value) {
+                producer.value.pause();
+              }
+            }
           } catch (error) {
             console.error('Failed to get user media or produce:', error);
           }
@@ -385,6 +518,9 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           const audio = new Audio();
           audio.srcObject = stream;
           audio.autoplay = true;
+          if (isDeafened.value) {
+            audio.muted = true;
+          }
           audio.play().catch(e => console.error('Audio play failed:', e));
           audioElements.set(consumer.id, audio);
           
@@ -415,7 +551,11 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     bandwidth,
     pingHistory,
     connectionQuality,
+    isMuted,
+    isDeafened,
     joinVoiceChannel,
-    leaveVoiceChannel
+    leaveVoiceChannel,
+    toggleMute,
+    toggleDeafen
   };
 });

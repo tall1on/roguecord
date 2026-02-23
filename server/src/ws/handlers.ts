@@ -69,6 +69,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'submit_admin_key':
         await handleSubmitAdminKey(client, payload);
         break;
+      case 'voice_state_update':
+        await handleVoiceStateUpdate(client, payload);
+        break;
       default:
         console.warn(`[WS DEBUG] Unknown message type: ${type}`);
     }
@@ -181,10 +184,10 @@ const handleGetChannels = async (client: ClientConnection) => {
   const voiceParticipants: Record<string, any[]> = {};
   for (const [channelId, room] of rooms.entries()) {
     const users = [];
-    for (const userId of room.peers.keys()) {
+    for (const [userId, peer] of room.peers.entries()) {
       const user = await getUserById(userId);
       if (user) {
-        users.push({ id: user.id, username: user.username, avatar_url: user.avatar_url });
+        users.push({ id: user.id, username: user.username, avatar_url: user.avatar_url, isMuted: peer.isMuted, isDeafened: peer.isDeafened });
       }
     }
     voiceParticipants[channelId] = users;
@@ -269,13 +272,16 @@ export const handleClientDisconnect = (client: ClientConnection) => {
   }
 };
 
-const handleJoinVoiceChannel = async (client: ClientConnection, payload: { channel_id: string }) => {
+const handleJoinVoiceChannel = async (client: ClientConnection, payload: { channel_id: string, isMuted?: boolean, isDeafened?: boolean }) => {
   if (!client.userId) return;
-  const { channel_id } = payload;
+  const { channel_id, isMuted = false, isDeafened = false } = payload;
   if (!channel_id) return;
 
   const room = await getOrCreateRoom(channel_id);
   const peer = getPeer(room, client.userId);
+  
+  peer.isMuted = isMuted;
+  peer.isDeafened = isDeafened;
 
   const user = await getUserById(client.userId);
   if (!user) return;
@@ -285,15 +291,15 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
     type: 'user_joined_voice',
     payload: { 
       channel_id, 
-      user: { id: user.id, username: user.username, avatar_url: user.avatar_url } 
+      user: { id: user.id, username: user.username, avatar_url: user.avatar_url, isMuted: peer.isMuted, isDeafened: peer.isDeafened } 
     }
   });
 
   const users = [];
-  for (const userId of room.peers.keys()) {
+  for (const [userId, p] of room.peers.entries()) {
     const u = await getUserById(userId);
     if (u) {
-      users.push({ id: u.id, username: u.username, avatar_url: u.avatar_url });
+      users.push({ id: u.id, username: u.username, avatar_url: u.avatar_url, isMuted: p.isMuted, isDeafened: p.isDeafened });
     }
   }
 
@@ -366,6 +372,10 @@ const handleProduce = async (client: ClientConnection, payload: { channel_id: st
 
   const producer = await transport.produce({ kind, rtpParameters });
   peer.producers.set(producer.id, producer);
+
+  if (peer.isMuted || peer.isDeafened) {
+    await producer.pause();
+  }
 
   client.ws.send(JSON.stringify({
     type: 'produced',
@@ -508,5 +518,38 @@ const handleSubmitAdminKey = async (client: ClientConnection, payload: { key: st
   } else {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid admin key' } }));
   }
+};
+
+const handleVoiceStateUpdate = async (client: ClientConnection, payload: { channel_id: string, isMuted: boolean, isDeafened: boolean }) => {
+  if (!client.userId) return;
+  const { channel_id, isMuted, isDeafened } = payload;
+
+  const room = rooms.get(channel_id);
+  if (!room) return;
+
+  const peer = room.peers.get(client.userId);
+  if (peer) {
+    peer.isMuted = isMuted;
+    peer.isDeafened = isDeafened;
+
+    for (const producer of peer.producers.values()) {
+      if (isMuted || isDeafened) {
+        await producer.pause();
+      } else {
+        await producer.resume();
+      }
+    }
+  }
+
+  // Broadcast to all authenticated users
+  connectionManager.broadcastToAuthenticated({
+    type: 'voice_state_updated',
+    payload: {
+      channel_id,
+      user_id: client.userId,
+      isMuted,
+      isDeafened
+    }
+  });
 };
 

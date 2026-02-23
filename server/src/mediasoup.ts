@@ -54,6 +54,8 @@ export interface Peer {
   transports: Map<string, WebRtcTransport>;
   producers: Map<string, Producer>;
   consumers: Map<string, Consumer>;
+  isMuted?: boolean;
+  isDeafened?: boolean;
 }
 
 export interface Room {
@@ -86,6 +88,8 @@ export function getPeer(room: Room, peerId: string): Peer {
       transports: new Map(),
       producers: new Map(),
       consumers: new Map(),
+      isMuted: false,
+      isDeafened: false,
     };
     room.peers.set(peerId, peer);
   }

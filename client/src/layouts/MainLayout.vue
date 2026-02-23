@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { RouterView } from 'vue-router'
-import { Hash, Volume2, Settings, Mic, Headphones, Plus, Link, PhoneOff, Trash2 } from 'lucide-vue-next'
+import { Hash, Volume2, Settings, Mic, MicOff, Headphones, Plus, Link, PhoneOff, Trash2 } from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 
@@ -140,7 +140,7 @@ const groupedMembers = computed(() => {
     role = role.charAt(0).toUpperCase() + role.slice(1) + 's'
     
     if (!onlineByRole[role]) onlineByRole[role] = []
-    onlineByRole[role].push(u)
+    onlineByRole[role]!.push(u)
   })
 
   // Sort roles: Admins first, then others
@@ -425,7 +425,14 @@ const groupedMembers = computed(() => {
                     <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
                     <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
                   </div>
-                  <span class="truncate">{{ user.username }}</span>
+                  <span class="truncate flex-1">{{ user.username }}</span>
+                  <div class="flex items-center gap-1 ml-2">
+                    <MicOff v-if="user.isMuted || user.isDeafened" class="w-3.5 h-3.5 text-red-500" />
+                    <div v-if="user.isDeafened" class="relative flex items-center justify-center">
+                      <Headphones class="w-3.5 h-3.5 text-red-500" />
+                      <div class="absolute w-4 h-[1.5px] bg-red-500 rotate-45 rounded-full"></div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -454,7 +461,14 @@ const groupedMembers = computed(() => {
                     <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
                     <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
                   </div>
-                  <span class="truncate">{{ user.username }}</span>
+                  <span class="truncate flex-1">{{ user.username }}</span>
+                  <div class="flex items-center gap-1 ml-2">
+                    <MicOff v-if="user.isMuted || user.isDeafened" class="w-3.5 h-3.5 text-red-500" />
+                    <div v-if="user.isDeafened" class="relative flex items-center justify-center">
+                      <Headphones class="w-3.5 h-3.5 text-red-500" />
+                      <div class="absolute w-4 h-[1.5px] bg-red-500 rotate-45 rounded-full"></div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -553,11 +567,13 @@ const groupedMembers = computed(() => {
           <button @click="showAdminModal = true" class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] text-gray-400 hover:text-gray-300" title="Admin Access">
             <Settings class="w-5 h-5" />
           </button>
-          <button class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] text-gray-400 hover:text-gray-300">
-            <Mic class="w-5 h-5" />
+          <button @click="webrtcStore.toggleMute()" class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] transition-colors" :class="webrtcStore.isMuted || webrtcStore.isDeafened ? 'text-red-500 hover:text-red-400' : 'text-gray-400 hover:text-gray-300'" :title="webrtcStore.isMuted || webrtcStore.isDeafened ? 'Unmute' : 'Mute'">
+            <MicOff v-if="webrtcStore.isMuted || webrtcStore.isDeafened" class="w-5 h-5" />
+            <Mic v-else class="w-5 h-5" />
           </button>
-          <button class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] text-gray-400 hover:text-gray-300">
+          <button @click="webrtcStore.toggleDeafen()" class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] transition-colors relative" :class="webrtcStore.isDeafened ? 'text-red-500 hover:text-red-400' : 'text-gray-400 hover:text-gray-300'" :title="webrtcStore.isDeafened ? 'Undeafen' : 'Deafen'">
             <Headphones class="w-5 h-5" />
+            <div v-if="webrtcStore.isDeafened" class="absolute w-6 h-[2px] bg-red-500 rotate-45 rounded-full"></div>
           </button>
         </div>
       </div>
