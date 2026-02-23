@@ -27,6 +27,25 @@ class ConnectionManager {
     console.log(`[WS DEBUG] Client authenticated as user: ${userId}`);
   }
 
+  getOnlineUserIds(): string[] {
+    const ids = new Set<string>();
+    for (const client of this.clients) {
+      if (client.userId) {
+        ids.add(client.userId);
+      }
+    }
+    return Array.from(ids);
+  }
+
+  isUserOnline(userId: string, excludeClient?: ClientConnection): boolean {
+    for (const client of this.clients) {
+      if (client !== excludeClient && client.userId === userId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   broadcast(message: any) {
     const data = JSON.stringify(message);
     for (const client of this.clients) {
