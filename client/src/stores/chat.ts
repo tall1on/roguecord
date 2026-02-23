@@ -146,6 +146,11 @@ export const useChatStore = defineStore('chat', () => {
   const removeSavedConnection = (id: string) => {
     savedConnections.value = savedConnections.value.filter(c => c.id !== id);
     localStorage.setItem('savedConnections', JSON.stringify(savedConnections.value));
+    
+    if (activeConnectionId.value === id) {
+      disconnect();
+      localStorage.removeItem('lastUsedServer');
+    }
   };
 
   const getKeys = async () => {

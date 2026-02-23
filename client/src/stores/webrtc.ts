@@ -17,6 +17,9 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const localStream = shallowRef<MediaStream | null>(null);
   const remoteStreams = shallowRef<Map<string, MediaStream>>(new Map());
   const audioElements = new Map<string, HTMLAudioElement>();
+  
+  const producerToUser = new Map<string, string>();
+  const consumerToProducer = new Map<string, string>();
 
   const initDevice = async (routerRtpCapabilities: any) => {
     try {
@@ -69,6 +72,9 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     });
     audioElements.clear();
     
+    producerToUser.clear();
+    consumerToProducer.clear();
+    
     remoteStreams.value.clear();
     voiceParticipants.value = [];
     activeVoiceChannelId.value = null;
@@ -98,8 +104,37 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       case 'user_left_voice':
         if (payload.channel_id === activeVoiceChannelId.value) {
           voiceParticipants.value = voiceParticipants.value.filter(id => id !== payload.user_id);
-          // We should also clean up their consumer/stream if we have it
-          // For simplicity, we'll just let the stream end
+          
+          const producersToRemove = new Set<string>();
+          for (const [prodId, userId] of producerToUser.entries()) {
+            if (userId === payload.user_id) {
+              producersToRemove.add(prodId);
+              producerToUser.delete(prodId);
+            }
+          }
+          
+          for (const [consId, prodId] of consumerToProducer.entries()) {
+            if (producersToRemove.has(prodId)) {
+              const consumer = consumers.value.get(consId);
+              if (consumer) {
+                consumer.close();
+                consumers.value.delete(consId);
+              }
+              
+              remoteStreams.value.delete(consId);
+              
+              const audio = audioElements.get(consId);
+              if (audio) {
+                audio.pause();
+                audio.srcObject = null;
+                audioElements.delete(consId);
+              }
+              
+              consumerToProducer.delete(consId);
+            }
+          }
+          
+          remoteStreams.value = new Map(remoteStreams.value);
         }
         break;
         
@@ -163,11 +198,16 @@ export const useWebRtcStore = defineStore('webrtc', () => {
             });
             callback();
           });
+          
+          // Request existing producers
+          chatStore.send('get_producers', { channel_id: payload.channel_id });
         }
         break;
         
       case 'new_producer':
         if (payload.channel_id !== activeVoiceChannelId.value || !device.value || !recvTransport.value) return;
+        
+        producerToUser.set(payload.producer_id, payload.user_id);
         
         chatStore.send('consume', {
           channel_id: payload.channel_id,
@@ -189,6 +229,19 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           });
           
           consumers.value.set(consumer.id, consumer);
+          consumerToProducer.set(consumer.id, payload.producer_id);
+          
+          consumer.on('producerclose', () => {
+            consumers.value.delete(consumer.id);
+            remoteStreams.value.delete(consumer.id);
+            remoteStreams.value = new Map(remoteStreams.value);
+            const audio = audioElements.get(consumer.id);
+            if (audio) {
+              audio.pause();
+              audio.srcObject = null;
+              audioElements.delete(consumer.id);
+            }
+          });
           
           const stream = new MediaStream();
           stream.addTrack(consumer.track);

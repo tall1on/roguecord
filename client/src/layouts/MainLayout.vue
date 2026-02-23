@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { RouterView } from 'vue-router'
-import { Hash, Volume2, Settings, Mic, Headphones, Plus, Link, PhoneOff } from 'lucide-vue-next'
+import { Hash, Volume2, Settings, Mic, Headphones, Plus, Link, PhoneOff, Trash2 } from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 
@@ -79,6 +79,14 @@ const handleAdminKeySubmit = () => {
     chatStore.submitAdminKey(adminKeyInput.value.trim())
     showAdminModal.value = false
     adminKeyInput.value = ''
+  }
+}
+
+const handleRemoveServer = () => {
+  if (chatStore.activeConnectionId) {
+    if (confirm('Are you sure you want to remove this server?')) {
+      chatStore.removeSavedConnection(chatStore.activeConnectionId)
+    }
   }
 }
 
@@ -314,9 +322,14 @@ const activeServer = computed(() => {
           class="h-12 px-4 flex items-center justify-between shadow-sm border-b border-[#1e1f22] hover:bg-[#35373c] cursor-pointer transition-colors shrink-0"
         >
           <h1 class="font-bold text-white truncate">{{ activeServer.name }}</h1>
-          <button @click.stop="showInviteModal = true" class="text-gray-400 hover:text-white" title="Invite People">
-            <Link class="w-4 h-4" />
-          </button>
+          <div class="flex items-center gap-3">
+            <button @click.stop="showInviteModal = true" class="text-gray-400 hover:text-white" title="Invite People">
+              <Link class="w-4 h-4" />
+            </button>
+            <button @click.stop="handleRemoveServer" class="text-gray-400 hover:text-red-500" title="Remove Server">
+              <Trash2 class="w-4 h-4" />
+            </button>
+          </div>
         </header>
         <header v-else class="h-12 px-4 flex items-center shadow-sm border-b border-[#1e1f22] shrink-0">
           <h1 class="font-bold text-white truncate">No Server Selected</h1>
