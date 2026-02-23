@@ -1,0 +1,427 @@
+import { ClientConnection, connectionManager } from './connectionManager';
+import {
+  createUser,
+  getUserByUsername,
+  getUserByPublicKey,
+  createCategory,
+  createChannel,
+  getCategories,
+  getChannels,
+  getChannelMessages,
+  createMessage,
+  getUserById,
+  updateUserRole
+} from '../models';
+import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
+import crypto from 'node:crypto';
+import { adminKey } from '../admin';
+
+export const handleMessage = async (client: ClientConnection, messageStr: string) => {
+  try {
+    const message = JSON.parse(messageStr);
+    const { type, payload } = message;
+    console.log(`[WS DEBUG] Handling message type: ${type} for user: ${client.userId || 'unauthenticated'}`);
+
+    switch (type) {
+      case 'auth:request':
+        await handleAuthRequest(client, payload);
+        break;
+      case 'auth:response':
+        await handleAuthResponse(client, payload);
+        break;
+      case 'get_channels':
+        await handleGetChannels(client);
+        break;
+      case 'create_channel':
+        await handleCreateChannel(client, payload);
+        break;
+      case 'get_messages':
+        await handleGetMessages(client, payload);
+        break;
+      case 'send_message':
+        await handleSendMessage(client, payload);
+        break;
+      case 'join_voice_channel':
+        await handleJoinVoiceChannel(client, payload);
+        break;
+      case 'create_webrtc_transport':
+        await handleCreateWebRtcTransport(client, payload);
+        break;
+      case 'connect_webrtc_transport':
+        await handleConnectWebRtcTransport(client, payload);
+        break;
+      case 'produce':
+        await handleProduce(client, payload);
+        break;
+      case 'consume':
+        await handleConsume(client, payload);
+        break;
+      case 'resume_consumer':
+        await handleResumeConsumer(client, payload);
+        break;
+      case 'leave_voice_channel':
+        await handleLeaveVoiceChannel(client, payload);
+        break;
+      case 'submit_admin_key':
+        await handleSubmitAdminKey(client, payload);
+        break;
+      default:
+        console.warn(`[WS DEBUG] Unknown message type: ${type}`);
+    }
+  } catch (error) {
+    console.error('[WS DEBUG] Error handling message:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Internal server error' } }));
+  }
+};
+
+const handleAuthRequest = async (client: ClientConnection, payload: { username: string, publicKey: string }) => {
+  const { username, publicKey } = payload;
+  if (!username || !publicKey) return;
+
+  let user = await getUserByPublicKey(publicKey);
+  if (!user) {
+    user = await createUser(username, publicKey);
+  }
+
+  const challenge = crypto.randomBytes(32).toString('hex');
+  client.challenge = challenge;
+  client.pendingPublicKey = publicKey;
+
+  client.ws.send(JSON.stringify({
+    type: 'auth:challenge',
+    payload: { challenge }
+  }));
+};
+
+const handleAuthResponse = async (client: ClientConnection, payload: { signature: string }) => {
+  const { signature } = payload;
+  if (!signature || !client.challenge || !client.pendingPublicKey) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid authentication state' } }));
+    return;
+  }
+
+  try {
+    const isValid = crypto.verify(
+      'SHA256',
+      Buffer.from(client.challenge),
+      {
+        key: client.pendingPublicKey,
+        format: 'pem',
+        type: 'spki',
+        dsaEncoding: 'ieee-p1363'
+      },
+      Buffer.from(signature, 'hex')
+    );
+
+    if (isValid) {
+      const user = await getUserByPublicKey(client.pendingPublicKey);
+      if (user) {
+        connectionManager.setUserId(client, user.id);
+        client.challenge = undefined;
+        client.pendingPublicKey = undefined;
+
+        client.ws.send(JSON.stringify({
+          type: 'authenticated',
+          payload: { user }
+        }));
+      } else {
+        client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
+      }
+    } else {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid signature' } }));
+    }
+  } catch (error) {
+    console.error('Error verifying signature:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Authentication failed' } }));
+  }
+};
+
+const handleGetChannels = async (client: ClientConnection) => {
+  if (!client.userId) return;
+
+  const categories = await getCategories();
+  const channels = await getChannels();
+
+  // Create default category and channel if none exist
+  if (categories.length === 0 && channels.length === 0) {
+    const category = await createCategory('Text Channels', 0);
+    const channel = await createChannel(category.id, 'general', 'text', 0);
+    categories.push(category);
+    channels.push(channel);
+  }
+
+  client.ws.send(JSON.stringify({
+    type: 'channels_list',
+    payload: { categories, channels }
+  }));
+};
+
+const handleCreateChannel = async (client: ClientConnection, payload: { category_id: string | null, name: string, type: 'text' | 'voice' }) => {
+  if (!client.userId) return;
+  const { category_id, name, type } = payload;
+  if (!name || !type) return;
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can create channels' } }));
+    return;
+  }
+
+  const channel = await createChannel(category_id, name, type);
+
+  // Broadcast to all authenticated users
+  connectionManager.broadcastToAuthenticated({
+    type: 'channel_created',
+    payload: { channel }
+  });
+};
+
+const handleGetMessages = async (client: ClientConnection, payload: { channel_id: string }) => {
+  if (!client.userId) return;
+  const { channel_id } = payload;
+  if (!channel_id) return;
+
+  // Ideally verify user has access to this channel's server
+  const messages = await getChannelMessages(channel_id);
+
+  client.ws.send(JSON.stringify({
+    type: 'messages_list',
+    payload: { channel_id, messages }
+  }));
+};
+
+const handleSendMessage = async (client: ClientConnection, payload: { channel_id: string, content: string }) => {
+  if (!client.userId) return;
+  const { channel_id, content } = payload;
+  if (!channel_id || !content) return;
+
+  const message = await createMessage(channel_id, client.userId, content);
+  const user = await getUserById(client.userId);
+  
+  const messageWithUser = {
+    ...message,
+    user
+  };
+
+  // Broadcast to all authenticated users (for simplicity, as requested)
+  // A better approach would be to broadcast only to users in the server
+  connectionManager.broadcastToAuthenticated({
+    type: 'new_message',
+    payload: { message: messageWithUser }
+  });
+};
+
+export const handleClientDisconnect = (client: ClientConnection) => {
+  if (!client.userId) return;
+
+  for (const [channel_id, room] of rooms.entries()) {
+    if (room.peers.has(client.userId)) {
+      handleLeaveVoiceChannel(client, { channel_id }).catch(console.error);
+    }
+  }
+};
+
+const handleJoinVoiceChannel = async (client: ClientConnection, payload: { channel_id: string }) => {
+  if (!client.userId) return;
+  const { channel_id } = payload;
+  if (!channel_id) return;
+
+  const room = await getOrCreateRoom(channel_id);
+  const peer = getPeer(room, client.userId);
+
+  // Notify others in the room
+  for (const [otherPeerId] of room.peers) {
+    if (otherPeerId !== client.userId) {
+      connectionManager.sendToUser(otherPeerId, {
+        type: 'user_joined_voice',
+        payload: { channel_id, user_id: client.userId }
+      });
+    }
+  }
+
+  client.ws.send(JSON.stringify({
+    type: 'voice_channel_joined',
+    payload: {
+      channel_id,
+      rtpCapabilities: room.router.rtpCapabilities,
+      users: Array.from(room.peers.keys())
+    }
+  }));
+};
+
+const handleCreateWebRtcTransport = async (client: ClientConnection, payload: { channel_id: string, direction: 'send' | 'recv' }) => {
+  if (!client.userId) return;
+  const { channel_id, direction } = payload;
+  
+  const room = rooms.get(channel_id);
+  if (!room) return;
+  
+  const peer = getPeer(room, client.userId);
+  const transport = await createWebRtcTransport(room.router);
+  
+  peer.transports.set(transport.id, transport);
+
+  client.ws.send(JSON.stringify({
+    type: 'webrtc_transport_created',
+    payload: {
+      channel_id,
+      direction,
+      transportOptions: {
+        id: transport.id,
+        iceParameters: transport.iceParameters,
+        iceCandidates: transport.iceCandidates,
+        dtlsParameters: transport.dtlsParameters,
+      }
+    }
+  }));
+};
+
+const handleConnectWebRtcTransport = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, dtlsParameters: any }) => {
+  if (!client.userId) return;
+  const { channel_id, transport_id, dtlsParameters } = payload;
+  
+  const room = rooms.get(channel_id);
+  if (!room) return;
+  
+  const peer = getPeer(room, client.userId);
+  const transport = peer.transports.get(transport_id);
+  if (!transport) return;
+
+  await transport.connect({ dtlsParameters });
+  
+  client.ws.send(JSON.stringify({
+    type: 'webrtc_transport_connected',
+    payload: { channel_id, transport_id }
+  }));
+};
+
+const handleProduce = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, kind: any, rtpParameters: any }) => {
+  if (!client.userId) return;
+  const { channel_id, transport_id, kind, rtpParameters } = payload;
+  
+  const room = rooms.get(channel_id);
+  if (!room) return;
+  
+  const peer = getPeer(room, client.userId);
+  const transport = peer.transports.get(transport_id);
+  if (!transport) return;
+
+  const producer = await transport.produce({ kind, rtpParameters });
+  peer.producers.set(producer.id, producer);
+
+  client.ws.send(JSON.stringify({
+    type: 'produced',
+    payload: { channel_id, id: producer.id }
+  }));
+
+  // Broadcast new producer to others
+  for (const [otherPeerId] of room.peers) {
+    if (otherPeerId !== client.userId) {
+      connectionManager.sendToUser(otherPeerId, {
+        type: 'new_producer',
+        payload: {
+          channel_id,
+          producer_id: producer.id,
+          user_id: client.userId
+        }
+      });
+    }
+  }
+};
+
+const handleConsume = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, producer_id: string, rtpCapabilities: any }) => {
+  if (!client.userId) return;
+  const { channel_id, transport_id, producer_id, rtpCapabilities } = payload;
+  
+  const room = rooms.get(channel_id);
+  if (!room) return;
+  
+  const peer = getPeer(room, client.userId);
+  const transport = peer.transports.get(transport_id);
+  if (!transport) return;
+
+  if (!room.router.canConsume({ producerId: producer_id, rtpCapabilities })) {
+    console.error('Cannot consume');
+    return;
+  }
+
+  const consumer = await transport.consume({
+    producerId: producer_id,
+    rtpCapabilities,
+    paused: true,
+  });
+
+  peer.consumers.set(consumer.id, consumer);
+
+  client.ws.send(JSON.stringify({
+    type: 'consumed',
+    payload: {
+      channel_id,
+      producer_id,
+      id: consumer.id,
+      kind: consumer.kind,
+      rtpParameters: consumer.rtpParameters,
+      type: consumer.type,
+      producerPaused: consumer.producerPaused
+    }
+  }));
+};
+
+const handleResumeConsumer = async (client: ClientConnection, payload: { channel_id: string, consumer_id: string }) => {
+  if (!client.userId) return;
+  const { channel_id, consumer_id } = payload;
+  
+  const room = rooms.get(channel_id);
+  if (!room) return;
+  
+  const peer = getPeer(room, client.userId);
+  const consumer = peer.consumers.get(consumer_id);
+  if (!consumer) return;
+
+  await consumer.resume();
+};
+
+const handleLeaveVoiceChannel = async (client: ClientConnection, payload: { channel_id: string }) => {
+  if (!client.userId) return;
+  const { channel_id } = payload;
+  
+  const room = rooms.get(channel_id);
+  if (!room) return;
+  
+  const peer = room.peers.get(client.userId);
+  if (peer) {
+    for (const transport of peer.transports.values()) {
+      transport.close();
+    }
+    room.peers.delete(client.userId);
+  }
+
+  // Notify others
+  for (const [otherPeerId] of room.peers) {
+    connectionManager.sendToUser(otherPeerId, {
+      type: 'user_left_voice',
+      payload: { channel_id, user_id: client.userId }
+    });
+  }
+
+  if (room.peers.size === 0) {
+    rooms.delete(channel_id);
+  }
+};
+
+const handleSubmitAdminKey = async (client: ClientConnection, payload: { key: string }) => {
+  if (!client.userId) return;
+  const { key } = payload;
+
+  if (key === adminKey) {
+    await updateUserRole(client.userId, 'admin');
+    const user = await getUserById(client.userId);
+    client.ws.send(JSON.stringify({
+      type: 'role_updated',
+      payload: { role: 'admin', user }
+    }));
+  } else {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid admin key' } }));
+  }
+};
+
