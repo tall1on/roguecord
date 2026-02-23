@@ -1,0 +1,453 @@
+<script setup lang="ts">
+import { ref, computed, onMounted } from 'vue'
+import { RouterView } from 'vue-router'
+import { Hash, Volume2, Settings, Mic, Headphones, Plus, Link, PhoneOff } from 'lucide-vue-next'
+import { useChatStore } from '../stores/chat'
+import { useWebRtcStore } from '../stores/webrtc'
+
+const chatStore = useChatStore()
+const webrtcStore = useWebRtcStore()
+
+onMounted(() => {
+  const lastUsedServer = localStorage.getItem('lastUsedServer')
+  if (lastUsedServer) {
+    chatStore.connect(lastUsedServer)
+  }
+})
+
+const usernameInput = ref('')
+const showCreateServerModal = ref(false)
+const newServerName = ref('')
+const newServerAddress = ref('')
+
+const showCreateChannelModal = ref(false)
+const newChannelName = ref('')
+const newChannelType = ref<'text' | 'voice'>('text')
+const selectedCategoryId = ref<string | null>(null)
+
+const showInviteModal = ref(false)
+const inviteLink = computed(() => {
+  const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
+  const host = window.location.hostname || 'localhost'
+  const port = window.location.port ? `:${window.location.port}` : ''
+  return `${protocol}//${host}${port}`
+})
+
+const showAdminModal = ref(false)
+const adminKeyInput = ref('')
+
+const login = () => {
+  if (usernameInput.value.trim()) {
+    chatStore.saveLocalUsername(usernameInput.value.trim())
+  }
+}
+
+const handleCreateServer = () => {
+  if (newServerName.value.trim() && newServerAddress.value.trim()) {
+    chatStore.addSavedConnection(newServerName.value.trim(), newServerAddress.value.trim())
+    showCreateServerModal.value = false
+    newServerName.value = ''
+    newServerAddress.value = ''
+  }
+}
+
+const openCreateChannelModal = (categoryId: string | null) => {
+  selectedCategoryId.value = categoryId
+  showCreateChannelModal.value = true
+}
+
+const handleCreateChannel = () => {
+  if (newChannelName.value.trim()) {
+    chatStore.createChannel(
+      selectedCategoryId.value,
+      newChannelName.value.trim(),
+      newChannelType.value
+    )
+    showCreateChannelModal.value = false
+    newChannelName.value = ''
+    newChannelType.value = 'text'
+  }
+}
+
+const copyInviteLink = () => {
+  navigator.clipboard.writeText(inviteLink.value)
+  showInviteModal.value = false
+}
+
+const handleAdminKeySubmit = () => {
+  if (adminKeyInput.value.trim()) {
+    chatStore.submitAdminKey(adminKeyInput.value.trim())
+    showAdminModal.value = false
+    adminKeyInput.value = ''
+  }
+}
+
+const handleChannelClick = (channel: any) => {
+  if (channel.type === 'text') {
+    chatStore.setActiveChannel(channel.id)
+  } else if (channel.type === 'voice') {
+    webrtcStore.joinVoiceChannel(channel.id)
+  }
+}
+
+const activeServer = computed(() => {
+  if (chatStore.activeConnectionId) {
+    const connection = chatStore.savedConnections.find(c => c.id === chatStore.activeConnectionId)
+    if (connection) {
+      return { name: connection.name }
+    }
+  }
+  return { name: 'RogueCord Server' }
+})
+</script>
+
+<template>
+  <div class="flex h-screen w-full overflow-hidden bg-[#313338] text-[#dbdee1] font-sans">
+    
+    <!-- Login Modal -->
+    <div v-if="!chatStore.localUsername" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+      <div class="bg-[#313338] p-8 rounded-lg shadow-xl w-96 text-center">
+        <h2 class="text-2xl font-bold text-white mb-2">Welcome back!</h2>
+        <p class="text-gray-400 mb-6">We're so excited to see you again!</p>
+        
+        <div class="text-left mb-4">
+          <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Username</label>
+          <input 
+            v-model="usernameInput" 
+            @keyup.enter="login"
+            type="text" 
+            class="w-full bg-[#1e1f22] text-white p-2.5 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            placeholder="Enter your username"
+          />
+        </div>
+        
+        <button 
+          @click="login"
+          class="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-semibold py-2.5 rounded transition-colors"
+        >
+          Log In
+        </button>
+      </div>
+    </div>
+
+    <!-- Create Server Modal -->
+    <div v-if="showCreateServerModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+      <div class="bg-[#313338] p-6 rounded-lg shadow-xl w-96">
+        <h2 class="text-2xl font-bold text-white mb-4 text-center">Add a Connection</h2>
+        <p class="text-gray-400 mb-6 text-center text-sm">Connect to a new server.</p>
+        
+        <div class="mb-4">
+          <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Connection Name</label>
+          <input 
+            v-model="newServerName" 
+            type="text" 
+            class="w-full bg-[#1e1f22] text-white p-2.5 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            placeholder="My Server"
+          />
+        </div>
+
+        <div class="mb-6">
+          <label class="block text-xs font-bold text-gray-300 uppercase mb-2">WebSocket Address</label>
+          <input 
+            v-model="newServerAddress" 
+            @keyup.enter="handleCreateServer"
+            type="text" 
+            class="w-full bg-[#1e1f22] text-white p-2.5 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            placeholder="wss://localhost:3000"
+          />
+        </div>
+        
+        <div class="flex justify-between items-center">
+          <button @click="showCreateServerModal = false" class="text-gray-400 hover:text-white text-sm">Back</button>
+          <button @click="handleCreateServer" class="bg-indigo-500 hover:bg-indigo-600 text-white px-6 py-2 rounded font-medium">Add</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Create Channel Modal -->
+    <div v-if="showCreateChannelModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+      <div class="bg-[#313338] p-6 rounded-lg shadow-xl w-96">
+        <h2 class="text-xl font-bold text-white mb-4">Create Channel</h2>
+        
+        <div class="mb-4">
+          <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Channel Type</label>
+          <div class="space-y-2">
+            <label class="flex items-center p-3 bg-[#2b2d31] rounded cursor-pointer hover:bg-[#3f4147]">
+              <input type="radio" v-model="newChannelType" value="text" class="mr-3 text-indigo-500 focus:ring-indigo-500 bg-[#1e1f22] border-gray-600">
+              <Hash class="w-5 h-5 text-gray-400 mr-2" />
+              <div>
+                <div class="text-white font-medium">Text</div>
+                <div class="text-xs text-gray-400">Send messages, images, GIFs, emoji, opinions, and puns</div>
+              </div>
+            </label>
+            <label class="flex items-center p-3 bg-[#2b2d31] rounded cursor-pointer hover:bg-[#3f4147]">
+              <input type="radio" v-model="newChannelType" value="voice" class="mr-3 text-indigo-500 focus:ring-indigo-500 bg-[#1e1f22] border-gray-600">
+              <Volume2 class="w-5 h-5 text-gray-400 mr-2" />
+              <div>
+                <div class="text-white font-medium">Voice</div>
+                <div class="text-xs text-gray-400">Hang out together with voice, video, and screen share</div>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <div class="mb-6">
+          <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Channel Name</label>
+          <div class="relative">
+            <Hash v-if="newChannelType === 'text'" class="w-4 h-4 text-gray-400 absolute left-3 top-3" />
+            <Volume2 v-else class="w-4 h-4 text-gray-400 absolute left-3 top-3" />
+            <input 
+              v-model="newChannelName" 
+              @keyup.enter="handleCreateChannel"
+              type="text" 
+              class="w-full bg-[#1e1f22] text-white p-2.5 pl-9 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="new-channel"
+            />
+          </div>
+        </div>
+        
+        <div class="flex justify-end gap-4">
+          <button @click="showCreateChannelModal = false" class="text-gray-400 hover:text-white text-sm">Cancel</button>
+          <button @click="handleCreateChannel" class="bg-indigo-500 hover:bg-indigo-600 text-white px-6 py-2 rounded font-medium">Create Channel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Invite Modal -->
+    <div v-if="showInviteModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+      <div class="bg-[#313338] p-6 rounded-lg shadow-xl w-96">
+        <h2 class="text-xl font-bold text-white mb-2">Invite friends to {{ activeServer?.name || 'Server' }}</h2>
+        <p class="text-gray-400 mb-4 text-sm">Share this link with others to grant them access to this server.</p>
+        
+        <div class="mb-6">
+          <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Server Invite Link</label>
+          <div class="flex bg-[#1e1f22] rounded p-1">
+            <input 
+              type="text" 
+              readonly
+              :value="inviteLink"
+              class="w-full bg-transparent text-white p-2 focus:outline-none text-sm"
+            />
+            <button @click="copyInviteLink" class="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-1.5 rounded text-sm font-medium transition-colors">
+              Copy
+            </button>
+          </div>
+        </div>
+        
+        <div class="flex justify-end">
+          <button @click="showInviteModal = false" class="text-gray-400 hover:text-white text-sm">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Admin Key Modal -->
+    <div v-if="showAdminModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+      <div class="bg-[#313338] p-6 rounded-lg shadow-xl w-96">
+        <h2 class="text-xl font-bold text-white mb-4">Enter Admin Key</h2>
+        
+        <div class="mb-6">
+          <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Admin Key</label>
+          <input 
+            v-model="adminKeyInput" 
+            @keyup.enter="handleAdminKeySubmit"
+            type="password" 
+            class="w-full bg-[#1e1f22] text-white p-2.5 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            placeholder="Enter admin key"
+          />
+        </div>
+        
+        <div class="flex justify-end gap-4">
+          <button @click="showAdminModal = false" class="text-gray-400 hover:text-white text-sm">Cancel</button>
+          <button @click="handleAdminKeySubmit" class="bg-indigo-500 hover:bg-indigo-600 text-white px-6 py-2 rounded font-medium">Submit</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Server List Sidebar (Leftmost) -->
+    <nav class="w-[72px] bg-[#1e1f22] flex flex-col items-center py-3 gap-2 shrink-0 overflow-y-auto no-scrollbar">
+      <!-- Direct Messages Icon -->
+      <div class="w-12 h-12 rounded-[24px] hover:rounded-[16px] bg-[#313338] hover:bg-indigo-500 text-white flex items-center justify-center transition-all duration-200 cursor-pointer group">
+        <svg class="w-7 h-7 text-gray-300 group-hover:text-white" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M19.73 4.87a18.2 18.2 0 0 0-4.6-1.44c-.21.4-.4.8-.58 1.21-1.69-.25-3.4-.25-5.1 0-.18-.41-.37-.82-.59-1.2-1.6.27-3.14.75-4.6 1.43A19.04 19.04 0 0 0 1.96 19.58c2.09 1.52 4.1 2.44 6.09 3.04.5-.66.95-1.36 1.35-2.09-1.08-.4-2.1-.89-3.06-1.46.26-.19.51-.39.75-.6 3.9 1.79 8.18 1.79 12.06 0 .24.21.49.41.75.6-.96.57-1.98 1.06-3.06 1.46.4.73.85 1.43 1.35 2.09 2-.6 4.01-1.52 6.1-3.04a19.02 19.02 0 0 0-2.32-14.71zM8.52 16.28c-1.21 0-2.21-1.08-2.21-2.4 0-1.33.98-2.4 2.21-2.4 1.23 0 2.23 1.07 2.21 2.4 0 1.32-.98 2.4-2.21 2.4zm6.96 0c-1.21 0-2.21-1.08-2.21-2.4 0-1.33.98-2.4 2.21-2.4 1.23 0 2.23 1.07 2.21 2.4 0 1.32-.98 2.4-2.21 2.4z"/>
+        </svg>
+      </div>
+      
+      <div class="w-8 h-[2px] bg-[#35363c] rounded-full my-1"></div>
+      
+      <!-- Server Icons -->
+      <div 
+        v-for="connection in chatStore.savedConnections" 
+        :key="connection.id"
+        @click="chatStore.connect(connection.address)"
+        class="relative flex items-center justify-center w-full group cursor-pointer"
+      >
+        <!-- Active Indicator -->
+        <div 
+          class="absolute left-0 w-1 bg-white rounded-r-full transition-all duration-200"
+          :class="chatStore.activeConnectionId === connection.id ? 'h-10' : 'h-2 opacity-0 group-hover:opacity-100 group-hover:h-5'"
+        ></div>
+        
+        <div 
+          class="w-12 h-12 flex items-center justify-center transition-all duration-200 font-bold text-lg overflow-hidden"
+          :class="chatStore.activeConnectionId === connection.id ? 'rounded-[16px] bg-indigo-500 text-white' : 'rounded-[24px] hover:rounded-[16px] bg-[#313338] hover:bg-indigo-500 text-gray-100'"
+        >
+          <img v-if="connection.iconUrl" :src="connection.iconUrl" alt="Server Icon" class="w-full h-full object-cover" />
+          <span v-else>{{ connection.name.charAt(0).toUpperCase() }}</span>
+        </div>
+      </div>
+      
+      <!-- Add Server -->
+      <div 
+        @click="showCreateServerModal = true"
+        class="w-12 h-12 rounded-[24px] hover:rounded-[16px] bg-[#313338] hover:bg-green-500 text-green-500 hover:text-white flex items-center justify-center transition-all duration-200 cursor-pointer mt-2"
+      >
+        <Plus class="w-6 h-6" />
+      </div>
+    </nav>
+
+    <!-- Channel List Sidebar -->
+    <aside class="w-60 bg-[#2b2d31] flex flex-col shrink-0">
+      <template v-if="chatStore.activeConnectionId">
+        <!-- Server Header -->
+        <header 
+          v-if="activeServer"
+          class="h-12 px-4 flex items-center justify-between shadow-sm border-b border-[#1e1f22] hover:bg-[#35373c] cursor-pointer transition-colors shrink-0"
+        >
+          <h1 class="font-bold text-white truncate">{{ activeServer.name }}</h1>
+          <button @click.stop="showInviteModal = true" class="text-gray-400 hover:text-white" title="Invite People">
+            <Link class="w-4 h-4" />
+          </button>
+        </header>
+        <header v-else class="h-12 px-4 flex items-center shadow-sm border-b border-[#1e1f22] shrink-0">
+          <h1 class="font-bold text-white truncate">No Server Selected</h1>
+        </header>
+
+        <!-- Channels -->
+        <div class="flex-1 overflow-y-auto p-2 space-y-[2px] custom-scrollbar">
+          <template v-if="true">
+          <div v-for="category in chatStore.activeServerCategories" :key="category.id">
+            <!-- Category Header -->
+            <div class="pt-4 pb-1 px-2 flex items-center justify-between group cursor-pointer">
+              <div class="flex items-center text-xs font-semibold text-gray-400 group-hover:text-gray-300 uppercase tracking-wider">
+                <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                {{ category.name }}
+              </div>
+              <button v-if="chatStore.currentUserRole === 'admin'" @click.stop="openCreateChannelModal(category.id)" class="text-gray-400 hover:text-gray-200 opacity-0 group-hover:opacity-100">
+                <Plus class="w-4 h-4" />
+              </button>
+            </div>
+            
+            <!-- Channels in Category -->
+            <div 
+              v-for="channel in chatStore.activeServerChannels.filter(c => c.category_id === category.id)" 
+              :key="channel.id"
+            >
+              <div
+                @click="handleChannelClick(channel)"
+                class="flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
+                :class="(channel.type === 'text' && chatStore.activeChannelId === channel.id) || (channel.type === 'voice' && webrtcStore.activeVoiceChannelId === channel.id) ? 'bg-[#404249] text-white' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
+              >
+                <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
+                <Volume2 v-else class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
+                <span class="truncate font-medium">{{ channel.name }}</span>
+              </div>
+              
+              <!-- Voice Participants -->
+              <div v-if="channel.type === 'voice' && webrtcStore.activeVoiceChannelId === channel.id" class="pl-8 pr-2 pb-2 space-y-1">
+                <div v-for="userId in webrtcStore.voiceParticipants" :key="userId" class="flex items-center text-gray-300 text-sm">
+                  <div class="w-6 h-6 rounded-full bg-indigo-500 mr-2 flex items-center justify-center text-xs font-bold text-white">
+                    <!-- We don't have the username easily accessible here without a user store, so we'll just show a generic avatar or first letter if we can find it -->
+                    U
+                  </div>
+                  <span class="truncate">User</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Uncategorized Channels -->
+          <div v-if="chatStore.activeServerChannels.filter(c => !c.category_id).length > 0">
+            <div 
+              v-for="channel in chatStore.activeServerChannels.filter(c => !c.category_id)" 
+              :key="channel.id"
+            >
+              <div
+                @click="handleChannelClick(channel)"
+                class="flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
+                :class="(channel.type === 'text' && chatStore.activeChannelId === channel.id) || (channel.type === 'voice' && webrtcStore.activeVoiceChannelId === channel.id) ? 'bg-[#404249] text-white' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
+              >
+                <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
+                <Volume2 v-else class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
+                <span class="truncate font-medium">{{ channel.name }}</span>
+              </div>
+              
+              <!-- Voice Participants -->
+              <div v-if="channel.type === 'voice' && webrtcStore.activeVoiceChannelId === channel.id" class="pl-8 pr-2 pb-2 space-y-1">
+                <div v-for="userId in webrtcStore.voiceParticipants" :key="userId" class="flex items-center text-gray-300 text-sm">
+                  <div class="w-6 h-6 rounded-full bg-indigo-500 mr-2 flex items-center justify-center text-xs font-bold text-white">
+                    U
+                  </div>
+                  <span class="truncate">User</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+      </template>
+      <template v-else>
+        <div class="flex-1 flex items-center justify-center text-gray-500 text-sm p-4 text-center">
+          Select a connection to view channels
+        </div>
+      </template>
+
+      <!-- Voice Connection Status -->
+      <div v-if="webrtcStore.activeVoiceChannelId" class="h-[52px] bg-[#292b2f] px-2 flex items-center shrink-0 border-b border-[#1e1f22]">
+        <div class="flex items-center flex-1 min-w-0">
+          <div class="text-green-500 mr-2">
+            <Volume2 class="w-5 h-5" />
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="text-sm font-semibold text-green-500 truncate">Voice Connected</div>
+            <div class="text-xs text-gray-400 truncate">
+              {{ chatStore.activeServerChannels.find(c => c.id === webrtcStore.activeVoiceChannelId)?.name || 'Voice Channel' }}
+            </div>
+          </div>
+        </div>
+        <button @click="webrtcStore.leaveVoiceChannel()" class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] text-gray-400 hover:text-red-400 transition-colors" title="Disconnect">
+          <PhoneOff class="w-5 h-5" />
+        </button>
+      </div>
+
+      <!-- User Panel -->
+      <div class="h-[52px] bg-[#232428] px-2 flex items-center shrink-0" v-if="chatStore.currentUser">
+        <div class="flex items-center hover:bg-[#3f4147] p-1 rounded cursor-pointer flex-1 min-w-0">
+          <div class="w-8 h-8 rounded-full bg-indigo-500 relative shrink-0 flex items-center justify-center text-white font-bold">
+            {{ chatStore.currentUser.username.charAt(0).toUpperCase() }}
+            <div class="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-[#232428]"></div>
+          </div>
+          <div class="ml-2 flex-1 min-w-0">
+            <div class="text-sm font-semibold text-white truncate">{{ chatStore.currentUser.username }}</div>
+            <div class="text-xs text-gray-400 truncate">Online</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-1 ml-1">
+          <button @click="showAdminModal = true" class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] text-gray-400 hover:text-gray-300" title="Admin Access">
+            <Settings class="w-5 h-5" />
+          </button>
+          <button class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] text-gray-400 hover:text-gray-300">
+            <Mic class="w-5 h-5" />
+          </button>
+          <button class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] text-gray-400 hover:text-gray-300">
+            <Headphones class="w-5 h-5" />
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="flex-1 flex flex-col min-w-0 bg-[#313338]">
+      <RouterView />
+    </main>
+  </div>
+</template>
