@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { RouterView } from 'vue-router'
 import { Hash, Volume2, Settings, Mic, Headphones, Plus, Link, PhoneOff, Trash2 } from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
@@ -9,6 +9,13 @@ const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
 
 const showVoiceStats = ref(false)
+const voiceStatsContainerRef = ref<HTMLElement | null>(null)
+
+const handleClickOutside = (event: MouseEvent) => {
+  if (showVoiceStats.value && voiceStatsContainerRef.value && !voiceStatsContainerRef.value.contains(event.target as Node)) {
+    showVoiceStats.value = false
+  }
+}
 
 watch(() => webrtcStore.activeVoiceChannelId, (newVal) => {
   if (!newVal) {
@@ -17,10 +24,15 @@ watch(() => webrtcStore.activeVoiceChannelId, (newVal) => {
 })
 
 onMounted(() => {
+  document.addEventListener('click', handleClickOutside)
   const lastUsedServer = localStorage.getItem('lastUsedServer')
   if (lastUsedServer) {
     chatStore.connect(lastUsedServer)
   }
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', handleClickOutside)
 })
 
 const usernameInput = ref('')
@@ -123,15 +135,18 @@ const groupedMembers = computed(() => {
   // Group online by role
   const onlineByRole: Record<string, any[]> = {}
   online.forEach(u => {
-    const role = u.role || 'user'
+    let role = u.role || 'user'
+    // Format role name (e.g., 'admin' -> 'Admins', 'user' -> 'Users')
+    role = role.charAt(0).toUpperCase() + role.slice(1) + 's'
+    
     if (!onlineByRole[role]) onlineByRole[role] = []
     onlineByRole[role].push(u)
   })
 
-  // Sort roles: admin first, then others
+  // Sort roles: Admins first, then others
   const sortedRoles = Object.keys(onlineByRole).sort((a, b) => {
-    if (a === 'admin') return -1;
-    if (b === 'admin') return 1;
+    if (a === 'Admins') return -1;
+    if (b === 'Admins') return 1;
     return a.localeCompare(b);
   });
 
@@ -454,7 +469,7 @@ const groupedMembers = computed(() => {
       </template>
 
       <!-- Voice Connection Status -->
-      <div v-if="webrtcStore.activeVoiceChannelId" class="relative">
+      <div v-if="webrtcStore.activeVoiceChannelId" class="relative" ref="voiceStatsContainerRef">
         <div class="h-[52px] bg-[#292b2f] px-2 flex items-center shrink-0 border-b border-[#1e1f22] cursor-pointer hover:bg-[#35373c] transition-colors" @click="showVoiceStats = !showVoiceStats">
           <div class="flex items-center flex-1 min-w-0">
             <div class="mr-2" :class="{
@@ -574,7 +589,7 @@ const groupedMembers = computed(() => {
                   <div class="absolute bottom-0 right-0 w-3.5 h-3.5 bg-green-500 rounded-full border-2 border-[#2b2d31] group-hover:border-[#3f4147]"></div>
                 </div>
                 <div class="flex-1 min-w-0">
-                  <div class="text-sm font-medium text-gray-300 truncate group-hover:text-gray-100">{{ user.username }}</div>
+                  <div class="text-sm font-medium truncate group-hover:text-gray-100" :class="user.role === 'admin' ? 'text-red-500' : 'text-gray-300'">{{ user.username }}</div>
                 </div>
               </div>
             </div>
@@ -597,7 +612,7 @@ const groupedMembers = computed(() => {
                   <div class="absolute bottom-0 right-0 w-3.5 h-3.5 bg-gray-500 rounded-full border-2 border-[#2b2d31] group-hover:border-[#3f4147]"></div>
                 </div>
                 <div class="flex-1 min-w-0">
-                  <div class="text-sm font-medium text-gray-400 truncate group-hover:text-gray-300">{{ user.username }}</div>
+                  <div class="text-sm font-medium truncate group-hover:text-gray-300" :class="user.role === 'admin' ? 'text-red-500' : 'text-gray-400'">{{ user.username }}</div>
                 </div>
               </div>
             </div>
