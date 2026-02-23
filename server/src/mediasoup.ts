@@ -93,11 +93,16 @@ export function getPeer(room: Room, peerId: string): Peer {
 }
 
 export async function createWebRtcTransport(router: Router): Promise<WebRtcTransport> {
+  // For remote servers, you MUST set MEDIASOUP_ANNOUNCED_IP to your public IP or domain name.
+  // MEDIASOUP_LISTEN_IP defaults to 0.0.0.0 to listen on all interfaces.
+  const listenIp = process.env.MEDIASOUP_LISTEN_IP || '0.0.0.0';
+  const announcedIp = process.env.MEDIASOUP_ANNOUNCED_IP || '127.0.0.1';
+
   return await router.createWebRtcTransport({
     listenIps: [
       {
-        ip: '127.0.0.1', // For local development
-        announcedIp: undefined,
+        ip: listenIp,
+        announcedIp: announcedIp,
       },
     ],
     enableUdp: true,
