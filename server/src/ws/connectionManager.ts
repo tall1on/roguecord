@@ -13,15 +13,18 @@ class ConnectionManager {
   addClient(ws: WebSocket): ClientConnection {
     const client: ClientConnection = { ws };
     this.clients.add(client);
+    console.log(`[WS DEBUG] Client added. Total clients: ${this.clients.size}`);
     return client;
   }
 
   removeClient(client: ClientConnection) {
     this.clients.delete(client);
+    console.log(`[WS DEBUG] Client removed. Total clients: ${this.clients.size}`);
   }
 
   setUserId(client: ClientConnection, userId: string) {
     client.userId = userId;
+    console.log(`[WS DEBUG] Client authenticated as user: ${userId}`);
   }
 
   broadcast(message: any) {

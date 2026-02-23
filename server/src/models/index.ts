@@ -61,86 +61,40 @@ export const updateUserRole = async (id: string, role: string): Promise<void> =>
   await dbRun('UPDATE users SET role = ? WHERE id = ?', [role, id]);
 };
 
-// --- Servers ---
-export interface Server {
-  id: string;
-  name: string;
-  icon_url: string | null;
-  owner_id: string;
-  created_at: string;
-}
-
-export const createServer = async (name: string, owner_id: string, icon_url: string | null = null): Promise<Server> => {
-  const id = crypto.randomUUID();
-  await dbRun('INSERT INTO servers (id, name, icon_url, owner_id) VALUES (?, ?, ?, ?)', [id, name, icon_url, owner_id]);
-  return (await dbGet<Server>('SELECT * FROM servers WHERE id = ?', [id]))!;
-};
-
-export const getServerById = async (id: string): Promise<Server | undefined> => {
-  return dbGet<Server>('SELECT * FROM servers WHERE id = ?', [id]);
-};
-
-// --- Server Members ---
-export interface ServerMember {
-  server_id: string;
-  user_id: string;
-  joined_at: string;
-}
-
-export const addServerMember = async (server_id: string, user_id: string): Promise<void> => {
-  await dbRun('INSERT OR IGNORE INTO server_members (server_id, user_id) VALUES (?, ?)', [server_id, user_id]);
-};
-
-export const getServerMembers = async (server_id: string): Promise<User[]> => {
-  return dbAll<User>(
-    'SELECT u.* FROM users u JOIN server_members sm ON u.id = sm.user_id WHERE sm.server_id = ?',
-    [server_id]
-  );
-};
-
-export const getUserServers = async (user_id: string): Promise<Server[]> => {
-  return dbAll<Server>(
-    'SELECT s.* FROM servers s JOIN server_members sm ON s.id = sm.server_id WHERE sm.user_id = ?',
-    [user_id]
-  );
-};
-
 // --- Categories ---
 export interface Category {
   id: string;
-  server_id: string;
   name: string;
   position: number;
 }
 
-export const createCategory = async (server_id: string, name: string, position: number = 0): Promise<Category> => {
+export const createCategory = async (name: string, position: number = 0): Promise<Category> => {
   const id = crypto.randomUUID();
-  await dbRun('INSERT INTO categories (id, server_id, name, position) VALUES (?, ?, ?, ?)', [id, server_id, name, position]);
+  await dbRun('INSERT INTO categories (id, name, position) VALUES (?, ?, ?)', [id, name, position]);
   return (await dbGet<Category>('SELECT * FROM categories WHERE id = ?', [id]))!;
 };
 
-export const getServerCategories = async (server_id: string): Promise<Category[]> => {
-  return dbAll<Category>('SELECT * FROM categories WHERE server_id = ? ORDER BY position ASC', [server_id]);
+export const getCategories = async (): Promise<Category[]> => {
+  return dbAll<Category>('SELECT * FROM categories ORDER BY position ASC');
 };
 
 // --- Channels ---
 export interface Channel {
   id: string;
-  server_id: string;
   category_id: string | null;
   name: string;
   type: 'text' | 'voice';
   position: number;
 }
 
-export const createChannel = async (server_id: string, category_id: string | null, name: string, type: 'text' | 'voice', position: number = 0): Promise<Channel> => {
+export const createChannel = async (category_id: string | null, name: string, type: 'text' | 'voice', position: number = 0): Promise<Channel> => {
   const id = crypto.randomUUID();
-  await dbRun('INSERT INTO channels (id, server_id, category_id, name, type, position) VALUES (?, ?, ?, ?, ?, ?)', [id, server_id, category_id, name, type, position]);
+  await dbRun('INSERT INTO channels (id, category_id, name, type, position) VALUES (?, ?, ?, ?, ?)', [id, category_id, name, type, position]);
   return (await dbGet<Channel>('SELECT * FROM channels WHERE id = ?', [id]))!;
 };
 
-export const getServerChannels = async (server_id: string): Promise<Channel[]> => {
-  return dbAll<Channel>('SELECT * FROM channels WHERE server_id = ? ORDER BY position ASC', [server_id]);
+export const getChannels = async (): Promise<Channel[]> => {
+  return dbAll<Channel>('SELECT * FROM channels ORDER BY position ASC');
 };
 
 // --- Messages ---

@@ -7,8 +7,8 @@ const messageInput = ref('')
 const messagesContainer = ref<HTMLElement | null>(null)
 
 const activeChannel = computed(() => {
-  if (!chatStore.activeServerId || !chatStore.activeChannelId) return null
-  const channels = chatStore.channels[chatStore.activeServerId] || []
+  if (!chatStore.activeChannelId) return null
+  const channels = chatStore.channels || []
   return channels.find(c => c.id === chatStore.activeChannelId)
 })
 
