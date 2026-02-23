@@ -64,7 +64,7 @@ watch(() => chatStore.activeChannelMessages, async () => {
           </div>
           <div>
             <div class="flex items-baseline gap-2">
-              <span class="font-medium text-white hover:underline cursor-pointer">{{ message.user?.username || 'Unknown User' }}</span>
+              <span class="font-medium hover:underline cursor-pointer" :class="message.user?.role === 'admin' ? 'text-red-500' : 'text-white'">{{ message.user?.username || 'Unknown User' }}</span>
               <span class="text-xs text-gray-400">{{ formatTime(message.created_at) }}</span>
             </div>
             <p class="text-gray-300 whitespace-pre-wrap break-words">{{ message.content }}</p>

@@ -10,7 +10,8 @@ import {
   getChannelMessages,
   createMessage,
   getUserById,
-  updateUserRole
+  updateUserRole,
+  getUsers
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -62,8 +63,14 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'leave_voice_channel':
         await handleLeaveVoiceChannel(client, payload);
         break;
+      case 'get_producers':
+        await handleGetProducers(client, payload);
+        break;
       case 'submit_admin_key':
         await handleSubmitAdminKey(client, payload);
+        break;
+      case 'voice_state_update':
+        await handleVoiceStateUpdate(client, payload);
         break;
       default:
         console.warn(`[WS DEBUG] Unknown message type: ${type}`);
@@ -124,6 +131,25 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
           type: 'authenticated',
           payload: { user }
         }));
+
+        // Send full member list to the newly authenticated user
+        const allUsers = await getUsers();
+        const onlineUserIds = connectionManager.getOnlineUserIds();
+        client.ws.send(JSON.stringify({
+          type: 'member_list',
+          payload: {
+            members: allUsers,
+            onlineUserIds
+          }
+        }));
+
+        // Broadcast to others that this user is online, if they weren't already
+        if (!connectionManager.isUserOnline(user.id, client)) {
+          connectionManager.broadcastToAuthenticated({
+            type: 'user_online',
+            payload: { user }
+          });
+        }
       } else {
         client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
       }
@@ -153,6 +179,23 @@ const handleGetChannels = async (client: ClientConnection) => {
   client.ws.send(JSON.stringify({
     type: 'channels_list',
     payload: { categories, channels }
+  }));
+
+  const voiceParticipants: Record<string, any[]> = {};
+  for (const [channelId, room] of rooms.entries()) {
+    const users = [];
+    for (const [userId, peer] of room.peers.entries()) {
+      const user = await getUserById(userId);
+      if (user) {
+        users.push({ id: user.id, username: user.username, avatar_url: user.avatar_url, isMuted: peer.isMuted, isDeafened: peer.isDeafened });
+      }
+    }
+    voiceParticipants[channelId] = users;
+  }
+
+  client.ws.send(JSON.stringify({
+    type: 'voice_participants_list',
+    payload: { participants: voiceParticipants }
   }));
 };
 
@@ -219,23 +262,44 @@ export const handleClientDisconnect = (client: ClientConnection) => {
       handleLeaveVoiceChannel(client, { channel_id }).catch(console.error);
     }
   }
+
+  // Broadcast to others that this user is offline, only if they have no other active connections
+  if (!connectionManager.isUserOnline(client.userId, client)) {
+    connectionManager.broadcastToAuthenticated({
+      type: 'user_offline',
+      payload: { userId: client.userId }
+    });
+  }
 };
 
-const handleJoinVoiceChannel = async (client: ClientConnection, payload: { channel_id: string }) => {
+const handleJoinVoiceChannel = async (client: ClientConnection, payload: { channel_id: string, isMuted?: boolean, isDeafened?: boolean }) => {
   if (!client.userId) return;
-  const { channel_id } = payload;
+  const { channel_id, isMuted = false, isDeafened = false } = payload;
   if (!channel_id) return;
 
   const room = await getOrCreateRoom(channel_id);
   const peer = getPeer(room, client.userId);
+  
+  peer.isMuted = isMuted;
+  peer.isDeafened = isDeafened;
 
-  // Notify others in the room
-  for (const [otherPeerId] of room.peers) {
-    if (otherPeerId !== client.userId) {
-      connectionManager.sendToUser(otherPeerId, {
-        type: 'user_joined_voice',
-        payload: { channel_id, user_id: client.userId }
-      });
+  const user = await getUserById(client.userId);
+  if (!user) return;
+
+  // Notify all authenticated users
+  connectionManager.broadcastToAuthenticated({
+    type: 'user_joined_voice',
+    payload: { 
+      channel_id, 
+      user: { id: user.id, username: user.username, avatar_url: user.avatar_url, isMuted: peer.isMuted, isDeafened: peer.isDeafened } 
+    }
+  });
+
+  const users = [];
+  for (const [userId, p] of room.peers.entries()) {
+    const u = await getUserById(userId);
+    if (u) {
+      users.push({ id: u.id, username: u.username, avatar_url: u.avatar_url, isMuted: p.isMuted, isDeafened: p.isDeafened });
     }
   }
 
@@ -244,7 +308,7 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
     payload: {
       channel_id,
       rtpCapabilities: room.router.rtpCapabilities,
-      users: Array.from(room.peers.keys())
+      users
     }
   }));
 };
@@ -308,6 +372,10 @@ const handleProduce = async (client: ClientConnection, payload: { channel_id: st
 
   const producer = await transport.produce({ kind, rtpParameters });
   peer.producers.set(producer.id, producer);
+
+  if (peer.isMuted || peer.isDeafened) {
+    await producer.pause();
+  }
 
   client.ws.send(JSON.stringify({
     type: 'produced',
@@ -396,16 +464,37 @@ const handleLeaveVoiceChannel = async (client: ClientConnection, payload: { chan
     room.peers.delete(client.userId);
   }
 
-  // Notify others
-  for (const [otherPeerId] of room.peers) {
-    connectionManager.sendToUser(otherPeerId, {
-      type: 'user_left_voice',
-      payload: { channel_id, user_id: client.userId }
-    });
-  }
+  // Notify all authenticated users
+  connectionManager.broadcastToAuthenticated({
+    type: 'user_left_voice',
+    payload: { channel_id, user_id: client.userId }
+  });
 
   if (room.peers.size === 0) {
     rooms.delete(channel_id);
+  }
+};
+
+const handleGetProducers = async (client: ClientConnection, payload: { channel_id: string }) => {
+  if (!client.userId) return;
+  const { channel_id } = payload;
+  
+  const room = rooms.get(channel_id);
+  if (!room) return;
+  
+  for (const [peerId, peer] of room.peers) {
+    if (peerId !== client.userId) {
+      for (const [producerId, producer] of peer.producers) {
+        client.ws.send(JSON.stringify({
+          type: 'new_producer',
+          payload: {
+            channel_id,
+            producer_id: producerId,
+            user_id: peerId
+          }
+        }));
+      }
+    }
   }
 };
 
@@ -420,8 +509,47 @@ const handleSubmitAdminKey = async (client: ClientConnection, payload: { key: st
       type: 'role_updated',
       payload: { role: 'admin', user }
     }));
+    
+    // Broadcast user update to all authenticated clients
+    connectionManager.broadcastToAuthenticated({
+      type: 'user_updated',
+      payload: { user }
+    });
   } else {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid admin key' } }));
   }
+};
+
+const handleVoiceStateUpdate = async (client: ClientConnection, payload: { channel_id: string, isMuted: boolean, isDeafened: boolean }) => {
+  if (!client.userId) return;
+  const { channel_id, isMuted, isDeafened } = payload;
+
+  const room = rooms.get(channel_id);
+  if (!room) return;
+
+  const peer = room.peers.get(client.userId);
+  if (peer) {
+    peer.isMuted = isMuted;
+    peer.isDeafened = isDeafened;
+
+    for (const producer of peer.producers.values()) {
+      if (isMuted || isDeafened) {
+        await producer.pause();
+      } else {
+        await producer.resume();
+      }
+    }
+  }
+
+  // Broadcast to all authenticated users
+  connectionManager.broadcastToAuthenticated({
+    type: 'voice_state_updated',
+    payload: {
+      channel_id,
+      user_id: client.userId,
+      isMuted,
+      isDeafened
+    }
+  });
 };
 
