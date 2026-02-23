@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { RouterView } from 'vue-router'
 import { Hash, Volume2, Settings, Mic, Headphones, Plus, Link, PhoneOff, Trash2 } from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
@@ -7,6 +7,14 @@ import { useWebRtcStore } from '../stores/webrtc'
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
+
+const showVoiceStats = ref(false)
+
+watch(() => webrtcStore.activeVoiceChannelId, (newVal) => {
+  if (!newVal) {
+    showVoiceStats.value = false
+  }
+})
 
 onMounted(() => {
   const lastUsedServer = localStorage.getItem('lastUsedServer')
@@ -106,6 +114,36 @@ const activeServer = computed(() => {
     }
   }
   return { name: 'RogueCord Server' }
+})
+
+const groupedMembers = computed(() => {
+  const online = chatStore.users.filter(u => chatStore.onlineUserIds.has(u.id))
+  const offline = chatStore.users.filter(u => !chatStore.onlineUserIds.has(u.id))
+
+  // Group online by role
+  const onlineByRole: Record<string, any[]> = {}
+  online.forEach(u => {
+    const role = u.role || 'user'
+    if (!onlineByRole[role]) onlineByRole[role] = []
+    onlineByRole[role].push(u)
+  })
+
+  // Sort roles: admin first, then others
+  const sortedRoles = Object.keys(onlineByRole).sort((a, b) => {
+    if (a === 'admin') return -1;
+    if (b === 'admin') return 1;
+    return a.localeCompare(b);
+  });
+
+  const sortedOnlineByRole: Record<string, any[]> = {};
+  sortedRoles.forEach(role => {
+    sortedOnlineByRole[role] = onlineByRole[role]!.sort((a, b) => a.username.localeCompare(b.username));
+  });
+
+  return {
+    onlineByRole: sortedOnlineByRole,
+    offline: offline.sort((a, b) => a.username.localeCompare(b.username))
+  }
 })
 </script>
 
@@ -366,13 +404,13 @@ const activeServer = computed(() => {
               </div>
               
               <!-- Voice Participants -->
-              <div v-if="channel.type === 'voice' && webrtcStore.activeVoiceChannelId === channel.id" class="pl-8 pr-2 pb-2 space-y-1">
-                <div v-for="userId in webrtcStore.voiceParticipants" :key="userId" class="flex items-center text-gray-300 text-sm">
-                  <div class="w-6 h-6 rounded-full bg-indigo-500 mr-2 flex items-center justify-center text-xs font-bold text-white">
-                    <!-- We don't have the username easily accessible here without a user store, so we'll just show a generic avatar or first letter if we can find it -->
-                    U
+              <div v-if="channel.type === 'voice' && webrtcStore.channelParticipants.get(channel.id)?.length" class="pl-8 pr-2 pb-2 space-y-1">
+                <div v-for="user in webrtcStore.channelParticipants.get(channel.id)" :key="user.id" class="flex items-center text-gray-300 text-sm">
+                  <div class="w-6 h-6 rounded-full bg-indigo-500 mr-2 flex items-center justify-center text-xs font-bold text-white overflow-hidden">
+                    <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
+                    <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
                   </div>
-                  <span class="truncate">User</span>
+                  <span class="truncate">{{ user.username }}</span>
                 </div>
               </div>
             </div>
@@ -395,12 +433,13 @@ const activeServer = computed(() => {
               </div>
               
               <!-- Voice Participants -->
-              <div v-if="channel.type === 'voice' && webrtcStore.activeVoiceChannelId === channel.id" class="pl-8 pr-2 pb-2 space-y-1">
-                <div v-for="userId in webrtcStore.voiceParticipants" :key="userId" class="flex items-center text-gray-300 text-sm">
-                  <div class="w-6 h-6 rounded-full bg-indigo-500 mr-2 flex items-center justify-center text-xs font-bold text-white">
-                    U
+              <div v-if="channel.type === 'voice' && webrtcStore.channelParticipants.get(channel.id)?.length" class="pl-8 pr-2 pb-2 space-y-1">
+                <div v-for="user in webrtcStore.channelParticipants.get(channel.id)" :key="user.id" class="flex items-center text-gray-300 text-sm">
+                  <div class="w-6 h-6 rounded-full bg-indigo-500 mr-2 flex items-center justify-center text-xs font-bold text-white overflow-hidden">
+                    <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
+                    <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
                   </div>
-                  <span class="truncate">User</span>
+                  <span class="truncate">{{ user.username }}</span>
                 </div>
               </div>
             </div>
@@ -415,21 +454,72 @@ const activeServer = computed(() => {
       </template>
 
       <!-- Voice Connection Status -->
-      <div v-if="webrtcStore.activeVoiceChannelId" class="h-[52px] bg-[#292b2f] px-2 flex items-center shrink-0 border-b border-[#1e1f22]">
-        <div class="flex items-center flex-1 min-w-0">
-          <div class="text-green-500 mr-2">
-            <Volume2 class="w-5 h-5" />
+      <div v-if="webrtcStore.activeVoiceChannelId" class="relative">
+        <div class="h-[52px] bg-[#292b2f] px-2 flex items-center shrink-0 border-b border-[#1e1f22] cursor-pointer hover:bg-[#35373c] transition-colors" @click="showVoiceStats = !showVoiceStats">
+          <div class="flex items-center flex-1 min-w-0">
+            <div class="mr-2" :class="{
+              'text-green-500': webrtcStore.connectionQuality === 'good',
+              'text-orange-500': webrtcStore.connectionQuality === 'warning',
+              'text-red-500': webrtcStore.connectionQuality === 'bad'
+            }">
+              <Volume2 class="w-5 h-5" />
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-semibold truncate" :class="{
+                'text-green-500': webrtcStore.connectionQuality === 'good',
+                'text-orange-500': webrtcStore.connectionQuality === 'warning',
+                'text-red-500': webrtcStore.connectionQuality === 'bad'
+              }">Voice Connected</div>
+              <div class="text-xs text-gray-400 truncate">
+                {{ chatStore.activeServerChannels.find(c => c.id === webrtcStore.activeVoiceChannelId)?.name || 'Voice Channel' }}
+              </div>
+            </div>
           </div>
-          <div class="flex-1 min-w-0">
-            <div class="text-sm font-semibold text-green-500 truncate">Voice Connected</div>
-            <div class="text-xs text-gray-400 truncate">
-              {{ chatStore.activeServerChannels.find(c => c.id === webrtcStore.activeVoiceChannelId)?.name || 'Voice Channel' }}
+          <button @click.stop="webrtcStore.leaveVoiceChannel()" class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] text-gray-400 hover:text-red-400 transition-colors" title="Disconnect">
+            <PhoneOff class="w-5 h-5" />
+          </button>
+        </div>
+
+        <!-- Voice Stats Popover -->
+        <div v-if="showVoiceStats" class="absolute bottom-[56px] left-2 w-64 bg-[#1e1f22] rounded-lg shadow-xl border border-[#3f4147] p-4 z-50">
+          <div class="flex justify-between items-center mb-3">
+            <h3 class="text-sm font-bold text-white uppercase">Voice Connection</h3>
+            <div class="text-xs font-medium px-2 py-0.5 rounded" :class="{
+              'bg-green-500/20 text-green-400': webrtcStore.connectionQuality === 'good',
+              'bg-orange-500/20 text-orange-400': webrtcStore.connectionQuality === 'warning',
+              'bg-red-500/20 text-red-400': webrtcStore.connectionQuality === 'bad'
+            }">
+              {{ webrtcStore.ping }} ms
+            </div>
+          </div>
+          
+          <div class="space-y-3">
+            <div>
+              <div class="text-xs text-gray-400 mb-1 flex justify-between">
+                <span>Ping History</span>
+                <span>{{ webrtcStore.ping }} ms</span>
+              </div>
+              <div class="h-12 flex items-end gap-[2px] bg-[#2b2d31] p-1 rounded">
+                <div v-for="(p, i) in webrtcStore.pingHistory" :key="i" 
+                     class="flex-1 rounded-t-sm min-w-[2px]"
+                     :style="{ height: `${Math.min(100, Math.max(5, (p / 300) * 100))}%` }"
+                     :class="{
+                       'bg-green-500': p < 100,
+                       'bg-orange-500': p >= 100 && p < 250,
+                       'bg-red-500': p >= 250
+                     }">
+                </div>
+              </div>
+            </div>
+            
+            <div>
+              <div class="text-xs text-gray-400 mb-1 flex justify-between">
+                <span>Bandwidth</span>
+                <span>{{ webrtcStore.bandwidth }} kbps</span>
+              </div>
             </div>
           </div>
         </div>
-        <button @click="webrtcStore.leaveVoiceChannel()" class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] text-gray-400 hover:text-red-400 transition-colors" title="Disconnect">
-          <PhoneOff class="w-5 h-5" />
-        </button>
       </div>
 
       <!-- User Panel -->
@@ -459,8 +549,61 @@ const activeServer = computed(() => {
     </aside>
 
     <!-- Main Content Area -->
-    <main class="flex-1 flex flex-col min-w-0 bg-[#313338]">
-      <RouterView />
+    <main class="flex-1 flex min-w-0 bg-[#313338]">
+      <div class="flex-1 flex flex-col min-w-0">
+        <RouterView />
+      </div>
+
+      <!-- Member List Sidebar -->
+      <aside v-if="chatStore.isConnected && chatStore.activeChannelId" class="w-60 bg-[#2b2d31] flex flex-col shrink-0 border-l border-[#1e1f22]">
+        <div class="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar">
+          <!-- Online Members Grouped by Role -->
+          <div v-for="(members, role) in groupedMembers.onlineByRole" :key="role">
+            <h3 class="text-xs font-bold text-gray-400 uppercase mb-2 px-2">
+              {{ role }} — {{ members.length }}
+            </h3>
+            <div class="space-y-1">
+              <div 
+                v-for="user in members" 
+                :key="user.id"
+                class="flex items-center px-2 py-1.5 hover:bg-[#3f4147] rounded cursor-pointer group"
+              >
+                <div class="relative w-8 h-8 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mr-3">
+                  <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover rounded-full" />
+                  <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
+                  <div class="absolute bottom-0 right-0 w-3.5 h-3.5 bg-green-500 rounded-full border-2 border-[#2b2d31] group-hover:border-[#3f4147]"></div>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="text-sm font-medium text-gray-300 truncate group-hover:text-gray-100">{{ user.username }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Offline Members -->
+          <div v-if="groupedMembers.offline.length > 0">
+            <h3 class="text-xs font-bold text-gray-400 uppercase mb-2 px-2">
+              Offline — {{ groupedMembers.offline.length }}
+            </h3>
+            <div class="space-y-1">
+              <div 
+                v-for="user in groupedMembers.offline" 
+                :key="user.id"
+                class="flex items-center px-2 py-1.5 hover:bg-[#3f4147] rounded cursor-pointer group opacity-50 hover:opacity-100"
+              >
+                <div class="relative w-8 h-8 rounded-full bg-gray-600 shrink-0 flex items-center justify-center text-white font-bold mr-3">
+                  <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover rounded-full grayscale" />
+                  <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
+                  <div class="absolute bottom-0 right-0 w-3.5 h-3.5 bg-gray-500 rounded-full border-2 border-[#2b2d31] group-hover:border-[#3f4147]"></div>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="text-sm font-medium text-gray-400 truncate group-hover:text-gray-300">{{ user.username }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
     </main>
   </div>
 </template>

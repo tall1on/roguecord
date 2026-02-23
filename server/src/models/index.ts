@@ -57,6 +57,10 @@ export const getUserByPublicKey = async (publicKey: string): Promise<User | unde
   return dbGet<User>('SELECT * FROM users WHERE public_key = ?', [publicKey]);
 };
 
+export const getUsers = async (): Promise<User[]> => {
+  return dbAll<User>('SELECT * FROM users');
+};
+
 export const updateUserRole = async (id: string, role: string): Promise<void> => {
   await dbRun('UPDATE users SET role = ? WHERE id = ?', [role, id]);
 };
