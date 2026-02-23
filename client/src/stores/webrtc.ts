@@ -13,13 +13,114 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const consumers = shallowRef<Map<string, any>>(new Map());
   
   const activeVoiceChannelId = ref<string | null>(null);
-  const voiceParticipants = ref<string[]>([]);
+  const voiceParticipants = ref<any[]>([]);
+  const channelParticipants = ref<Map<string, any[]>>(new Map());
   const localStream = shallowRef<MediaStream | null>(null);
   const remoteStreams = shallowRef<Map<string, MediaStream>>(new Map());
   const audioElements = new Map<string, HTMLAudioElement>();
   
   const producerToUser = new Map<string, string>();
   const consumerToProducer = new Map<string, string>();
+
+  const ping = ref<number>(0);
+  const bandwidth = ref<number>(0);
+  const pingHistory = ref<number[]>([]);
+  const connectionQuality = ref<'good' | 'warning' | 'bad'>('good');
+  
+  let statsInterval: number | null = null;
+  let lastBytesSent = 0;
+  let lastBytesReceived = 0;
+  let lastStatsTime = 0;
+
+  const startStatsCollection = () => {
+    if (statsInterval) clearInterval(statsInterval);
+    
+    lastBytesSent = 0;
+    lastBytesReceived = 0;
+    lastStatsTime = Date.now();
+    pingHistory.value = [];
+    
+    statsInterval = window.setInterval(async () => {
+      if (!sendTransport.value && !recvTransport.value) return;
+      
+      let currentPing = 0;
+      let currentBytesSent = 0;
+      let currentBytesReceived = 0;
+      
+      try {
+        if (sendTransport.value) {
+          const sendStats = await sendTransport.value.getStats();
+          sendStats.forEach((stat: any) => {
+            if (stat.type === 'candidate-pair' && stat.state === 'succeeded') {
+              if (stat.currentRoundTripTime !== undefined) {
+                currentPing = stat.currentRoundTripTime * 1000;
+              }
+            }
+            if (stat.type === 'outbound-rtp') {
+              currentBytesSent += stat.bytesSent || 0;
+            }
+          });
+        }
+        
+        if (recvTransport.value) {
+          const recvStats = await recvTransport.value.getStats();
+          recvStats.forEach((stat: any) => {
+            if (stat.type === 'candidate-pair' && stat.state === 'succeeded') {
+              if (stat.currentRoundTripTime !== undefined && currentPing === 0) {
+                currentPing = stat.currentRoundTripTime * 1000;
+              }
+            }
+            if (stat.type === 'inbound-rtp') {
+              currentBytesReceived += stat.bytesReceived || 0;
+            }
+          });
+        }
+        
+        ping.value = Math.round(currentPing);
+        pingHistory.value.push(ping.value);
+        if (pingHistory.value.length > 20) {
+          pingHistory.value.shift();
+        }
+        
+        if (ping.value < 100) {
+          connectionQuality.value = 'good';
+        } else if (ping.value < 250) {
+          connectionQuality.value = 'warning';
+        } else {
+          connectionQuality.value = 'bad';
+        }
+        
+        const now = Date.now();
+        const timeDiff = (now - lastStatsTime) / 1000;
+        
+        if (timeDiff > 0) {
+          const bytesSentDiff = currentBytesSent - lastBytesSent;
+          const bytesReceivedDiff = currentBytesReceived - lastBytesReceived;
+          
+          const totalBytesDiff = Math.max(0, bytesSentDiff) + Math.max(0, bytesReceivedDiff);
+          bandwidth.value = Math.round((totalBytesDiff * 8) / 1000 / timeDiff);
+        }
+        
+        lastBytesSent = currentBytesSent;
+        lastBytesReceived = currentBytesReceived;
+        lastStatsTime = now;
+        
+      } catch (error) {
+        console.error('Failed to get WebRTC stats:', error);
+      }
+    }, 2000);
+  };
+
+  const stopStatsCollection = () => {
+    if (statsInterval) {
+      clearInterval(statsInterval);
+      statsInterval = null;
+    }
+    ping.value = 0;
+    bandwidth.value = 0;
+    pingHistory.value = [];
+    connectionQuality.value = 'good';
+  };
 
   const initDevice = async (routerRtpCapabilities: any) => {
     try {
@@ -79,12 +180,22 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     voiceParticipants.value = [];
     activeVoiceChannelId.value = null;
     device.value = null;
+    
+    stopStatsCollection();
   };
 
   const handleMessage = async (message: any) => {
     const { type, payload } = message;
     
     switch (type) {
+      case 'voice_participants_list':
+        const newMap = new Map<string, any[]>();
+        for (const [channelId, users] of Object.entries(payload.participants)) {
+          newMap.set(channelId, users as any[]);
+        }
+        channelParticipants.value = newMap;
+        break;
+
       case 'voice_channel_joined':
         if (payload.channel_id !== activeVoiceChannelId.value) return;
         await initDevice(payload.rtpCapabilities);
@@ -93,17 +204,37 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         // Create send and recv transports
         chatStore.send('create_webrtc_transport', { channel_id: payload.channel_id, direction: 'send' });
         chatStore.send('create_webrtc_transport', { channel_id: payload.channel_id, direction: 'recv' });
+        
+        startStatsCollection();
         break;
         
       case 'user_joined_voice':
-        if (payload.channel_id === activeVoiceChannelId.value && !voiceParticipants.value.includes(payload.user_id)) {
-          voiceParticipants.value.push(payload.user_id);
+        if (payload.channel_id === activeVoiceChannelId.value && !voiceParticipants.value.find(u => u.id === payload.user.id)) {
+          voiceParticipants.value.push(payload.user);
+        }
+        
+        const currentParticipants = channelParticipants.value.get(payload.channel_id) || [];
+        if (!currentParticipants.find(u => u.id === payload.user.id)) {
+          const newParticipants = [...currentParticipants, payload.user];
+          channelParticipants.value.set(payload.channel_id, newParticipants);
+          channelParticipants.value = new Map(channelParticipants.value);
         }
         break;
         
       case 'user_left_voice':
+        const participants = channelParticipants.value.get(payload.channel_id);
+        if (participants) {
+          const newParticipants = participants.filter(u => u.id !== payload.user_id);
+          if (newParticipants.length === 0) {
+            channelParticipants.value.delete(payload.channel_id);
+          } else {
+            channelParticipants.value.set(payload.channel_id, newParticipants);
+          }
+          channelParticipants.value = new Map(channelParticipants.value);
+        }
+
         if (payload.channel_id === activeVoiceChannelId.value) {
-          voiceParticipants.value = voiceParticipants.value.filter(id => id !== payload.user_id);
+          voiceParticipants.value = voiceParticipants.value.filter(u => u.id !== payload.user_id);
           
           const producersToRemove = new Set<string>();
           for (const [prodId, userId] of producerToUser.entries()) {
@@ -277,8 +408,13 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   return {
     activeVoiceChannelId,
     voiceParticipants,
+    channelParticipants,
     localStream,
     remoteStreams,
+    ping,
+    bandwidth,
+    pingHistory,
+    connectionQuality,
     joinVoiceChannel,
     leaveVoiceChannel
   };

@@ -5,6 +5,7 @@ export interface User {
   id: string;
   username: string;
   avatar_url: string | null;
+  role: string;
   created_at: string;
 }
 
@@ -113,12 +114,13 @@ export const useChatStore = defineStore('chat', () => {
   const savedConnections = ref<SavedConnection[]>(
     JSON.parse(localStorage.getItem('savedConnections') || '[]').map((c: SavedConnection) => ({
       ...c,
-      address: c.address.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (match, p1) => `${p1 || ''}localhost`)
+      address: c.address.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`)
     }))
   );
   const activeConnectionId = ref<string | null>(null);
   const localUsername = ref<string | null>(localStorage.getItem('username'));
   const users = ref<User[]>([]);
+  const onlineUserIds = ref<Set<string>>(new Set());
   
   const categories = ref<Category[]>([]);
   const channels = ref<Channel[]>([]);
@@ -133,7 +135,7 @@ export const useChatStore = defineStore('chat', () => {
 
   const addSavedConnection = (name: string, address: string) => {
     // Replace 0.0.0.0 with localhost to prevent browser connection errors
-    address = address.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (match, p1) => `${p1 || ''}localhost`);
+    address = address.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`);
     const newConnection: SavedConnection = {
       id: crypto.randomUUID(),
       name,
@@ -196,7 +198,7 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     // Replace 0.0.0.0 with localhost in the final URL to prevent browser connection errors
-    wsUrl = wsUrl.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (match, p1) => `${p1 || ''}localhost`);
+    wsUrl = wsUrl.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`);
 
     console.log(`[DEBUG] Final wsUrl: ${wsUrl}`);
 
@@ -255,6 +257,7 @@ export const useChatStore = defineStore('chat', () => {
     activeChannelId.value = null;
     messages.value = {};
     users.value = [];
+    onlineUserIds.value.clear();
     currentUser.value = null;
   };
 
@@ -289,6 +292,35 @@ export const useChatStore = defineStore('chat', () => {
         currentUser.value = payload.user;
         saveLocalUsername(payload.user.username);
         getChannels();
+        break;
+        
+      case 'member_list':
+        users.value = payload.members;
+        onlineUserIds.value = new Set(payload.onlineUserIds);
+        break;
+        
+      case 'user_online':
+        onlineUserIds.value.add(payload.user.id);
+        if (!users.value.find(u => u.id === payload.user.id)) {
+          users.value.push(payload.user);
+        }
+        break;
+        
+      case 'user_offline':
+        onlineUserIds.value.delete(payload.userId);
+        break;
+        
+      case 'user_updated':
+        const index = users.value.findIndex(u => u.id === payload.user.id);
+        if (index !== -1) {
+          users.value[index] = payload.user;
+        } else {
+          users.value.push(payload.user);
+        }
+        if (currentUser.value?.id === payload.user.id) {
+          currentUser.value = payload.user;
+          currentUserRole.value = payload.user.role;
+        }
         break;
         
       case 'channels_list':
@@ -393,6 +425,7 @@ export const useChatStore = defineStore('chat', () => {
     activeConnectionId,
     localUsername,
     users,
+    onlineUserIds,
     categories,
     channels,
     messages,
