@@ -67,19 +67,28 @@ function initializeDatabase() {
       )
     `);
 
-    // Ensure default channel exists
+    // Ensure default channels exist
     db.get('SELECT count(*) as count FROM channels', (err, row: any) => {
       if (err) {
         console.error('Error checking channels:', err);
         return;
       }
       if (row.count === 0) {
-        const id = crypto.randomUUID();
-        db.run('INSERT INTO channels (id, category_id, name, type, position) VALUES (?, NULL, ?, ?, ?)', [id, 'general', 'text', 0], (err) => {
+        const textId = crypto.randomUUID();
+        db.run('INSERT INTO channels (id, category_id, name, type, position) VALUES (?, NULL, ?, ?, ?)', [textId, 'general', 'text', 0], (err) => {
           if (err) {
-            console.error('Error creating default channel:', err);
+            console.error('Error creating default text channel:', err);
           } else {
             console.log('Created default "general" text channel.');
+          }
+        });
+
+        const voiceId = crypto.randomUUID();
+        db.run('INSERT INTO channels (id, category_id, name, type, position) VALUES (?, NULL, ?, ?, ?)', [voiceId, 'General Voice', 'voice', 1], (err) => {
+          if (err) {
+            console.error('Error creating default voice channel:', err);
+          } else {
+            console.log('Created default "General Voice" voice channel.');
           }
         });
       }

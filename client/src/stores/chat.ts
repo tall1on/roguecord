@@ -203,6 +203,8 @@ export const useChatStore = defineStore('chat', () => {
     const connection = savedConnections.value.find(c => c.address === wsUrl);
     activeConnectionId.value = connection ? connection.id : null;
     
+    localStorage.setItem('lastUsedServer', wsUrl);
+    
     ws.value = new WebSocket(wsUrl);
     
     ws.value.onopen = () => {

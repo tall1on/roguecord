@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { RouterView } from 'vue-router'
 import { Hash, Volume2, Settings, Mic, Headphones, Plus, Link, PhoneOff } from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
@@ -7,6 +7,13 @@ import { useWebRtcStore } from '../stores/webrtc'
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
+
+onMounted(() => {
+  const lastUsedServer = localStorage.getItem('lastUsedServer')
+  if (lastUsedServer) {
+    chatStore.connect(lastUsedServer)
+  }
+})
 
 const usernameInput = ref('')
 const showCreateServerModal = ref(false)
@@ -84,6 +91,12 @@ const handleChannelClick = (channel: any) => {
 }
 
 const activeServer = computed(() => {
+  if (chatStore.activeConnectionId) {
+    const connection = chatStore.savedConnections.find(c => c.id === chatStore.activeConnectionId)
+    if (connection) {
+      return { name: connection.name }
+    }
+  }
   return { name: 'RogueCord Server' }
 })
 </script>
