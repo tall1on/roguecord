@@ -12,7 +12,7 @@ import { adminKey } from './admin';
 dotenv.config();
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 1337;
-const HOST = '0.0.0.0';
+const HOST = process.env.MEDIASOUP_LISTEN_IP || '0.0.0.0';
 
 async function startServer() {
   const server = http.createServer((req, res) => {
