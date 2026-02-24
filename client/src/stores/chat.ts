@@ -226,8 +226,8 @@ export const useChatStore = defineStore('chat', () => {
     ws.value.onclose = () => {
       isConnected.value = false;
       ws.value = null;
-      console.log('WebSocket disconnected, reconnecting in 3s...');
-      setTimeout(() => connect(address), 3000);
+      console.log('WebSocket disconnected');
+      // Removed endless reconnect loop as requested: "make it so it only tries once"
     };
     
     ws.value.onerror = (error) => {
