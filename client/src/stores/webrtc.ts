@@ -13,6 +13,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const consumers = shallowRef<Map<string, any>>(new Map());
   
   const activeVoiceChannelId = ref<string | null>(null);
+  const lastActiveVoiceChannelId = ref<string | null>(null);
   const voiceParticipants = ref<any[]>([]);
   const channelParticipants = ref<Map<string, any[]>>(new Map());
   const localStream = shallowRef<MediaStream | null>(null);
@@ -300,6 +301,12 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           const id = activeVoiceChannelId.value;
           leaveVoiceChannel();
           // Rejoin after a short delay to ensure state is clean
+          setTimeout(() => {
+            joinVoiceChannel(id);
+          }, 100);
+        } else if (lastActiveVoiceChannelId.value) {
+          const id = lastActiveVoiceChannelId.value;
+          lastActiveVoiceChannelId.value = null;
           setTimeout(() => {
             joinVoiceChannel(id);
           }, 100);
@@ -600,6 +607,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   watch(() => chatStore.isConnected, (isConnected) => {
     if (!isConnected) {
       if (activeVoiceChannelId.value) {
+        lastActiveVoiceChannelId.value = activeVoiceChannelId.value;
         leaveVoiceChannel();
       }
       channelParticipants.value = new Map();
