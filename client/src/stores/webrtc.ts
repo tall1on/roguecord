@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, shallowRef } from 'vue';
+import { ref, shallowRef, watch } from 'vue';
 import { Device } from 'mediasoup-client';
 import { useChatStore } from './chat';
 
@@ -13,9 +13,11 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const consumers = shallowRef<Map<string, any>>(new Map());
   
   const activeVoiceChannelId = ref<string | null>(null);
+  const lastActiveVoiceChannelId = ref<string | null>(null);
   const voiceParticipants = ref<any[]>([]);
   const channelParticipants = ref<Map<string, any[]>>(new Map());
   const localStream = shallowRef<MediaStream | null>(null);
+  const audioContext = shallowRef<AudioContext | null>(null);
   const remoteStreams = shallowRef<Map<string, MediaStream>>(new Map());
   const audioElements = new Map<string, HTMLAudioElement>();
   
@@ -250,6 +252,11 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       localStream.value = null;
     }
     
+    if (audioContext.value) {
+      audioContext.value.close();
+      audioContext.value = null;
+    }
+    
     if (producer.value) {
       producer.value.close();
       producer.value = null;
@@ -289,6 +296,23 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     const { type, payload } = message;
     
     switch (type) {
+      case 'authenticated':
+        if (activeVoiceChannelId.value) {
+          const id = activeVoiceChannelId.value;
+          leaveVoiceChannel();
+          // Rejoin after a short delay to ensure state is clean
+          setTimeout(() => {
+            joinVoiceChannel(id);
+          }, 100);
+        } else if (lastActiveVoiceChannelId.value) {
+          const id = lastActiveVoiceChannelId.value;
+          lastActiveVoiceChannelId.value = null;
+          setTimeout(() => {
+            joinVoiceChannel(id);
+          }, 100);
+        }
+        break;
+
       case 'voice_participants_list':
         const newMap = new Map<string, any[]>();
         for (const [channelId, users] of Object.entries(payload.participants)) {
@@ -432,13 +456,51 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           
           // Start producing audio
           try {
-            localStream.value = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const audioTrack = localStream.value.getAudioTracks()[0];
+            localStream.value = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                autoGainControl: true,
+                noiseSuppression: true,
+                echoCancellation: true
+              }
+            });
+            
+            // Create Web Audio API context
+            audioContext.value = new AudioContext();
+            
+            // Create source from the raw microphone stream
+            const source = audioContext.value.createMediaStreamSource(localStream.value);
+            
+            // Create a highpass filter to remove low-frequency rumble/background noise
+            const filter = audioContext.value.createBiquadFilter();
+            filter.type = 'highpass';
+            filter.frequency.value = 80; // 80 Hz is a good starting point for voice
+            
+            // Create a compressor for auto level adjustment
+            const compressor = audioContext.value.createDynamicsCompressor();
+            compressor.threshold.value = -50;
+            compressor.knee.value = 40;
+            compressor.ratio.value = 12;
+            compressor.attack.value = 0;
+            compressor.release.value = 0.25;
+            
+            // Create a destination node to get the processed stream
+            const destination = audioContext.value.createMediaStreamDestination();
+            
+            // Connect the nodes: source -> filter -> compressor -> destination
+            source.connect(filter);
+            filter.connect(compressor);
+            compressor.connect(destination);
+            
+            // Get the processed audio track
+            const processedStream = destination.stream;
+            const audioTrack = processedStream.getAudioTracks()[0];
             
             if (audioTrack) {
               // Apply current mute/deafen state
               if (isMuted.value || isDeafened.value) {
-                audioTrack.enabled = false;
+                localStream.value.getAudioTracks().forEach(track => {
+                  track.enabled = false;
+                });
               }
               
               producer.value = await sendTransport.value.produce({ track: audioTrack });
@@ -540,6 +602,17 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
   // Register listener
   chatStore.addMessageListener(handleMessage);
+
+  // Watch for websocket disconnects to clean up voice state
+  watch(() => chatStore.isConnected, (isConnected) => {
+    if (!isConnected) {
+      if (activeVoiceChannelId.value) {
+        lastActiveVoiceChannelId.value = activeVoiceChannelId.value;
+        leaveVoiceChannel();
+      }
+      channelParticipants.value = new Map();
+    }
+  });
 
   return {
     activeVoiceChannelId,
