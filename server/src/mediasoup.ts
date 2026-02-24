@@ -106,7 +106,7 @@ export async function createWebRtcTransport(router: Router): Promise<WebRtcTrans
     listenIps: [
       {
         ip: listenIp,
-        announcedAddress: announcedAddress,
+        announcedIp: announcedAddress,
       },
     ],
     enableUdp: true,
