@@ -16,6 +16,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const voiceParticipants = ref<any[]>([]);
   const channelParticipants = ref<Map<string, any[]>>(new Map());
   const localStream = shallowRef<MediaStream | null>(null);
+  const audioContext = shallowRef<AudioContext | null>(null);
   const remoteStreams = shallowRef<Map<string, MediaStream>>(new Map());
   const audioElements = new Map<string, HTMLAudioElement>();
   
@@ -250,6 +251,11 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       localStream.value = null;
     }
     
+    if (audioContext.value) {
+      audioContext.value.close();
+      audioContext.value = null;
+    }
+    
     if (producer.value) {
       producer.value.close();
       producer.value = null;
@@ -443,13 +449,51 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           
           // Start producing audio
           try {
-            localStream.value = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const audioTrack = localStream.value.getAudioTracks()[0];
+            localStream.value = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                autoGainControl: true,
+                noiseSuppression: true,
+                echoCancellation: true
+              }
+            });
+            
+            // Create Web Audio API context
+            audioContext.value = new AudioContext();
+            
+            // Create source from the raw microphone stream
+            const source = audioContext.value.createMediaStreamSource(localStream.value);
+            
+            // Create a highpass filter to remove low-frequency rumble/background noise
+            const filter = audioContext.value.createBiquadFilter();
+            filter.type = 'highpass';
+            filter.frequency.value = 80; // 80 Hz is a good starting point for voice
+            
+            // Create a compressor for auto level adjustment
+            const compressor = audioContext.value.createDynamicsCompressor();
+            compressor.threshold.value = -50;
+            compressor.knee.value = 40;
+            compressor.ratio.value = 12;
+            compressor.attack.value = 0;
+            compressor.release.value = 0.25;
+            
+            // Create a destination node to get the processed stream
+            const destination = audioContext.value.createMediaStreamDestination();
+            
+            // Connect the nodes: source -> filter -> compressor -> destination
+            source.connect(filter);
+            filter.connect(compressor);
+            compressor.connect(destination);
+            
+            // Get the processed audio track
+            const processedStream = destination.stream;
+            const audioTrack = processedStream.getAudioTracks()[0];
             
             if (audioTrack) {
               // Apply current mute/deafen state
               if (isMuted.value || isDeafened.value) {
-                audioTrack.enabled = false;
+                localStream.value.getAudioTracks().forEach(track => {
+                  track.enabled = false;
+                });
               }
               
               producer.value = await sendTransport.value.produce({ track: audioTrack });
