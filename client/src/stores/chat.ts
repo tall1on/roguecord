@@ -130,6 +130,9 @@ export const useChatStore = defineStore('chat', () => {
   
   let pingInterval: number | null = null;
   let pongTimeout: number | null = null;
+  let reconnectTimer: number | null = null;
+  let reconnectAttempts = 0;
+  let isIntentionalDisconnect = false;
 
   const saveLocalUsername = (username: string) => {
     localUsername.value = username;
@@ -181,7 +184,26 @@ export const useChatStore = defineStore('chat', () => {
     return { privateKey: keyPair.privateKey, publicKeyBase64: publicPem };
   };
 
-  const connect = (address?: string) => {
+  const scheduleReconnect = (url: string) => {
+    if (reconnectTimer) return;
+    
+    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+    console.log(`Scheduling reconnect in ${delay}ms (attempt ${reconnectAttempts + 1})`);
+    
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      reconnectAttempts++;
+      connect(url, false); 
+    }, delay);
+  };
+
+  const connect = (address?: string, isAutoStartup: boolean = false) => {
+    isIntentionalDisconnect = false;
+    if (reconnectTimer) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+
     console.log(`[DEBUG] connect called with address: ${address}`);
     console.log(`[DEBUG] window.location.hostname: ${window.location.hostname}`);
     
@@ -210,6 +232,8 @@ export const useChatStore = defineStore('chat', () => {
       disconnect();
     }
     
+    isIntentionalDisconnect = false;
+    
     const connection = savedConnections.value.find(c => c.address === wsUrl);
     activeConnectionId.value = connection ? connection.id : null;
     
@@ -217,8 +241,12 @@ export const useChatStore = defineStore('chat', () => {
     
     ws.value = new WebSocket(wsUrl);
     
+    let hasConnectedOnce = false;
+
     ws.value.onopen = () => {
+      hasConnectedOnce = true;
       isConnected.value = true;
+      reconnectAttempts = 0;
       console.log('WebSocket connected');
       
       if (localUsername.value) {
@@ -236,11 +264,10 @@ export const useChatStore = defineStore('chat', () => {
           
           // Set a timeout to wait for a pong response
           pongTimeout = window.setTimeout(() => {
-            console.warn('WebSocket pong timeout, disconnecting...');
-            disconnect();
-            // Optionally trigger a reconnect here if desired, but the prompt says "trigger a reconnect if necessary"
-            // and the existing code says "Removed endless reconnect loop as requested: 'make it so it only tries once'"
-            // So we'll just disconnect and let the user reconnect manually or handle it via existing logic.
+            console.warn('WebSocket pong timeout, reconnecting...');
+            if (ws.value) {
+              ws.value.close(); // This will trigger onclose and schedule a reconnect
+            }
           }, 10000); // 10 seconds to respond
         }
       }, 30000); // 30 seconds interval
@@ -259,7 +286,15 @@ export const useChatStore = defineStore('chat', () => {
         window.clearTimeout(pongTimeout);
         pongTimeout = null;
       }
-      // Removed endless reconnect loop as requested: "make it so it only tries once"
+      
+      if (!isIntentionalDisconnect) {
+        if (isAutoStartup && !hasConnectedOnce) {
+          console.log('Connection failed on automatic startup, not reconnecting.');
+          return;
+        }
+        
+        scheduleReconnect(wsUrl);
+      }
     };
     
     ws.value.onerror = (error) => {
@@ -284,6 +319,11 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const disconnect = () => {
+    isIntentionalDisconnect = true;
+    if (reconnectTimer) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     if (pingInterval) {
       window.clearInterval(pingInterval);
       pingInterval = null;
@@ -381,6 +421,9 @@ export const useChatStore = defineStore('chat', () => {
           if (firstTextChannel) {
             setActiveChannel(firstTextChannel.id);
           }
+        } else {
+          // Re-fetch messages for active channel in case we missed any while disconnected
+          getMessages(activeChannelId.value);
         }
         break;
         

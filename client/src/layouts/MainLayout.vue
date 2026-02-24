@@ -27,7 +27,7 @@ onMounted(() => {
   document.addEventListener('click', handleClickOutside)
   const lastUsedServer = localStorage.getItem('lastUsedServer')
   if (lastUsedServer) {
-    chatStore.connect(lastUsedServer)
+    chatStore.connect(lastUsedServer, true)
   }
 })
 

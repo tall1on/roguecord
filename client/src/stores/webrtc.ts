@@ -289,6 +289,17 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     const { type, payload } = message;
     
     switch (type) {
+      case 'authenticated':
+        if (activeVoiceChannelId.value) {
+          const id = activeVoiceChannelId.value;
+          leaveVoiceChannel();
+          // Rejoin after a short delay to ensure state is clean
+          setTimeout(() => {
+            joinVoiceChannel(id);
+          }, 100);
+        }
+        break;
+
       case 'voice_participants_list':
         const newMap = new Map<string, any[]>();
         for (const [channelId, users] of Object.entries(payload.participants)) {
