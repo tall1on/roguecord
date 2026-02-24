@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, shallowRef } from 'vue';
+import { ref, shallowRef, watch } from 'vue';
 import { Device } from 'mediasoup-client';
 import { useChatStore } from './chat';
 
@@ -595,6 +595,16 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
   // Register listener
   chatStore.addMessageListener(handleMessage);
+
+  // Watch for websocket disconnects to clean up voice state
+  watch(() => chatStore.isConnected, (isConnected) => {
+    if (!isConnected) {
+      if (activeVoiceChannelId.value) {
+        leaveVoiceChannel();
+      }
+      channelParticipants.value = new Map();
+    }
+  });
 
   return {
     activeVoiceChannelId,
