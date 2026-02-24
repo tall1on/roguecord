@@ -14,8 +14,6 @@ export async function createWorker(): Promise<Worker> {
       'srtp',
       'rtcp',
     ],
-    rtcMinPort: 10000,
-    rtcMaxPort: 10100,
   });
 
   worker.on('died', () => {
@@ -103,11 +101,19 @@ export async function createWebRtcTransport(router: Router): Promise<WebRtcTrans
   const announcedAddress = process.env.MEDIASOUP_ANNOUNCED_IP || '127.0.0.1';
 
   return await router.createWebRtcTransport({
-    listenIps: [
+    listenInfos: [
       {
+        protocol: 'udp',
         ip: listenIp,
-        announcedIp: announcedAddress,
+        announcedAddress: announcedAddress,
+        portRange: { min: 10000, max: 10100 }
       },
+      {
+        protocol: 'tcp',
+        ip: listenIp,
+        announcedAddress: announcedAddress,
+        portRange: { min: 10000, max: 10100 }
+      }
     ],
     enableUdp: true,
     enableTcp: true,
