@@ -24,10 +24,31 @@ async function startServer() {
     // Set up WebSocket server attached to the HTTP server
     const wss = new WebSocketServer({server});
 
+    const interval = setInterval(() => {
+        for (const client of connectionManager.getClients()) {
+            if (client.isAlive === false) {
+                console.log(`[WS DEBUG] Terminating inactive connection for ${client.userId || 'unauthenticated'}`);
+                client.ws.terminate();
+                continue;
+            }
+
+            client.isAlive = false;
+            client.ws.ping();
+        }
+    }, 30000);
+
+    wss.on('close', () => {
+        clearInterval(interval);
+    });
+
     wss.on('connection', (ws, req) => {
         console.log(`[WS DEBUG] New WebSocket connection from ${req.socket.remoteAddress}`);
 
         const client = connectionManager.addClient(ws);
+
+        ws.on('pong', () => {
+            client.isAlive = true;
+        });
 
         ws.on('message', async (message) => {
             console.log(`[WS DEBUG] Received message from ${client.userId || 'unauthenticated'}: ${message}`);
