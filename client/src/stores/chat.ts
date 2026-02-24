@@ -187,7 +187,11 @@ export const useChatStore = defineStore('chat', () => {
   const scheduleReconnect = (url: string) => {
     if (reconnectTimer) return;
     
-    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+    // Fast initial reconnect (500ms), exponential backoff with jitter, max 5000ms
+    const baseDelay = Math.min(500 * Math.pow(1.5, reconnectAttempts), 5000);
+    const jitter = Math.random() * 200; // Add up to 200ms of jitter
+    const delay = Math.floor(baseDelay + jitter);
+    
     console.log(`Scheduling reconnect in ${delay}ms (attempt ${reconnectAttempts + 1})`);
     
     reconnectTimer = window.setTimeout(() => {
