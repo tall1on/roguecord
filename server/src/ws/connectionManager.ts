@@ -5,13 +5,14 @@ export interface ClientConnection {
   userId?: string;
   challenge?: string;
   pendingPublicKey?: string;
+  isAlive: boolean;
 }
 
 class ConnectionManager {
   private clients: Set<ClientConnection> = new Set();
 
   addClient(ws: WebSocket): ClientConnection {
-    const client: ClientConnection = { ws };
+    const client: ClientConnection = { ws, isAlive: true };
     this.clients.add(client);
     console.log(`[WS DEBUG] Client added. Total clients: ${this.clients.size}`);
     return client;
@@ -20,6 +21,10 @@ class ConnectionManager {
   removeClient(client: ClientConnection) {
     this.clients.delete(client);
     console.log(`[WS DEBUG] Client removed. Total clients: ${this.clients.size}`);
+  }
+
+  getClients(): Set<ClientConnection> {
+    return this.clients;
   }
 
   setUserId(client: ClientConnection, userId: string) {

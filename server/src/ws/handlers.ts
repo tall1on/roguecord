@@ -72,6 +72,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'voice_state_update':
         await handleVoiceStateUpdate(client, payload);
         break;
+      case 'ping':
+        client.ws.send(JSON.stringify({ type: 'pong', payload: {} }));
+        break;
       default:
         console.warn(`[WS DEBUG] Unknown message type: ${type}`);
     }

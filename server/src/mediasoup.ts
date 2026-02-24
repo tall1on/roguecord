@@ -14,8 +14,6 @@ export async function createWorker(): Promise<Worker> {
       'srtp',
       'rtcp',
     ],
-    rtcMinPort: 10000,
-    rtcMaxPort: 10100,
   });
 
   worker.on('died', () => {
@@ -100,14 +98,22 @@ export async function createWebRtcTransport(router: Router): Promise<WebRtcTrans
   // For remote servers, you MUST set MEDIASOUP_ANNOUNCED_IP to your public IP or domain name.
   // MEDIASOUP_LISTEN_IP defaults to 0.0.0.0 to listen on all interfaces.
   const listenIp = process.env.MEDIASOUP_LISTEN_IP || '0.0.0.0';
-  const announcedIp = process.env.MEDIASOUP_ANNOUNCED_IP || '127.0.0.1';
+  const announcedAddress = process.env.MEDIASOUP_ANNOUNCED_IP || '127.0.0.1';
 
   return await router.createWebRtcTransport({
-    listenIps: [
+    listenInfos: [
       {
+        protocol: 'udp',
         ip: listenIp,
-        announcedIp: announcedIp,
+        announcedAddress: announcedAddress,
+        portRange: { min: 10000, max: 10100 }
       },
+      {
+        protocol: 'tcp',
+        ip: listenIp,
+        announcedAddress: announcedAddress,
+        portRange: { min: 10000, max: 10100 }
+      }
     ],
     enableUdp: true,
     enableTcp: true,

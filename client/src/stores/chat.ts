@@ -127,6 +127,12 @@ export const useChatStore = defineStore('chat', () => {
   const messages = ref<Record<string, Message[]>>({}); // channel_id -> Message[]
   
   const activeChannelId = ref<string | null>(null);
+  
+  let pingInterval: number | null = null;
+  let pongTimeout: number | null = null;
+  let reconnectTimer: number | null = null;
+  let reconnectAttempts = 0;
+  let isIntentionalDisconnect = false;
 
   const saveLocalUsername = (username: string) => {
     localUsername.value = username;
@@ -178,7 +184,30 @@ export const useChatStore = defineStore('chat', () => {
     return { privateKey: keyPair.privateKey, publicKeyBase64: publicPem };
   };
 
-  const connect = (address?: string) => {
+  const scheduleReconnect = (url: string) => {
+    if (reconnectTimer) return;
+    
+    // Fast initial reconnect (500ms), exponential backoff with jitter, max 5000ms
+    const baseDelay = Math.min(500 * Math.pow(1.5, reconnectAttempts), 5000);
+    const jitter = Math.random() * 200; // Add up to 200ms of jitter
+    const delay = Math.floor(baseDelay + jitter);
+    
+    console.log(`Scheduling reconnect in ${delay}ms (attempt ${reconnectAttempts + 1})`);
+    
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      reconnectAttempts++;
+      connect(url, false); 
+    }, delay);
+  };
+
+  const connect = (address?: string, isAutoStartup: boolean = false) => {
+    isIntentionalDisconnect = false;
+    if (reconnectTimer) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+
     console.log(`[DEBUG] connect called with address: ${address}`);
     console.log(`[DEBUG] window.location.hostname: ${window.location.hostname}`);
     
@@ -207,6 +236,8 @@ export const useChatStore = defineStore('chat', () => {
       disconnect();
     }
     
+    isIntentionalDisconnect = false;
+    
     const connection = savedConnections.value.find(c => c.address === wsUrl);
     activeConnectionId.value = connection ? connection.id : null;
     
@@ -214,20 +245,60 @@ export const useChatStore = defineStore('chat', () => {
     
     ws.value = new WebSocket(wsUrl);
     
+    let hasConnectedOnce = false;
+
     ws.value.onopen = () => {
+      hasConnectedOnce = true;
       isConnected.value = true;
+      reconnectAttempts = 0;
       console.log('WebSocket connected');
       
       if (localUsername.value) {
         authenticate(localUsername.value);
       }
+
+      // Start client-side heartbeat
+      pingInterval = window.setInterval(() => {
+        if (ws.value?.readyState === WebSocket.OPEN) {
+          // Send a custom ping message if needed, or just rely on server pings.
+          // Since we are using native ws.ping() on the server, the browser handles pongs automatically.
+          // However, we still want to ensure the connection is alive from the client's perspective.
+          // We can send a custom ping message to the server.
+          send('ping', {});
+          
+          // Set a timeout to wait for a pong response
+          pongTimeout = window.setTimeout(() => {
+            console.warn('WebSocket pong timeout, reconnecting...');
+            if (ws.value) {
+              ws.value.close(); // This will trigger onclose and schedule a reconnect
+            }
+          }, 10000); // 10 seconds to respond
+        }
+      }, 30000); // 30 seconds interval
     };
     
     ws.value.onclose = () => {
       isConnected.value = false;
       ws.value = null;
-      console.log('WebSocket disconnected, reconnecting in 3s...');
-      setTimeout(() => connect(address), 3000);
+      console.log('WebSocket disconnected');
+      
+      if (pingInterval) {
+        window.clearInterval(pingInterval);
+        pingInterval = null;
+      }
+      if (pongTimeout) {
+        window.clearTimeout(pongTimeout);
+        pongTimeout = null;
+      }
+      
+      if (!isIntentionalDisconnect) {
+        if (isAutoStartup && !hasConnectedOnce) {
+          console.log('Connection failed on automatic startup, not reconnecting.');
+          return;
+        }
+        
+        scheduleReconnect(wsUrl);
+      }
     };
     
     ws.value.onerror = (error) => {
@@ -237,6 +308,13 @@ export const useChatStore = defineStore('chat', () => {
     ws.value.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        if (data.type === 'pong') {
+          if (pongTimeout) {
+            window.clearTimeout(pongTimeout);
+            pongTimeout = null;
+          }
+          return;
+        }
         handleMessage(data);
       } catch (err) {
         console.error('Failed to parse WebSocket message:', err);
@@ -245,6 +323,20 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const disconnect = () => {
+    isIntentionalDisconnect = true;
+    if (reconnectTimer) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    if (pingInterval) {
+      window.clearInterval(pingInterval);
+      pingInterval = null;
+    }
+    if (pongTimeout) {
+      window.clearTimeout(pongTimeout);
+      pongTimeout = null;
+    }
+
     if (ws.value) {
       ws.value.onclose = null;
       ws.value.close();
@@ -333,6 +425,9 @@ export const useChatStore = defineStore('chat', () => {
           if (firstTextChannel) {
             setActiveChannel(firstTextChannel.id);
           }
+        } else {
+          // Re-fetch messages for active channel in case we missed any while disconnected
+          getMessages(activeChannelId.value);
         }
         break;
         
