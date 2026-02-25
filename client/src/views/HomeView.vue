@@ -11,7 +11,7 @@ const messagesContainer = ref<HTMLElement | null>(null)
 const activeTextChannel = computed(() => {
   if (chatStore.activeMainPanel.type !== 'text' || !chatStore.activeMainPanel.channelId) return null
   const channels = chatStore.channels || []
-  return channels.find(c => c.id === chatStore.activeMainPanel.channelId && c.type === 'text')
+  return channels.find(c => c.id === chatStore.activeMainPanel.channelId && (c.type === 'text' || c.type === 'rss'))
 })
 
 const activeVoiceChannel = computed(() => {
@@ -25,7 +25,60 @@ const activeVoiceParticipants = computed(() => {
   return webrtcStore.channelParticipants.get(activeVoiceChannel.value.id) || []
 })
 
+const voiceParticipantCount = computed(() => activeVoiceParticipants.value.length)
+
+const isTwoParticipantVoiceLayout = computed(() => activeVoiceParticipants.value.length === 2)
+
+const isThreeParticipantVoiceLayout = computed(() => activeVoiceParticipants.value.length === 3)
+
+const voiceGridClass = computed(() => {
+  if (isTwoParticipantVoiceLayout.value) {
+    return 'grid-cols-1 grid-rows-2 auto-rows-fr'
+  }
+
+  if (isThreeParticipantVoiceLayout.value) {
+    return 'grid-cols-1 grid-rows-3 auto-rows-fr'
+  }
+
+  return 'grid-cols-[repeat(auto-fit,minmax(min(100%,360px),1fr))] auto-rows-fr'
+})
+
+const voiceTileClass = computed(() => {
+  if (isTwoParticipantVoiceLayout.value) {
+    return 'w-full h-full min-h-0'
+  }
+
+  if (voiceParticipantCount.value === 1) {
+    return 'w-full h-full min-h-[320px]'
+  }
+
+  if (voiceParticipantCount.value <= 4) {
+    return 'w-full h-full min-h-[220px]'
+  }
+
+  return 'w-full h-full min-h-[180px]'
+})
+
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
+
+const privilegedRoles = new Set(['admin', 'owner', 'mod', 'moderator', 'bot', 'system'])
+
+const isReadOnlyRssChannel = computed(() => {
+  if (!activeTextChannel.value || activeTextChannel.value.type !== 'rss') {
+    return false
+  }
+
+  const role = chatStore.currentUserRole || 'user'
+  return !privilegedRoles.has(role)
+})
+
+const messagePlaceholder = computed(() => {
+  if (!activeTextChannel.value) return ''
+  if (isReadOnlyRssChannel.value) {
+    return 'This RSS channel is read-only for your role'
+  }
+  return `Message #${activeTextChannel.value.name}`
+})
 
 type AvatarBadgeType = 'speaking' | 'presence' | null
 
@@ -35,6 +88,10 @@ const getAvatarBadgeType = (userId: string, showPresence: boolean): AvatarBadgeT
 }
 
 const sendMessage = () => {
+  if (isReadOnlyRssChannel.value) {
+    return
+  }
+
   if (messageInput.value.trim() && activeTextChannel.value) {
     chatStore.sendMessage(activeTextChannel.value.id, messageInput.value.trim())
     messageInput.value = ''
@@ -97,7 +154,7 @@ watch(() => chatStore.activeChannelMessages, async () => {
 
       <!-- Chat Input Area -->
       <div class="p-4 shrink-0">
-        <div class="bg-[#383a40] rounded-lg p-3 flex items-center gap-3">
+        <div class="bg-[#383a40] rounded-lg p-3 flex items-center gap-3" :class="isReadOnlyRssChannel ? 'opacity-80' : ''">
           <button class="w-6 h-6 rounded-full bg-[#4e5058] flex items-center justify-center text-gray-300 hover:text-white shrink-0 transition-colors">
             +
           </button>
@@ -105,10 +162,14 @@ watch(() => chatStore.activeChannelMessages, async () => {
             v-model="messageInput"
             @keyup.enter="sendMessage"
             type="text" 
-            :placeholder="`Message #${activeTextChannel.name}`" 
+            :placeholder="messagePlaceholder"
+            :disabled="isReadOnlyRssChannel"
             class="bg-transparent border-none outline-none flex-1 text-gray-200 placeholder-gray-500"
           />
         </div>
+        <p v-if="isReadOnlyRssChannel" class="mt-2 text-xs text-gray-400">
+          RSS feed channels are read-only for normal users.
+        </p>
       </div>
     </template>
 
@@ -121,11 +182,16 @@ watch(() => chatStore.activeChannelMessages, async () => {
       </header>
 
       <main class="flex-1 overflow-y-auto p-6 custom-scrollbar">
-        <div v-if="activeVoiceParticipants.length > 0" class="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
+        <div
+          v-if="activeVoiceParticipants.length > 0"
+          class="grid gap-4 h-full"
+          :class="voiceGridClass"
+        >
           <div
             v-for="user in activeVoiceParticipants"
             :key="user.id"
-            class="h-40 rounded-xl bg-[#2b2d31] border border-[#3f4147] flex items-center justify-center"
+            class="rounded-xl bg-[#2b2d31] border border-[#3f4147] flex items-center justify-center"
+            :class="voiceTileClass"
           >
             <div class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
               <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />

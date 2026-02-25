@@ -249,7 +249,10 @@ const handleGetChannels = async (client: ClientConnection) => {
   }));
 };
 
-const handleCreateChannel = async (client: ClientConnection, payload: { category_id: string | null, name: string, type: 'text' | 'voice' }) => {
+const handleCreateChannel = async (
+  client: ClientConnection,
+  payload: { category_id: string | null, name: string, type: 'text' | 'voice' | 'rss', feed_url?: string }
+) => {
   if (!client.userId) return;
   const { category_id, name, type } = payload;
 
@@ -259,9 +262,28 @@ const handleCreateChannel = async (client: ClientConnection, payload: { category
     return;
   }
 
-  if (type !== 'text' && type !== 'voice') {
+  if (type !== 'text' && type !== 'voice' && type !== 'rss') {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid channel type' } }));
     return;
+  }
+
+  const normalizedFeedUrl = typeof payload.feed_url === 'string' ? payload.feed_url.trim() : '';
+  if (type === 'rss') {
+    if (!normalizedFeedUrl) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'RSS feed URL is required' } }));
+      return;
+    }
+
+    try {
+      const feedUrl = new URL(normalizedFeedUrl);
+      if (feedUrl.protocol !== 'http:' && feedUrl.protocol !== 'https:') {
+        client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'RSS feed URL must use http or https' } }));
+        return;
+      }
+    } catch {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid RSS feed URL' } }));
+      return;
+    }
   }
 
   const user = await getUserById(client.userId);
@@ -271,7 +293,7 @@ const handleCreateChannel = async (client: ClientConnection, payload: { category
   }
 
   try {
-    const channel = await createChannel(category_id, normalizedName, type);
+    const channel = await createChannel(category_id, normalizedName, type, 0, type === 'rss' ? normalizedFeedUrl : null);
 
     // Broadcast to all authenticated users
     connectionManager.broadcastToAuthenticated({
@@ -349,8 +371,25 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
   const { channel_id, content } = payload;
   if (!channel_id || !content) return;
 
-  const message = await createMessage(channel_id, client.userId, content);
+  const channel = await getChannelById(channel_id);
+  if (!channel) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Channel not found' } }));
+    return;
+  }
+
   const user = await getUserById(client.userId);
+  if (!user) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
+    return;
+  }
+
+  const privilegedRoles = new Set(['admin', 'owner', 'mod', 'moderator', 'bot', 'system']);
+  if (channel.type === 'rss' && !privilegedRoles.has(user.role)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'RSS channels are read-only for your role' } }));
+    return;
+  }
+
+  const message = await createMessage(channel_id, client.userId, content);
   
   const messageWithUser = {
     ...message,

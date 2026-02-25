@@ -25,7 +25,8 @@ const newServerAddress = ref('')
 
 const showCreateChannelModal = ref(false)
 const newChannelName = ref('')
-const newChannelType = ref<'text' | 'voice'>('text')
+const newChannelType = ref<'text' | 'voice' | 'rss'>('text')
+const newChannelFeedUrl = ref('')
 const selectedCategoryId = ref<string | null>(null)
 const createChannelError = ref<string | null>(null)
 
@@ -51,6 +52,8 @@ const serverSettingsNavGroups = ref<ServerSettingsNavGroup[]>([
 ])
 
 const isAdmin = computed(() => chatStore.currentUserRole === 'admin')
+
+const shouldShowMemberList = computed(() => chatStore.activeMainPanel.type !== 'voice')
 
 const inviteLink = computed(() => {
   const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
@@ -86,7 +89,7 @@ const handleCreateServer = async () => {
   }
 }
 
-const openCreateChannelModal = (payload: { categoryId: string | null; type?: 'text' | 'voice' }) => {
+const openCreateChannelModal = (payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' }) => {
   if (!isAdmin.value) return
 
   createChannelError.value = null
@@ -102,14 +105,20 @@ const handleCreateChannel = () => {
   if (!isAdmin.value) return
 
   const trimmedName = newChannelName.value.trim()
+  const trimmedFeedUrl = newChannelFeedUrl.value.trim()
   if (!trimmedName) {
     createChannelError.value = 'Channel name is required'
     return
   }
 
+  if (newChannelType.value === 'rss' && !trimmedFeedUrl) {
+    createChannelError.value = 'RSS feed URL is required'
+    return
+  }
+
   createChannelError.value = null
   chatStore.clearError()
-  chatStore.createChannel(selectedCategoryId.value, trimmedName, newChannelType.value)
+  chatStore.createChannel(selectedCategoryId.value, trimmedName, newChannelType.value, trimmedFeedUrl)
 }
 
 const handleChatStoreMessage = (message: any) => {
@@ -119,6 +128,7 @@ const handleChatStoreMessage = (message: any) => {
     showCreateChannelModal.value = false
     newChannelName.value = ''
     newChannelType.value = 'text'
+    newChannelFeedUrl.value = ''
     createChannelError.value = null
     chatStore.clearError()
     return
@@ -212,6 +222,7 @@ onUnmounted(() => {
       v-model:visible="showCreateChannelModal"
       v-model:channel-name="newChannelName"
       v-model:channel-type="newChannelType"
+      v-model:channel-feed-url="newChannelFeedUrl"
       :error-message="createChannelError || chatStore.lastError"
       @create="handleCreateChannel"
     />
@@ -293,7 +304,7 @@ onUnmounted(() => {
         <RouterView />
       </div>
 
-      <MemberListSidebar />
+      <MemberListSidebar v-if="shouldShowMemberList" />
     </main>
   </div>
 </template>
