@@ -524,6 +524,7 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
                     <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
                     <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
                     <div v-if="isVoiceUserSpeaking(user.id)" class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-green-400 border border-[#2b2d31]"></div>
+                    <div v-else class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-green-500 border border-[#2b2d31]"></div>
                   </div>
                   <span class="truncate flex-1">{{ user.username }}</span>
                   <div class="flex items-center gap-1 ml-2">
@@ -570,6 +571,7 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
                     <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
                     <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
                     <div v-if="isVoiceUserSpeaking(user.id)" class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-green-400 border border-[#2b2d31]"></div>
+                    <div v-else class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-green-500 border border-[#2b2d31]"></div>
                   </div>
                   <span class="truncate flex-1">{{ user.username }}</span>
                   <div class="flex items-center gap-1 ml-2">
