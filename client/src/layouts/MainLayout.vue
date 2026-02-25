@@ -20,6 +20,7 @@ const handleClickOutside = (event: MouseEvent) => {
     const target = event.target as HTMLElement | null
     if (!target?.closest('.channel-context-menu')) {
       contextMenuVisible.value = false
+      contextMenuChannel.value = null
     }
   }
 }
@@ -57,6 +58,7 @@ const createChannelError = ref<string | null>(null)
 const contextMenuVisible = ref(false)
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
+const contextMenuChannel = ref<any | null>(null)
 
 const showInviteModal = ref(false)
 const inviteLink = computed(() => {
@@ -112,6 +114,7 @@ const openCreateChannelFromContextMenu = (type: 'text' | 'voice') => {
   if (!isAdmin.value) return
 
   contextMenuVisible.value = false
+  contextMenuChannel.value = null
   newChannelType.value = type
   openCreateChannelModal(null)
 }
@@ -122,7 +125,31 @@ const openChannelListContextMenu = (event: MouseEvent) => {
   event.preventDefault()
   contextMenuX.value = event.clientX
   contextMenuY.value = event.clientY
+  contextMenuChannel.value = null
   contextMenuVisible.value = true
+}
+
+const openChannelContextMenu = (event: MouseEvent, channel: any) => {
+  if (!isAdmin.value) return
+
+  event.preventDefault()
+  contextMenuX.value = event.clientX
+  contextMenuY.value = event.clientY
+  contextMenuChannel.value = channel
+  contextMenuVisible.value = true
+}
+
+const deleteChannelFromContextMenu = () => {
+  if (!isAdmin.value || !contextMenuChannel.value) return
+
+  const channelToDelete = contextMenuChannel.value
+  if (!confirm(`Delete #${channelToDelete.name}? This cannot be undone.`)) {
+    return
+  }
+
+  contextMenuVisible.value = false
+  contextMenuChannel.value = null
+  chatStore.deleteChannel(channelToDelete.id)
 }
 
 const handleChatStoreMessage = (message: any) => {
@@ -466,6 +493,7 @@ const groupedMembers = computed(() => {
             >
               <div
                 @click="handleChannelClick(channel)"
+                @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
                 class="flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
                 :class="(channel.type === 'text' && chatStore.activeChannelId === channel.id) || (channel.type === 'voice' && webrtcStore.activeVoiceChannelId === channel.id) ? 'bg-[#404249] text-white' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
               >
@@ -510,6 +538,7 @@ const groupedMembers = computed(() => {
             >
               <div
                 @click="handleChannelClick(channel)"
+                @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
                 class="flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
                 :class="(channel.type === 'text' && chatStore.activeChannelId === channel.id) || (channel.type === 'voice' && webrtcStore.activeVoiceChannelId === channel.id) ? 'bg-[#404249] text-white' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
               >
@@ -542,9 +571,18 @@ const groupedMembers = computed(() => {
 
       <div
         v-if="contextMenuVisible && isAdmin"
-        class="channel-context-menu fixed z-50 w-52 rounded-md border border-[#1e1f22] bg-[#111214] shadow-xl py-1"
+        class="channel-context-menu fixed z-50 w-56 rounded-md border border-[#1e1f22] bg-[#111214] shadow-xl py-1"
         :style="{ left: `${contextMenuX}px`, top: `${contextMenuY}px` }"
       >
+        <button
+          v-if="contextMenuChannel"
+          class="w-full px-3 py-2 text-left text-sm text-red-300 hover:bg-[#2b2d31] flex items-center gap-2"
+          @click="deleteChannelFromContextMenu"
+        >
+          <Trash2 class="w-4 h-4" />
+          Delete channel
+        </button>
+        <div v-if="contextMenuChannel" class="my-1 border-t border-[#2b2d31]"></div>
         <button
           class="w-full px-3 py-2 text-left text-sm text-gray-200 hover:bg-[#2b2d31] flex items-center gap-2"
           @click="openCreateChannelFromContextMenu('text')"

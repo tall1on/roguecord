@@ -1,10 +1,11 @@
 import { ClientConnection, connectionManager } from './connectionManager';
 import {
   createUser,
-  getUserByUsername,
   getUserByPublicKey,
   createCategory,
   createChannel,
+  deleteChannel,
+  getChannelById,
   getCategories,
   getChannels,
   getChannelMessages,
@@ -35,6 +36,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'create_channel':
         await handleCreateChannel(client, payload);
+        break;
+      case 'delete_channel':
+        await handleDeleteChannel(client, payload);
         break;
       case 'get_messages':
         await handleGetMessages(client, payload);
@@ -234,6 +238,52 @@ const handleCreateChannel = async (client: ClientConnection, payload: { category
   } catch (error) {
     console.error('[WS DEBUG] Failed to create channel:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to create channel' } }));
+  }
+};
+
+const handleDeleteChannel = async (client: ClientConnection, payload: { channel_id: string }) => {
+  if (!client.userId) return;
+  const { channel_id } = payload;
+
+  if (!channel_id) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Channel ID is required' } }));
+    return;
+  }
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can delete channels' } }));
+    return;
+  }
+
+  const channel = await getChannelById(channel_id);
+  if (!channel) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Channel not found' } }));
+    return;
+  }
+
+  try {
+    await deleteChannel(channel_id);
+
+    if (channel.type === 'voice') {
+      const room = rooms.get(channel_id);
+      if (room) {
+        for (const peer of room.peers.values()) {
+          for (const transport of peer.transports.values()) {
+            transport.close();
+          }
+        }
+        rooms.delete(channel_id);
+      }
+    }
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'channel_deleted',
+      payload: { channel_id }
+    });
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to delete channel:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to delete channel' } }));
   }
 };
 

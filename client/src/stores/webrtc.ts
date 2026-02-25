@@ -393,6 +393,15 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           remoteStreams.value = new Map(remoteStreams.value);
         }
         break;
+
+      case 'channel_deleted':
+        channelParticipants.value.delete(payload.channel_id);
+        channelParticipants.value = new Map(channelParticipants.value);
+
+        if (payload.channel_id === activeVoiceChannelId.value) {
+          leaveVoiceChannel();
+        }
+        break;
         
       case 'voice_state_updated':
         if (payload.channel_id === activeVoiceChannelId.value) {

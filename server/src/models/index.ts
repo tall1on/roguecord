@@ -101,6 +101,15 @@ export const getChannels = async (): Promise<Channel[]> => {
   return dbAll<Channel>('SELECT * FROM channels ORDER BY position ASC');
 };
 
+export const getChannelById = async (id: string): Promise<Channel | undefined> => {
+  return dbGet<Channel>('SELECT * FROM channels WHERE id = ?', [id]);
+};
+
+export const deleteChannel = async (id: string): Promise<void> => {
+  await dbRun('DELETE FROM messages WHERE channel_id = ?', [id]);
+  await dbRun('DELETE FROM channels WHERE id = ?', [id]);
+};
+
 // --- Messages ---
 export interface Message {
   id: string;
