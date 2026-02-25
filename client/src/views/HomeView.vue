@@ -27,6 +27,13 @@ const activeVoiceParticipants = computed(() => {
 
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
 
+type AvatarBadgeType = 'speaking' | 'presence' | null
+
+const getAvatarBadgeType = (userId: string, showPresence: boolean): AvatarBadgeType => {
+  if (isVoiceUserSpeaking(userId)) return 'speaking'
+  return showPresence ? 'presence' : null
+}
+
 const sendMessage = () => {
   if (messageInput.value.trim() && activeTextChannel.value) {
     chatStore.sendMessage(activeTextChannel.value.id, messageInput.value.trim())
@@ -120,10 +127,13 @@ watch(() => chatStore.activeChannelMessages, async () => {
             :key="user.id"
             class="h-40 rounded-xl bg-[#2b2d31] border border-[#3f4147] flex items-center justify-center"
           >
-            <div class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="isVoiceUserSpeaking(user.id) ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
+            <div class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
               <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
               <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
-              <div v-if="isVoiceUserSpeaking(user.id)" class="absolute bottom-1 right-1 w-3.5 h-3.5 rounded-full bg-green-400 border-2 border-[#2b2d31]"></div>
+              <div
+                v-if="getAvatarBadgeType(user.id, false) === 'speaking'"
+                class="absolute bottom-1 right-1 w-3.5 h-3.5 rounded-full bg-green-400 border-2 border-[#2b2d31]"
+              ></div>
             </div>
           </div>
         </div>
