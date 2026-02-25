@@ -121,7 +121,7 @@ watch(() => chatStore.activeChannelMessages, async () => {
       </header>
 
       <main class="flex-1 overflow-y-auto p-6 custom-scrollbar">
-        <div v-if="activeVoiceParticipants.length > 0" class="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
+        <div v-if="activeVoiceParticipants.length > 0" class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-4">
           <div
             v-for="user in activeVoiceParticipants"
             :key="user.id"
