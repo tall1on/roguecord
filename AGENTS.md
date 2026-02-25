@@ -2,4 +2,4 @@
 - use vuejs 3 setup api, vite, typescript, nodejs, sqllite (data storage server)
 - dont make mistakes, try to make it work first time and think a lot if necessary
 - dont care about token/cost, make sure you dont make mistakes
-- 
+- provide migrations for existing server-dbs when adding/changing sqllite tables or content

@@ -11,6 +11,7 @@ import {
   getChannelMessages,
   createMessage,
   getUserById,
+  getOrCreateSystemUser,
   updateUserRole,
   getUsers,
   getServer,
@@ -181,11 +182,10 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
         if (client.isNewUser) {
           const server = await getServer();
           if (server && server.welcomeChannelId) {
-            // Create a system user or use the new user's ID for the welcome message
-            // Let's use the new user's ID but format it as a system message, or just a regular message
+            const systemUser = await getOrCreateSystemUser();
             const welcomeContent = `Welcome ${user.username} to the server!`;
-            const message = await createMessage(server.welcomeChannelId, user.id, welcomeContent);
-            const messageWithUser = { ...message, user };
+            const message = await createMessage(server.welcomeChannelId, systemUser.id, welcomeContent);
+            const messageWithUser = { ...message, user: systemUser };
             
             connectionManager.broadcastToAuthenticated({
               type: 'new_message',

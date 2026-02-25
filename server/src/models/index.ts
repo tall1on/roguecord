@@ -96,6 +96,22 @@ export const getUsers = async (): Promise<User[]> => {
   return dbAll<User>('SELECT * FROM users');
 };
 
+export const getOrCreateSystemUser = async (): Promise<User> => {
+  const systemPublicKey = '__system__';
+  const existing = await getUserByPublicKey(systemPublicKey);
+  if (existing) {
+    if (existing.role !== 'system') {
+      await updateUserRole(existing.id, 'system');
+      return (await getUserById(existing.id))!;
+    }
+    return existing;
+  }
+
+  const systemUser = await createUser('System', systemPublicKey, null);
+  await updateUserRole(systemUser.id, 'system');
+  return (await getUserById(systemUser.id))!;
+};
+
 export const updateUserRole = async (id: string, role: string): Promise<void> => {
   await dbRun('UPDATE users SET role = ? WHERE id = ?', [role, id]);
 };
