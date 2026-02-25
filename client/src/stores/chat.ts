@@ -421,21 +421,36 @@ export const useChatStore = defineStore('chat', () => {
         categories.value = payload.categories;
         channels.value = payload.channels;
         
-        // Auto-select first text channel if none selected
         if (!activeChannelId.value) {
-          const firstTextChannel = payload.channels?.find((c: Channel) => c.type === 'text');
-          if (firstTextChannel) {
-            setActiveChannel(firstTextChannel.id);
-          }
+          setFallbackActiveTextChannel(payload.channels || []);
         } else {
-          // Re-fetch messages for active channel in case we missed any while disconnected
-          getMessages(activeChannelId.value);
+          const activeChannel = (payload.channels || []).find((c: Channel) => c.id === activeChannelId.value);
+          if (activeChannel && activeChannel.type === 'text') {
+            // Re-fetch messages for active channel in case we missed any while disconnected
+            getMessages(activeChannelId.value);
+          } else {
+            setFallbackActiveTextChannel(payload.channels || []);
+          }
         }
         break;
         
       case 'channel_created':
         channels.value.push(payload.channel);
         break;
+
+      case 'channel_deleted': {
+        const deletedChannelId = payload.channel_id as string;
+        if (!deletedChannelId) break;
+
+        const deletedChannel = channels.value.find((c: Channel) => c.id === deletedChannelId);
+        channels.value = channels.value.filter((c: Channel) => c.id !== deletedChannelId);
+        delete messages.value[deletedChannelId];
+
+        if (deletedChannel?.type === 'text' && activeChannelId.value === deletedChannelId) {
+          setFallbackActiveTextChannel(channels.value);
+        }
+        break;
+      }
         
       case 'messages_list':
         messages.value[payload.channel_id] = payload.messages;
@@ -481,12 +496,30 @@ export const useChatStore = defineStore('chat', () => {
     send('get_channels');
   };
 
+  const setFallbackActiveTextChannel = (availableChannels: Channel[]) => {
+    const firstTextChannel = availableChannels.find((c: Channel) => c.type === 'text');
+    if (firstTextChannel) {
+      activeChannelId.value = firstTextChannel.id;
+      getMessages(firstTextChannel.id);
+    } else {
+      activeChannelId.value = null;
+    }
+  };
+
   const createChannel = (category_id: string | null, name: string, type: 'text' | 'voice') => {
     if (!name.trim()) {
       lastError.value = 'Channel name is required';
       return;
     }
     send('create_channel', { category_id, name, type });
+  };
+
+  const deleteChannel = (channel_id: string) => {
+    if (!channel_id) {
+      lastError.value = 'Channel ID is required';
+      return;
+    }
+    send('delete_channel', { channel_id });
   };
 
   const clearError = () => {
@@ -547,6 +580,7 @@ export const useChatStore = defineStore('chat', () => {
     disconnect,
     authenticate,
     createChannel,
+    deleteChannel,
     clearError,
     sendMessage,
     submitAdminKey,
