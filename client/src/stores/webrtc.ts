@@ -24,6 +24,21 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const producerToUser = new Map<string, string>();
   const consumerToProducer = new Map<string, string>();
 
+  const speakingUserIds = ref<Set<string>>(new Set());
+  const speakingDetectors = new Map<string, {
+    userId: string;
+    analyser: AnalyserNode;
+    source: MediaStreamAudioSourceNode;
+    dataArray: Uint8Array<ArrayBuffer>;
+    lastAboveThresholdAt: number;
+    isLocal: boolean;
+  }>();
+  const speakingContext = shallowRef<AudioContext | null>(null);
+  let speakingInterval: number | null = null;
+
+  const SPEAKING_THRESHOLD = 0.018;
+  const SPEAKING_HOLD_MS = 250;
+
   const ping = ref<number>(0);
   const bandwidth = ref<number>(0);
   const pingHistory = ref<number[]>([]);
@@ -36,6 +51,122 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   let lastBytesSent = 0;
   let lastBytesReceived = 0;
   let lastStatsTime = 0;
+
+  const ensureSpeakingContext = () => {
+    if (!speakingContext.value) {
+      speakingContext.value = new AudioContext();
+    }
+    return speakingContext.value;
+  };
+
+  const startSpeakingDetection = () => {
+    if (speakingInterval) return;
+
+    speakingInterval = window.setInterval(() => {
+      const now = Date.now();
+      const nextSpeakingUsers = new Set<string>();
+
+      speakingDetectors.forEach((detector) => {
+        detector.analyser.getByteTimeDomainData(detector.dataArray);
+
+        let sumSquares = 0;
+        for (const sample of detector.dataArray) {
+          const normalized = (sample - 128) / 128;
+          sumSquares += normalized * normalized;
+        }
+
+        const rms = Math.sqrt(sumSquares / detector.dataArray.length);
+        const overThreshold = rms > SPEAKING_THRESHOLD;
+
+        if (overThreshold) {
+          detector.lastAboveThresholdAt = now;
+        }
+
+        let isSpeaking = now - detector.lastAboveThresholdAt <= SPEAKING_HOLD_MS;
+
+        if (detector.isLocal && (isMuted.value || isDeafened.value)) {
+          isSpeaking = false;
+        }
+
+        if (isSpeaking) {
+          nextSpeakingUsers.add(detector.userId);
+        }
+      });
+
+      speakingUserIds.value = nextSpeakingUsers;
+    }, 120);
+  };
+
+  const removeSpeakingDetector = (detectorKey: string) => {
+    const detector = speakingDetectors.get(detectorKey);
+    if (!detector) return;
+
+    try {
+      detector.source.disconnect();
+    } catch (_e) {
+      // no-op
+    }
+
+    speakingDetectors.delete(detectorKey);
+
+    if (speakingDetectors.size === 0) {
+      speakingUserIds.value = new Set();
+    }
+  };
+
+  const addSpeakingDetector = (detectorKey: string, userId: string, stream: MediaStream, isLocal: boolean = false) => {
+    if (speakingDetectors.has(detectorKey)) {
+      removeSpeakingDetector(detectorKey);
+    }
+
+    const context = ensureSpeakingContext();
+    const source = context.createMediaStreamSource(stream);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.2;
+
+    source.connect(analyser);
+
+    speakingDetectors.set(detectorKey, {
+      userId,
+      analyser,
+      source,
+      dataArray: new Uint8Array(new ArrayBuffer(analyser.fftSize)),
+      lastAboveThresholdAt: 0,
+      isLocal,
+    });
+
+    startSpeakingDetection();
+  };
+
+  const stopSpeakingDetection = async () => {
+    if (speakingInterval) {
+      clearInterval(speakingInterval);
+      speakingInterval = null;
+    }
+
+    speakingDetectors.forEach((detector) => {
+      try {
+        detector.source.disconnect();
+      } catch (_e) {
+        // no-op
+      }
+    });
+
+    speakingDetectors.clear();
+    speakingUserIds.value = new Set();
+
+    if (speakingContext.value) {
+      try {
+        await speakingContext.value.close();
+      } catch (_e) {
+        // no-op
+      }
+      speakingContext.value = null;
+    }
+  };
+
+  const isUserSpeaking = (userId: string) => speakingUserIds.value.has(userId);
 
   const startStatsCollection = () => {
     if (statsInterval) clearInterval(statsInterval);
@@ -288,8 +419,10 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     voiceParticipants.value = [];
     activeVoiceChannelId.value = null;
     device.value = null;
+    speakingUserIds.value = new Set();
     
     stopStatsCollection();
+    void stopSpeakingDetection();
   };
 
   const handleMessage = async (message: any) => {
@@ -325,6 +458,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         if (payload.channel_id !== activeVoiceChannelId.value) return;
         await initDevice(payload.rtpCapabilities);
         voiceParticipants.value = payload.users;
+
+        speakingUserIds.value = new Set();
         
         // Create send and recv transports
         chatStore.send('create_webrtc_transport', { channel_id: payload.channel_id, direction: 'send' });
@@ -376,9 +511,11 @@ export const useWebRtcStore = defineStore('webrtc', () => {
                 consumer.close();
                 consumers.value.delete(consId);
               }
-              
+
+              removeSpeakingDetector(consId);
+               
               remoteStreams.value.delete(consId);
-              
+               
               const audio = audioElements.get(consId);
               if (audio) {
                 audio.pause();
@@ -391,6 +528,15 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           }
           
           remoteStreams.value = new Map(remoteStreams.value);
+        }
+        break;
+
+      case 'channel_deleted':
+        channelParticipants.value.delete(payload.channel_id);
+        channelParticipants.value = new Map(channelParticipants.value);
+
+        if (payload.channel_id === activeVoiceChannelId.value) {
+          leaveVoiceChannel();
         }
         break;
         
@@ -502,7 +648,11 @@ export const useWebRtcStore = defineStore('webrtc', () => {
                   track.enabled = false;
                 });
               }
-              
+
+              if (chatStore.currentUser?.id) {
+                addSpeakingDetector('local', chatStore.currentUser.id, localStream.value, true);
+              }
+               
               producer.value = await sendTransport.value.produce({ track: audioTrack });
               
               if (isMuted.value || isDeafened.value) {
@@ -556,11 +706,14 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           
           consumers.value.set(consumer.id, consumer);
           consumerToProducer.set(consumer.id, payload.producer_id);
+
+          const remoteUserId = producerToUser.get(payload.producer_id);
           
           consumer.on('producerclose', () => {
             consumers.value.delete(consumer.id);
             remoteStreams.value.delete(consumer.id);
             remoteStreams.value = new Map(remoteStreams.value);
+            removeSpeakingDetector(consumer.id);
             const audio = audioElements.get(consumer.id);
             if (audio) {
               audio.pause();
@@ -571,6 +724,10 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           
           const stream = new MediaStream();
           stream.addTrack(consumer.track);
+
+          if (remoteUserId) {
+            addSpeakingDetector(consumer.id, remoteUserId, stream);
+          }
           
           // Store the stream with the producer ID or user ID
           // We don't have the user ID here easily, so we'll just use consumer ID
@@ -618,6 +775,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     activeVoiceChannelId,
     voiceParticipants,
     channelParticipants,
+    speakingUserIds,
     localStream,
     remoteStreams,
     ping,
@@ -628,6 +786,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     isDeafened,
     joinVoiceChannel,
     leaveVoiceChannel,
+    isUserSpeaking,
     toggleMute,
     toggleDeafen
   };

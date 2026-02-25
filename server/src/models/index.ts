@@ -29,6 +29,44 @@ export const dbAll = <T>(sql: string, params: any[] = []): Promise<T[]> => {
   });
 };
 
+// --- Servers ---
+export interface Server {
+  id: string;
+  name: string;
+  title: string;
+  rulesChannelId?: string;
+  welcomeChannelId?: string;
+}
+
+export const getServer = async (): Promise<Server | undefined> => {
+  const row = await dbGet<any>('SELECT * FROM servers LIMIT 1');
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    name: row.name,
+    title: row.title || row.name,
+    rulesChannelId: row.rules_channel_id,
+    welcomeChannelId: row.welcome_channel_id
+  };
+};
+
+export const createServer = async (name: string, welcomeChannelId?: string): Promise<Server> => {
+  const id = crypto.randomUUID();
+  await dbRun('INSERT INTO servers (id, name, title, welcome_channel_id) VALUES (?, ?, ?, ?)', [id, name, name, welcomeChannelId]);
+  const row = await dbGet<any>('SELECT * FROM servers WHERE id = ?', [id]);
+  return {
+    id: row.id,
+    name: row.name,
+    title: row.title || row.name,
+    rulesChannelId: row.rules_channel_id,
+    welcomeChannelId: row.welcome_channel_id
+  };
+};
+
+export const updateServerSettings = async (id: string, title: string, rulesChannelId: string | null, welcomeChannelId: string | null): Promise<void> => {
+  await dbRun('UPDATE servers SET title = ?, rules_channel_id = ?, welcome_channel_id = ? WHERE id = ?', [title, rulesChannelId, welcomeChannelId, id]);
+};
+
 // --- Users ---
 export interface User {
   id: string;
@@ -59,6 +97,22 @@ export const getUserByPublicKey = async (publicKey: string): Promise<User | unde
 
 export const getUsers = async (): Promise<User[]> => {
   return dbAll<User>('SELECT * FROM users');
+};
+
+export const getOrCreateSystemUser = async (): Promise<User> => {
+  const systemPublicKey = '__system__';
+  const existing = await getUserByPublicKey(systemPublicKey);
+  if (existing) {
+    if (existing.role !== 'system') {
+      await updateUserRole(existing.id, 'system');
+      return (await getUserById(existing.id))!;
+    }
+    return existing;
+  }
+
+  const systemUser = await createUser('System', systemPublicKey, null);
+  await updateUserRole(systemUser.id, 'system');
+  return (await getUserById(systemUser.id))!;
 };
 
 export const updateUserRole = async (id: string, role: string): Promise<void> => {
@@ -99,6 +153,15 @@ export const createChannel = async (category_id: string | null, name: string, ty
 
 export const getChannels = async (): Promise<Channel[]> => {
   return dbAll<Channel>('SELECT * FROM channels ORDER BY position ASC');
+};
+
+export const getChannelById = async (id: string): Promise<Channel | undefined> => {
+  return dbGet<Channel>('SELECT * FROM channels WHERE id = ?', [id]);
+};
+
+export const deleteChannel = async (id: string): Promise<void> => {
+  await dbRun('DELETE FROM messages WHERE channel_id = ?', [id]);
+  await dbRun('DELETE FROM channels WHERE id = ?', [id]);
 };
 
 // --- Messages ---
