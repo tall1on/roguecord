@@ -39,6 +39,19 @@ export interface SavedConnection {
   iconUrl?: string;
 }
 
+export interface Server {
+  id: string;
+  name: string;
+  title: string;
+  rulesChannelId?: string | null;
+  welcomeChannelId?: string | null;
+}
+
+export interface ActiveMainPanel {
+  type: 'text' | 'voice';
+  channelId: string | null;
+}
+
 const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
   let binary = '';
   const bytes = new Uint8Array(buffer);
@@ -110,6 +123,8 @@ export const useChatStore = defineStore('chat', () => {
   const isConnected = ref(false);
   const currentUser = ref<User | null>(null);
   const currentUserRole = ref<string>('user');
+  const server = ref<Server | null>(null);
+  const lastError = ref<string | null>(null);
   
   const savedConnections = ref<SavedConnection[]>(
     JSON.parse(localStorage.getItem('savedConnections') || '[]').map((c: SavedConnection) => ({
@@ -127,6 +142,7 @@ export const useChatStore = defineStore('chat', () => {
   const messages = ref<Record<string, Message[]>>({}); // channel_id -> Message[]
   
   const activeChannelId = ref<string | null>(null);
+  const activeMainPanel = ref<ActiveMainPanel>({ type: 'text', channelId: null });
   
   let pingInterval: number | null = null;
   let pongTimeout: number | null = null;
@@ -139,16 +155,109 @@ export const useChatStore = defineStore('chat', () => {
     localStorage.setItem('username', username);
   };
 
-  const addSavedConnection = (name: string, address: string) => {
+  const normalizeServerAddress = (address: string) => {
+    let wsUrl = address.trim();
+    if (!wsUrl) return wsUrl;
+
+    if (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://')) {
+      const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+      wsUrl = `${protocol}${wsUrl}`;
+    } else if (wsUrl.startsWith('ws://') && window.location.protocol === 'https:') {
+      wsUrl = wsUrl.replace(/^ws:\/\//i, 'wss://');
+    }
+
+    return wsUrl.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`);
+  };
+
+  const getConnectionNameFromAddress = (address: string) => {
+    try {
+      const normalizedForParsing = address.startsWith('ws://') || address.startsWith('wss://')
+        ? address
+        : `ws://${address}`;
+      const url = new URL(normalizedForParsing);
+      return url.hostname || address;
+    } catch {
+      return address;
+    }
+  };
+
+  const addSavedConnection = (address: string, name?: string) => {
     // Replace 0.0.0.0 with localhost to prevent browser connection errors
-    address = address.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`);
+    address = normalizeServerAddress(address);
+
+    const existing = savedConnections.value.find((c) => c.address === address);
+    if (existing) {
+      return existing;
+    }
+
     const newConnection: SavedConnection = {
       id: crypto.randomUUID(),
-      name,
+      name: (name || getConnectionNameFromAddress(address)).trim() || 'Server',
       address
     };
     savedConnections.value.push(newConnection);
     localStorage.setItem('savedConnections', JSON.stringify(savedConnections.value));
+    return newConnection;
+  };
+
+  const validateServerConnection = (address: string) => {
+    return new Promise<void>((resolve, reject) => {
+      const wsUrl = normalizeServerAddress(address);
+      if (!wsUrl) {
+        reject(new Error('WebSocket address is required'));
+        return;
+      }
+
+      let settled = false;
+      const testSocket = new WebSocket(wsUrl);
+      const timeout = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        testSocket.close();
+        reject(new Error('Connection timed out'));
+      }, 5000);
+
+      testSocket.onopen = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        testSocket.close();
+        resolve();
+      };
+
+      testSocket.onerror = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        reject(new Error('Failed to connect to server'));
+      };
+
+      testSocket.onclose = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        reject(new Error('Failed to connect to server'));
+      };
+    });
+  };
+
+  const addServerConnection = async (address: string) => {
+    lastError.value = null;
+    const wsUrl = normalizeServerAddress(address);
+    if (!wsUrl) {
+      lastError.value = 'WebSocket address is required';
+      return false;
+    }
+
+    try {
+      await validateServerConnection(wsUrl);
+      const connection = addSavedConnection(wsUrl);
+      connect(connection.address);
+      return true;
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : 'Failed to connect to server';
+      return false;
+    }
   };
 
   const removeSavedConnection = (id: string) => {
@@ -227,7 +336,7 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     // Replace 0.0.0.0 with localhost in the final URL to prevent browser connection errors
-    wsUrl = wsUrl.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`);
+    wsUrl = normalizeServerAddress(wsUrl);
 
     console.log(`[DEBUG] Final wsUrl: ${wsUrl}`);
 
@@ -347,13 +456,27 @@ export const useChatStore = defineStore('chat', () => {
     categories.value = [];
     channels.value = [];
     activeChannelId.value = null;
+    activeMainPanel.value = { type: 'text', channelId: null };
     messages.value = {};
     users.value = [];
     onlineUserIds.value.clear();
     currentUser.value = null;
+    server.value = null;
   };
 
   const messageListeners = ref<((message: any) => void)[]>([]);
+
+  const applyServerState = (nextServer: Server) => {
+    server.value = nextServer;
+
+    if (activeConnectionId.value) {
+      const currentConnection = savedConnections.value.find((c) => c.id === activeConnectionId.value);
+      if (currentConnection && nextServer.title && currentConnection.name !== nextServer.title) {
+        currentConnection.name = nextServer.title;
+        localStorage.setItem('savedConnections', JSON.stringify(savedConnections.value));
+      }
+    }
+  };
 
   const addMessageListener = (listener: (message: any) => void) => {
     messageListeners.value.push(listener);
@@ -382,8 +505,20 @@ export const useChatStore = defineStore('chat', () => {
 
       case 'authenticated':
         currentUser.value = payload.user;
+        currentUserRole.value = payload.user.role || 'user';
+        if (payload.server) {
+          applyServerState(payload.server);
+        }
         saveLocalUsername(payload.user.username);
         getChannels();
+        break;
+        
+      case 'SERVER_SETTINGS_UPDATED':
+      case 'server_settings_updated':
+      case 'SERVER_UPDATED':
+        if (payload.server) {
+          applyServerState(payload.server);
+        }
         break;
         
       case 'member_list':
@@ -419,21 +554,38 @@ export const useChatStore = defineStore('chat', () => {
         categories.value = payload.categories;
         channels.value = payload.channels;
         
-        // Auto-select first text channel if none selected
         if (!activeChannelId.value) {
-          const firstTextChannel = payload.channels?.find((c: Channel) => c.type === 'text');
-          if (firstTextChannel) {
-            setActiveChannel(firstTextChannel.id);
-          }
+          setFallbackActiveTextChannel(payload.channels || []);
         } else {
-          // Re-fetch messages for active channel in case we missed any while disconnected
-          getMessages(activeChannelId.value);
+          const activeChannel = (payload.channels || []).find((c: Channel) => c.id === activeChannelId.value);
+          if (activeChannel && activeChannel.type === 'text') {
+            // Re-fetch messages for active channel in case we missed any while disconnected
+            getMessages(activeChannelId.value);
+          } else {
+            setFallbackActiveTextChannel(payload.channels || []);
+          }
         }
         break;
         
       case 'channel_created':
         channels.value.push(payload.channel);
         break;
+
+      case 'channel_deleted': {
+        const deletedChannelId = payload.channel_id as string;
+        if (!deletedChannelId) break;
+
+        const deletedChannel = channels.value.find((c: Channel) => c.id === deletedChannelId);
+        channels.value = channels.value.filter((c: Channel) => c.id !== deletedChannelId);
+        delete messages.value[deletedChannelId];
+
+        if (deletedChannel?.type === 'text' && activeChannelId.value === deletedChannelId) {
+          setFallbackActiveTextChannel(channels.value);
+        } else if (deletedChannel?.type === 'voice' && activeMainPanel.value.type === 'voice' && activeMainPanel.value.channelId === deletedChannelId) {
+          setFallbackActiveTextChannel(channels.value);
+        }
+        break;
+      }
         
       case 'messages_list':
         messages.value[payload.channel_id] = payload.messages;
@@ -448,6 +600,7 @@ export const useChatStore = defineStore('chat', () => {
         break;
         
       case 'error':
+        lastError.value = payload.message;
         console.error('Server error:', payload.message);
         break;
         
@@ -478,8 +631,49 @@ export const useChatStore = defineStore('chat', () => {
     send('get_channels');
   };
 
+  const setFallbackActiveTextChannel = (availableChannels: Channel[]) => {
+    const firstTextChannel = availableChannels.find((c: Channel) => c.type === 'text');
+    if (firstTextChannel) {
+      activeChannelId.value = firstTextChannel.id;
+      activeMainPanel.value = { type: 'text', channelId: firstTextChannel.id };
+      getMessages(firstTextChannel.id);
+    } else {
+      activeChannelId.value = null;
+      activeMainPanel.value = { type: 'text', channelId: null };
+    }
+  };
+
   const createChannel = (category_id: string | null, name: string, type: 'text' | 'voice') => {
+    if (!name.trim()) {
+      lastError.value = 'Channel name is required';
+      return;
+    }
     send('create_channel', { category_id, name, type });
+  };
+
+  const deleteChannel = (channel_id: string) => {
+    if (!channel_id) {
+      lastError.value = 'Channel ID is required';
+      return;
+    }
+    send('delete_channel', { channel_id });
+  };
+
+  const updateServerSettings = (serverId: string, title: string, rulesChannelId: string | null, welcomeChannelId: string | null) => {
+    if (server.value && server.value.id === serverId) {
+      applyServerState({
+        ...server.value,
+        title: (title || '').trim() || server.value.title,
+        rulesChannelId,
+        welcomeChannelId
+      });
+    }
+
+    send('UPDATE_SERVER_SETTINGS', { serverId, title, rulesChannelId, welcomeChannelId });
+  };
+
+  const clearError = () => {
+    lastError.value = null;
   };
 
   const getMessages = (channel_id: string) => {
@@ -496,7 +690,12 @@ export const useChatStore = defineStore('chat', () => {
 
   const setActiveChannel = (channel_id: string) => {
     activeChannelId.value = channel_id;
+    activeMainPanel.value = { type: 'text', channelId: channel_id };
     getMessages(channel_id);
+  };
+
+  const setActiveVoicePanel = (channel_id: string) => {
+    activeMainPanel.value = { type: 'voice', channelId: channel_id };
   };
 
   const activeServerChannels = computed(() => {
@@ -516,6 +715,8 @@ export const useChatStore = defineStore('chat', () => {
     isConnected,
     currentUser,
     currentUserRole,
+    server,
+    lastError,
     savedConnections,
     activeConnectionId,
     localUsername,
@@ -525,19 +726,25 @@ export const useChatStore = defineStore('chat', () => {
     channels,
     messages,
     activeChannelId,
+    activeMainPanel,
     activeServerChannels,
     activeServerCategories,
     activeChannelMessages,
     saveLocalUsername,
     addSavedConnection,
+    addServerConnection,
     removeSavedConnection,
     connect,
     disconnect,
     authenticate,
     createChannel,
+    deleteChannel,
+    updateServerSettings,
+    clearError,
     sendMessage,
     submitAdminKey,
     setActiveChannel,
+    setActiveVoicePanel,
     send,
     ws,
     addMessageListener,

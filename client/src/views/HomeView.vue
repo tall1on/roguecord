@@ -1,20 +1,42 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
 import { useChatStore } from '../stores/chat'
+import { useWebRtcStore } from '../stores/webrtc'
 
 const chatStore = useChatStore()
+const webrtcStore = useWebRtcStore()
 const messageInput = ref('')
 const messagesContainer = ref<HTMLElement | null>(null)
 
-const activeChannel = computed(() => {
-  if (!chatStore.activeChannelId) return null
+const activeTextChannel = computed(() => {
+  if (chatStore.activeMainPanel.type !== 'text' || !chatStore.activeMainPanel.channelId) return null
   const channels = chatStore.channels || []
-  return channels.find(c => c.id === chatStore.activeChannelId)
+  return channels.find(c => c.id === chatStore.activeMainPanel.channelId && c.type === 'text')
 })
 
+const activeVoiceChannel = computed(() => {
+  if (chatStore.activeMainPanel.type !== 'voice' || !chatStore.activeMainPanel.channelId) return null
+  const channels = chatStore.channels || []
+  return channels.find(c => c.id === chatStore.activeMainPanel.channelId && c.type === 'voice')
+})
+
+const activeVoiceParticipants = computed(() => {
+  if (!activeVoiceChannel.value) return []
+  return webrtcStore.channelParticipants.get(activeVoiceChannel.value.id) || []
+})
+
+const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
+
+type AvatarBadgeType = 'speaking' | 'presence' | null
+
+const getAvatarBadgeType = (userId: string, showPresence: boolean): AvatarBadgeType => {
+  if (isVoiceUserSpeaking(userId)) return 'speaking'
+  return showPresence ? 'presence' : null
+}
+
 const sendMessage = () => {
-  if (messageInput.value.trim() && chatStore.activeChannelId) {
-    chatStore.sendMessage(chatStore.activeChannelId, messageInput.value.trim())
+  if (messageInput.value.trim() && activeTextChannel.value) {
+    chatStore.sendMessage(activeTextChannel.value.id, messageInput.value.trim())
     messageInput.value = ''
   }
 }
@@ -26,6 +48,7 @@ const formatTime = (dateString: string) => {
 
 // Auto-scroll to bottom when messages change
 watch(() => chatStore.activeChannelMessages, async () => {
+  if (!activeTextChannel.value) return
   await nextTick()
   if (messagesContainer.value) {
     messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
@@ -35,24 +58,24 @@ watch(() => chatStore.activeChannelMessages, async () => {
 
 <template>
   <div class="flex-1 flex flex-col h-full bg-[#313338]">
-    <template v-if="activeChannel">
+    <template v-if="activeTextChannel">
       <!-- Chat Header -->
       <header class="h-12 border-b border-[#1e1f22] flex items-center px-4 shadow-sm shrink-0">
         <h2 class="font-semibold text-white flex items-center">
           <span class="text-gray-400 text-xl mr-2">#</span>
-          {{ activeChannel.name }}
+          {{ activeTextChannel.name }}
         </h2>
       </header>
 
       <!-- Chat Messages Area -->
       <main ref="messagesContainer" class="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
-        <div v-if="chatStore.activeChannelMessages.length === 0" class="flex flex-col justify-end h-full pb-4">
-          <div class="w-16 h-16 rounded-full bg-[#4e5058] flex items-center justify-center mb-4">
-            <span class="text-3xl text-white">#</span>
+          <div v-if="chatStore.activeChannelMessages.length === 0" class="flex flex-col justify-end h-full pb-4">
+            <div class="w-16 h-16 rounded-full bg-[#4e5058] flex items-center justify-center mb-4">
+              <span class="text-3xl text-white">#</span>
+            </div>
+            <h1 class="text-3xl font-bold text-white mb-2">Welcome to #{{ activeTextChannel.name }}!</h1>
+            <p class="text-gray-400">This is the start of the #{{ activeTextChannel.name }} channel.</p>
           </div>
-          <h1 class="text-3xl font-bold text-white mb-2">Welcome to #{{ activeChannel.name }}!</h1>
-          <p class="text-gray-400">This is the start of the #{{ activeChannel.name }} channel.</p>
-        </div>
 
         <div 
           v-for="message in chatStore.activeChannelMessages" 
@@ -82,11 +105,39 @@ watch(() => chatStore.activeChannelMessages, async () => {
             v-model="messageInput"
             @keyup.enter="sendMessage"
             type="text" 
-            :placeholder="`Message #${activeChannel.name}`" 
+            :placeholder="`Message #${activeTextChannel.name}`" 
             class="bg-transparent border-none outline-none flex-1 text-gray-200 placeholder-gray-500"
           />
         </div>
       </div>
+    </template>
+
+    <template v-else-if="activeVoiceChannel">
+      <header class="h-12 border-b border-[#1e1f22] flex items-center px-4 shadow-sm shrink-0">
+        <h2 class="font-semibold text-white flex items-center">
+          <span class="text-gray-400 text-xl mr-2">🔊</span>
+          {{ activeVoiceChannel.name }}
+        </h2>
+      </header>
+
+      <main class="flex-1 overflow-y-auto p-6 custom-scrollbar">
+        <div v-if="activeVoiceParticipants.length > 0" class="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
+          <div
+            v-for="user in activeVoiceParticipants"
+            :key="user.id"
+            class="h-40 rounded-xl bg-[#2b2d31] border border-[#3f4147] flex items-center justify-center"
+          >
+            <div class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
+              <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
+              <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div v-else class="h-full flex items-center justify-center text-gray-400">
+          No participants in this voice channel.
+        </div>
+      </main>
     </template>
     
     <template v-else>
