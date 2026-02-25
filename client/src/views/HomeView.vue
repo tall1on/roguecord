@@ -29,9 +29,15 @@ const voiceParticipantCount = computed(() => activeVoiceParticipants.value.lengt
 
 const isTwoParticipantVoiceLayout = computed(() => activeVoiceParticipants.value.length === 2)
 
+const isThreeParticipantVoiceLayout = computed(() => activeVoiceParticipants.value.length === 3)
+
 const voiceGridClass = computed(() => {
   if (isTwoParticipantVoiceLayout.value) {
     return 'grid-cols-1 grid-rows-2 auto-rows-fr'
+  }
+
+  if (isThreeParticipantVoiceLayout.value) {
+    return 'grid-cols-1 grid-rows-3 auto-rows-fr'
   }
 
   return 'grid-cols-[repeat(auto-fit,minmax(min(100%,360px),1fr))] auto-rows-fr'
