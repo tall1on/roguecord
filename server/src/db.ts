@@ -71,11 +71,36 @@ function initializeDatabase() {
         id TEXT PRIMARY KEY,
         category_id TEXT,
         name TEXT NOT NULL,
-        type TEXT NOT NULL CHECK(type IN ('text', 'voice')),
+        type TEXT NOT NULL CHECK(type IN ('text', 'voice', 'rss')),
         position INTEGER NOT NULL DEFAULT 0,
+        feed_url TEXT,
         FOREIGN KEY (category_id) REFERENCES categories(id)
       )
-    `);
+    `, (err) => {
+      if (err) {
+        console.error('Error creating channels table:', err.message);
+        return;
+      }
+
+      migrateChannelsTableForRss();
+    });
+
+    // RSS dedupe tracking table
+    db.run(`
+      CREATE TABLE IF NOT EXISTS rss_channel_items (
+        channel_id TEXT NOT NULL,
+        item_key TEXT NOT NULL,
+        message_id TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (channel_id, item_key),
+        FOREIGN KEY (channel_id) REFERENCES channels(id),
+        FOREIGN KEY (message_id) REFERENCES messages(id)
+      )
+    `, (err) => {
+      if (err) {
+        console.error('Error creating rss_channel_items table:', err.message);
+      }
+    });
 
     // Messages Table
     db.run(`
@@ -145,5 +170,69 @@ function initializeDatabase() {
     });
 
     console.log('Database tables initialized.');
+  });
+}
+
+function migrateChannelsTableForRss() {
+  db.all('PRAGMA table_info(channels)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      console.error('Failed to inspect channels table for migration:', pragmaErr.message);
+      return;
+    }
+
+    const hasFeedUrl = columns.some((column) => column.name === 'feed_url');
+    if (hasFeedUrl) {
+      return;
+    }
+
+    db.run(
+      `
+      CREATE TABLE IF NOT EXISTS channels_new (
+        id TEXT PRIMARY KEY,
+        category_id TEXT,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('text', 'voice', 'rss')),
+        position INTEGER NOT NULL DEFAULT 0,
+        feed_url TEXT,
+        FOREIGN KEY (category_id) REFERENCES categories(id)
+      )
+      `,
+      (createErr) => {
+        if (createErr) {
+          console.error('Failed to create channels_new migration table:', createErr.message);
+          return;
+        }
+
+        db.run(
+          `
+          INSERT INTO channels_new (id, category_id, name, type, position, feed_url)
+          SELECT id, category_id, name, type, position, NULL FROM channels
+          `,
+          (copyErr) => {
+            if (copyErr) {
+              console.error('Failed to copy channels into migration table:', copyErr.message);
+              db.run('DROP TABLE IF EXISTS channels_new', () => {});
+              return;
+            }
+
+            db.run('DROP TABLE channels', (dropErr) => {
+              if (dropErr) {
+                console.error('Failed to drop old channels table during migration:', dropErr.message);
+                db.run('DROP TABLE IF EXISTS channels_new', () => {});
+                return;
+              }
+
+              db.run('ALTER TABLE channels_new RENAME TO channels', (renameErr) => {
+                if (renameErr) {
+                  console.error('Failed to rename channels_new table during migration:', renameErr.message);
+                  return;
+                }
+                console.log('Migrated channels table to support rss channels and feed_url.');
+              });
+            });
+          }
+        );
+      }
+    );
   });
 }

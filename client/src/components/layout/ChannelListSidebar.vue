@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic } from 'lucide-vue-next'
+import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss } from 'lucide-vue-next'
 import { useChatStore, type Channel, type User } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 
@@ -18,7 +18,7 @@ const emit = defineEmits<{
   (e: 'open-invite'): void
   (e: 'remove-server'): void
   (e: 'open-admin'): void
-  (e: 'open-create-channel', payload: { categoryId: string | null; type?: 'text' | 'voice' }): void
+  (e: 'open-create-channel', payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' }): void
 }>()
 
 const chatStore = useChatStore()
@@ -74,7 +74,7 @@ onUnmounted(() => {
 })
 
 const isChannelActive = (channel: Channel) => {
-  if (channel.type === 'text') {
+  if (channel.type === 'text' || channel.type === 'rss') {
     return chatStore.activeMainPanel.type === 'text' && chatStore.activeMainPanel.channelId === channel.id
   }
 
@@ -86,7 +86,7 @@ const isChannelActive = (channel: Channel) => {
 }
 
 const handleChannelClick = (channel: Channel) => {
-  if (channel.type === 'text') {
+  if (channel.type === 'text' || channel.type === 'rss') {
     chatStore.setActiveChannel(channel.id)
   } else if (channel.type === 'voice') {
     chatStore.setActiveVoicePanel(channel.id)
@@ -127,7 +127,7 @@ const deleteChannelFromContextMenu = () => {
   chatStore.deleteChannel(channelToDelete.id)
 }
 
-const openCreateChannelFromContextMenu = (type: 'text' | 'voice') => {
+const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss') => {
   if (!props.isAdmin) return
 
   contextMenuVisible.value = false
@@ -186,6 +186,7 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
                 @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
               >
                 <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
+                <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
                 <Volume2 v-else class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
                 <span class="truncate font-medium">{{ channel.name }}</span>
               </div>
@@ -229,6 +230,7 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
                 @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
               >
                 <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
+                <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
                 <Volume2 v-else class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
                 <span class="truncate font-medium">{{ channel.name }}</span>
               </div>
@@ -281,6 +283,13 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
         >
           <Volume2 class="w-4 h-4" />
           Create voice channel
+        </button>
+        <button
+          class="w-full px-3 py-2 text-left text-sm text-gray-200 hover:bg-[#2b2d31] flex items-center gap-2"
+          @click="openCreateChannelFromContextMenu('rss')"
+        >
+          <Rss class="w-4 h-4" />
+          Create RSS channel
         </button>
       </div>
     </template>

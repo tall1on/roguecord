@@ -11,7 +11,7 @@ const messagesContainer = ref<HTMLElement | null>(null)
 const activeTextChannel = computed(() => {
   if (chatStore.activeMainPanel.type !== 'text' || !chatStore.activeMainPanel.channelId) return null
   const channels = chatStore.channels || []
-  return channels.find(c => c.id === chatStore.activeMainPanel.channelId && c.type === 'text')
+  return channels.find(c => c.id === chatStore.activeMainPanel.channelId && (c.type === 'text' || c.type === 'rss'))
 })
 
 const activeVoiceChannel = computed(() => {

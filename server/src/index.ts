@@ -8,6 +8,7 @@ import {createWorker} from './mediasoup';
 import {connectionManager} from './ws/connectionManager';
 import {handleMessage, handleClientDisconnect} from './ws/handlers';
 import {adminKey} from './admin';
+import { startRssPolling } from './rssPolling';
 
 dotenv.config();
 
@@ -75,6 +76,7 @@ async function startServer() {
         } catch (error) {
             console.error('Failed to create Mediasoup worker:', error);
         }
+        startRssPolling();
         console.log(`Admin Key: ${adminKey}`);
     });
 }
