@@ -249,7 +249,10 @@ const handleGetChannels = async (client: ClientConnection) => {
   }));
 };
 
-const handleCreateChannel = async (client: ClientConnection, payload: { category_id: string | null, name: string, type: 'text' | 'voice' }) => {
+const handleCreateChannel = async (
+  client: ClientConnection,
+  payload: { category_id: string | null, name: string, type: 'text' | 'voice' | 'rss', feed_url?: string }
+) => {
   if (!client.userId) return;
   const { category_id, name, type } = payload;
 
@@ -259,9 +262,28 @@ const handleCreateChannel = async (client: ClientConnection, payload: { category
     return;
   }
 
-  if (type !== 'text' && type !== 'voice') {
+  if (type !== 'text' && type !== 'voice' && type !== 'rss') {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid channel type' } }));
     return;
+  }
+
+  const normalizedFeedUrl = typeof payload.feed_url === 'string' ? payload.feed_url.trim() : '';
+  if (type === 'rss') {
+    if (!normalizedFeedUrl) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'RSS feed URL is required' } }));
+      return;
+    }
+
+    try {
+      const feedUrl = new URL(normalizedFeedUrl);
+      if (feedUrl.protocol !== 'http:' && feedUrl.protocol !== 'https:') {
+        client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'RSS feed URL must use http or https' } }));
+        return;
+      }
+    } catch {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid RSS feed URL' } }));
+      return;
+    }
   }
 
   const user = await getUserById(client.userId);
@@ -271,7 +293,7 @@ const handleCreateChannel = async (client: ClientConnection, payload: { category
   }
 
   try {
-    const channel = await createChannel(category_id, normalizedName, type);
+    const channel = await createChannel(category_id, normalizedName, type, 0, type === 'rss' ? normalizedFeedUrl : null);
 
     // Broadcast to all authenticated users
     connectionManager.broadcastToAuthenticated({

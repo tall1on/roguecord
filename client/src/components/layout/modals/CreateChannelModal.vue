@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { Hash, Volume2 } from 'lucide-vue-next'
+import { Hash, Rss, Volume2 } from 'lucide-vue-next'
 
 const visible = defineModel<boolean>('visible', { required: true })
 const channelName = defineModel<string>('channelName', { required: true })
-const channelType = defineModel<'text' | 'voice'>('channelType', { required: true })
+const channelType = defineModel<'text' | 'voice' | 'rss'>('channelType', { required: true })
+const channelFeedUrl = defineModel<string>('channelFeedUrl', { required: true })
 
 defineProps<{
   errorMessage: string | null
@@ -38,6 +39,14 @@ const emit = defineEmits<{
               <div class="text-xs text-gray-400">Hang out together with voice, video, and screen share</div>
             </div>
           </label>
+          <label class="flex items-center p-3 bg-[#2b2d31] rounded cursor-pointer hover:bg-[#3f4147]">
+            <input v-model="channelType" type="radio" value="rss" class="mr-3 text-indigo-500 focus:ring-indigo-500 bg-[#1e1f22] border-gray-600">
+            <Rss class="w-5 h-5 text-gray-400 mr-2" />
+            <div>
+              <div class="text-white font-medium">RSS</div>
+              <div class="text-xs text-gray-400">Automatically post updates from an RSS/Atom feed</div>
+            </div>
+          </label>
         </div>
       </div>
 
@@ -45,12 +54,23 @@ const emit = defineEmits<{
         <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Channel Name</label>
         <div class="relative">
           <Hash v-if="channelType === 'text'" class="w-4 h-4 text-gray-400 absolute left-3 top-3" />
-          <Volume2 v-else class="w-4 h-4 text-gray-400 absolute left-3 top-3" />
+          <Volume2 v-else-if="channelType === 'voice'" class="w-4 h-4 text-gray-400 absolute left-3 top-3" />
+          <Rss v-else class="w-4 h-4 text-gray-400 absolute left-3 top-3" />
           <input
             v-model="channelName"
             type="text"
             class="w-full bg-[#1e1f22] text-white p-2.5 pl-9 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
             placeholder="new-channel"
+            @keyup.enter="emit('create')"
+          />
+        </div>
+        <div v-if="channelType === 'rss'" class="mt-3">
+          <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Feed URL</label>
+          <input
+            v-model="channelFeedUrl"
+            type="url"
+            class="w-full bg-[#1e1f22] text-white p-2.5 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            placeholder="https://example.com/feed.xml"
             @keyup.enter="emit('create')"
           />
         </div>
