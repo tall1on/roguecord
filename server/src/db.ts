@@ -26,6 +26,7 @@ function initializeDatabase() {
       CREATE TABLE IF NOT EXISTS servers (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT 'My Server',
         rules_channel_id TEXT,
         welcome_channel_id TEXT
       )
@@ -33,8 +34,10 @@ function initializeDatabase() {
       if (!err) {
         // Try to add columns in case the table already existed without them
         try {
+          db.run("ALTER TABLE servers ADD COLUMN title TEXT NOT NULL DEFAULT 'My Server'", () => {});
           db.run('ALTER TABLE servers ADD COLUMN rules_channel_id TEXT', () => {});
           db.run('ALTER TABLE servers ADD COLUMN welcome_channel_id TEXT', () => {});
+          db.run("UPDATE servers SET title = COALESCE(NULLIF(title, ''), name, 'My Server')", () => {});
         } catch (e) {
           console.error('Migration error:', e);
         }
@@ -95,7 +98,7 @@ function initializeDatabase() {
       }
       if (row.count === 0) {
         const serverId = crypto.randomUUID();
-        db.run('INSERT INTO servers (id, name) VALUES (?, ?)', [serverId, 'My Server'], (err) => {
+        db.run('INSERT INTO servers (id, name, title) VALUES (?, ?, ?)', [serverId, 'My Server', 'My Server'], (err) => {
           if (err) {
             console.error('Error creating default server:', err);
           } else {
@@ -122,7 +125,7 @@ function initializeDatabase() {
             db.get('SELECT count(*) as count FROM servers', (err, row: any) => {
               if (row && row.count === 0) {
                 const serverId = crypto.randomUUID();
-                db.run('INSERT INTO servers (id, name, welcome_channel_id) VALUES (?, ?, ?)', [serverId, 'My Server', textId]);
+                db.run('INSERT INTO servers (id, name, title, welcome_channel_id) VALUES (?, ?, ?, ?)', [serverId, 'My Server', 'My Server', textId]);
               } else {
                 db.run('UPDATE servers SET welcome_channel_id = ? WHERE welcome_channel_id IS NULL', [textId]);
               }

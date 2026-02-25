@@ -21,7 +21,6 @@ const chatStore = useChatStore()
 
 const usernameInput = ref('')
 const showCreateServerModal = ref(false)
-const newServerName = ref('')
 const newServerAddress = ref('')
 
 const showCreateChannelModal = ref(false)
@@ -36,6 +35,7 @@ const showAdminModal = ref(false)
 const adminKeyInput = ref('')
 
 const serverSettingsForm = ref({
+  title: '',
   rulesChannelId: '',
   welcomeChannelId: ''
 })
@@ -60,6 +60,9 @@ const inviteLink = computed(() => {
 })
 
 const activeServer = computed(() => {
+  if (chatStore.server?.title) {
+    return { name: chatStore.server.title }
+  }
   if (chatStore.activeConnectionId) {
     const connection = chatStore.savedConnections.find((c) => c.id === chatStore.activeConnectionId)
     if (connection) {
@@ -75,11 +78,10 @@ const login = () => {
   }
 }
 
-const handleCreateServer = () => {
-  if (newServerName.value.trim() && newServerAddress.value.trim()) {
-    chatStore.addSavedConnection(newServerName.value.trim(), newServerAddress.value.trim())
+const handleCreateServer = async () => {
+  const added = await chatStore.addServerConnection(newServerAddress.value.trim())
+  if (added) {
     showCreateServerModal.value = false
-    newServerName.value = ''
     newServerAddress.value = ''
   }
 }
@@ -160,6 +162,7 @@ const saveServerSettings = () => {
   if (chatStore.server) {
     chatStore.updateServerSettings(
       chatStore.server.id,
+      serverSettingsForm.value.title,
       serverSettingsForm.value.rulesChannelId || null,
       serverSettingsForm.value.welcomeChannelId || null
     )
@@ -174,6 +177,7 @@ watch(showServerSettingsModal, (newVal) => {
       ...group,
       expanded: true
     }))
+    serverSettingsForm.value.title = chatStore.server.title || chatStore.server.name || ''
     serverSettingsForm.value.rulesChannelId = chatStore.server.rulesChannelId || ''
     serverSettingsForm.value.welcomeChannelId = chatStore.server.welcomeChannelId || ''
   }
@@ -181,6 +185,7 @@ watch(showServerSettingsModal, (newVal) => {
 
 onMounted(() => {
   chatStore.addMessageListener(handleChatStoreMessage)
+  chatStore.clearError()
   const lastUsedServer = localStorage.getItem('lastUsedServer')
   if (lastUsedServer) {
     chatStore.connect(lastUsedServer, true)
@@ -198,8 +203,8 @@ onUnmounted(() => {
 
     <CreateServerModal
       v-model:visible="showCreateServerModal"
-      v-model:server-name="newServerName"
       v-model:server-address="newServerAddress"
+      :error-message="chatStore.lastError"
       @create="handleCreateServer"
     />
 
