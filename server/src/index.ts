@@ -3,11 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {WebSocketServer} from 'ws';
 import dotenv from 'dotenv';
-import {db} from './db';
+import {db, channelsSchemaReady} from './db';
 import {createWorker} from './mediasoup';
 import {connectionManager} from './ws/connectionManager';
 import {handleMessage, handleClientDisconnect} from './ws/handlers';
 import {adminKey} from './admin';
+import { startRssPolling } from './rssPolling';
 
 dotenv.config();
 
@@ -70,11 +71,18 @@ async function startServer() {
         console.log(`HTTP Server listening on http://${HOST}:${PORT}`);
         console.log(`WebSocket Server listening on ws://${HOST}:${PORT}`);
         try {
+            await channelsSchemaReady;
+        } catch (error) {
+            console.error('Database schema initialization failed:', error);
+            process.exit(1);
+        }
+        try {
             await createWorker();
             console.log('Mediasoup worker created successfully');
         } catch (error) {
             console.error('Failed to create Mediasoup worker:', error);
         }
+        startRssPolling();
         console.log(`Admin Key: ${adminKey}`);
     });
 }

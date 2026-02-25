@@ -115,6 +115,22 @@ export const getOrCreateSystemUser = async (): Promise<User> => {
   return (await getUserById(systemUser.id))!;
 };
 
+export const getOrCreateRssBotUser = async (): Promise<User> => {
+  const rssBotPublicKey = '__rss_bot__';
+  const existing = await getUserByPublicKey(rssBotPublicKey);
+  if (existing) {
+    if (existing.role !== 'bot') {
+      await updateUserRole(existing.id, 'bot');
+      return (await getUserById(existing.id))!;
+    }
+    return existing;
+  }
+
+  const rssBotUser = await createUser('RSS Bot', rssBotPublicKey, null);
+  await updateUserRole(rssBotUser.id, 'bot');
+  return (await getUserById(rssBotUser.id))!;
+};
+
 export const updateUserRole = async (id: string, role: string): Promise<void> => {
   await dbRun('UPDATE users SET role = ? WHERE id = ?', [role, id]);
 };
@@ -141,13 +157,23 @@ export interface Channel {
   id: string;
   category_id: string | null;
   name: string;
-  type: 'text' | 'voice';
+  type: 'text' | 'voice' | 'rss';
   position: number;
+  feed_url: string | null;
 }
 
-export const createChannel = async (category_id: string | null, name: string, type: 'text' | 'voice', position: number = 0): Promise<Channel> => {
+export const createChannel = async (
+  category_id: string | null,
+  name: string,
+  type: 'text' | 'voice' | 'rss',
+  position: number = 0,
+  feedUrl: string | null = null
+): Promise<Channel> => {
   const id = crypto.randomUUID();
-  await dbRun('INSERT INTO channels (id, category_id, name, type, position) VALUES (?, ?, ?, ?, ?)', [id, category_id, name, type, position]);
+  await dbRun(
+    'INSERT INTO channels (id, category_id, name, type, position, feed_url) VALUES (?, ?, ?, ?, ?, ?)',
+    [id, category_id, name, type, position, feedUrl]
+  );
   return (await dbGet<Channel>('SELECT * FROM channels WHERE id = ?', [id]))!;
 };
 
@@ -159,8 +185,15 @@ export const getChannelById = async (id: string): Promise<Channel | undefined> =
   return dbGet<Channel>('SELECT * FROM channels WHERE id = ?', [id]);
 };
 
+export const getRssChannels = async (): Promise<Channel[]> => {
+  return dbAll<Channel>(
+    "SELECT * FROM channels WHERE type = 'rss' AND feed_url IS NOT NULL AND TRIM(feed_url) != '' ORDER BY position ASC"
+  );
+};
+
 export const deleteChannel = async (id: string): Promise<void> => {
   await dbRun('DELETE FROM messages WHERE channel_id = ?', [id]);
+  await dbRun('DELETE FROM rss_channel_items WHERE channel_id = ?', [id]);
   await dbRun('DELETE FROM channels WHERE id = ?', [id]);
 };
 
@@ -199,4 +232,31 @@ export const getChannelMessages = async (channel_id: string, limit: number = 50)
   }
   
   return messagesWithUsers.reverse(); // Return in chronological order
+};
+
+export const reserveRssItem = async (channelId: string, itemKey: string): Promise<boolean> => {
+  return new Promise((resolve, reject) => {
+    db.run(
+      'INSERT OR IGNORE INTO rss_channel_items (channel_id, item_key, message_id) VALUES (?, ?, NULL)',
+      [channelId, itemKey],
+      function (err) {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve((this.changes || 0) > 0);
+      }
+    );
+  });
+};
+
+export const completeRssItem = async (channelId: string, itemKey: string, messageId: string): Promise<void> => {
+  await dbRun(
+    'UPDATE rss_channel_items SET message_id = ? WHERE channel_id = ? AND item_key = ?',
+    [messageId, channelId, itemKey]
+  );
+};
+
+export const releaseRssItemReservation = async (channelId: string, itemKey: string): Promise<void> => {
+  await dbRun('DELETE FROM rss_channel_items WHERE channel_id = ? AND item_key = ?', [channelId, itemKey]);
 };

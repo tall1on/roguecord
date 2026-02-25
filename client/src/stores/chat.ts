@@ -19,8 +19,9 @@ export interface Channel {
   id: string;
   category_id: string | null;
   name: string;
-  type: 'text' | 'voice';
+  type: 'text' | 'voice' | 'rss';
   position: number;
+  feed_url?: string | null;
 }
 
 export interface Message {
@@ -558,7 +559,7 @@ export const useChatStore = defineStore('chat', () => {
           setFallbackActiveTextChannel(payload.channels || []);
         } else {
           const activeChannel = (payload.channels || []).find((c: Channel) => c.id === activeChannelId.value);
-          if (activeChannel && activeChannel.type === 'text') {
+          if (activeChannel && (activeChannel.type === 'text' || activeChannel.type === 'rss')) {
             // Re-fetch messages for active channel in case we missed any while disconnected
             getMessages(activeChannelId.value);
           } else {
@@ -579,7 +580,7 @@ export const useChatStore = defineStore('chat', () => {
         channels.value = channels.value.filter((c: Channel) => c.id !== deletedChannelId);
         delete messages.value[deletedChannelId];
 
-        if (deletedChannel?.type === 'text' && activeChannelId.value === deletedChannelId) {
+        if ((deletedChannel?.type === 'text' || deletedChannel?.type === 'rss') && activeChannelId.value === deletedChannelId) {
           setFallbackActiveTextChannel(channels.value);
         } else if (deletedChannel?.type === 'voice' && activeMainPanel.value.type === 'voice' && activeMainPanel.value.channelId === deletedChannelId) {
           setFallbackActiveTextChannel(channels.value);
@@ -632,7 +633,7 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const setFallbackActiveTextChannel = (availableChannels: Channel[]) => {
-    const firstTextChannel = availableChannels.find((c: Channel) => c.type === 'text');
+    const firstTextChannel = availableChannels.find((c: Channel) => c.type === 'text' || c.type === 'rss');
     if (firstTextChannel) {
       activeChannelId.value = firstTextChannel.id;
       activeMainPanel.value = { type: 'text', channelId: firstTextChannel.id };
@@ -643,12 +644,19 @@ export const useChatStore = defineStore('chat', () => {
     }
   };
 
-  const createChannel = (category_id: string | null, name: string, type: 'text' | 'voice') => {
+  const createChannel = (category_id: string | null, name: string, type: 'text' | 'voice' | 'rss', feed_url?: string) => {
     if (!name.trim()) {
       lastError.value = 'Channel name is required';
       return;
     }
-    send('create_channel', { category_id, name, type });
+
+    const normalizedFeedUrl = (feed_url || '').trim();
+    if (type === 'rss' && !normalizedFeedUrl) {
+      lastError.value = 'RSS feed URL is required';
+      return;
+    }
+
+    send('create_channel', { category_id, name, type, feed_url: type === 'rss' ? normalizedFeedUrl : undefined });
   };
 
   const deleteChannel = (channel_id: string) => {
