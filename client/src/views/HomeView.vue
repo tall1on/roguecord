@@ -25,6 +25,8 @@ const activeVoiceParticipants = computed(() => {
   return webrtcStore.channelParticipants.get(activeVoiceChannel.value.id) || []
 })
 
+const isTwoParticipantVoiceLayout = computed(() => activeVoiceParticipants.value.length === 2)
+
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
 
 type AvatarBadgeType = 'speaking' | 'presence' | null
@@ -121,11 +123,18 @@ watch(() => chatStore.activeChannelMessages, async () => {
       </header>
 
       <main class="flex-1 overflow-y-auto p-6 custom-scrollbar">
-        <div v-if="activeVoiceParticipants.length > 0" class="grid grid-cols-[repeat(auto-fit,minmax(min(100%,280px),1fr))] gap-4">
+        <div
+          v-if="activeVoiceParticipants.length > 0"
+          class="grid gap-4 h-full"
+          :class="isTwoParticipantVoiceLayout
+            ? 'grid-cols-2 grid-rows-1'
+            : 'grid-cols-[repeat(auto-fit,minmax(min(100%,280px),1fr))]'"
+        >
           <div
             v-for="user in activeVoiceParticipants"
             :key="user.id"
-            class="aspect-video rounded-xl bg-[#2b2d31] border border-[#3f4147] flex items-center justify-center"
+            class="rounded-xl bg-[#2b2d31] border border-[#3f4147] flex items-center justify-center"
+            :class="isTwoParticipantVoiceLayout ? 'h-full' : 'aspect-video'"
           >
             <div class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
               <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
