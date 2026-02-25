@@ -39,6 +39,11 @@ export interface SavedConnection {
   iconUrl?: string;
 }
 
+export interface ActiveMainPanel {
+  type: 'text' | 'voice';
+  channelId: string | null;
+}
+
 const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
   let binary = '';
   const bytes = new Uint8Array(buffer);
@@ -128,6 +133,7 @@ export const useChatStore = defineStore('chat', () => {
   const messages = ref<Record<string, Message[]>>({}); // channel_id -> Message[]
   
   const activeChannelId = ref<string | null>(null);
+  const activeMainPanel = ref<ActiveMainPanel>({ type: 'text', channelId: null });
   
   let pingInterval: number | null = null;
   let pongTimeout: number | null = null;
@@ -348,6 +354,7 @@ export const useChatStore = defineStore('chat', () => {
     categories.value = [];
     channels.value = [];
     activeChannelId.value = null;
+    activeMainPanel.value = { type: 'text', channelId: null };
     messages.value = {};
     users.value = [];
     onlineUserIds.value.clear();
@@ -448,6 +455,8 @@ export const useChatStore = defineStore('chat', () => {
 
         if (deletedChannel?.type === 'text' && activeChannelId.value === deletedChannelId) {
           setFallbackActiveTextChannel(channels.value);
+        } else if (deletedChannel?.type === 'voice' && activeMainPanel.value.type === 'voice' && activeMainPanel.value.channelId === deletedChannelId) {
+          setFallbackActiveTextChannel(channels.value);
         }
         break;
       }
@@ -500,9 +509,11 @@ export const useChatStore = defineStore('chat', () => {
     const firstTextChannel = availableChannels.find((c: Channel) => c.type === 'text');
     if (firstTextChannel) {
       activeChannelId.value = firstTextChannel.id;
+      activeMainPanel.value = { type: 'text', channelId: firstTextChannel.id };
       getMessages(firstTextChannel.id);
     } else {
       activeChannelId.value = null;
+      activeMainPanel.value = { type: 'text', channelId: null };
     }
   };
 
@@ -540,7 +551,12 @@ export const useChatStore = defineStore('chat', () => {
 
   const setActiveChannel = (channel_id: string) => {
     activeChannelId.value = channel_id;
+    activeMainPanel.value = { type: 'text', channelId: channel_id };
     getMessages(channel_id);
+  };
+
+  const setActiveVoicePanel = (channel_id: string) => {
+    activeMainPanel.value = { type: 'voice', channelId: channel_id };
   };
 
   const activeServerChannels = computed(() => {
@@ -570,6 +586,7 @@ export const useChatStore = defineStore('chat', () => {
     channels,
     messages,
     activeChannelId,
+    activeMainPanel,
     activeServerChannels,
     activeServerCategories,
     activeChannelMessages,
@@ -585,6 +602,7 @@ export const useChatStore = defineStore('chat', () => {
     sendMessage,
     submitAdminKey,
     setActiveChannel,
+    setActiveVoicePanel,
     send,
     ws,
     addMessageListener,

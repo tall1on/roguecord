@@ -194,6 +194,7 @@ const handleChannelClick = (channel: any) => {
   if (channel.type === 'text') {
     chatStore.setActiveChannel(channel.id)
   } else if (channel.type === 'voice') {
+    chatStore.setActiveVoicePanel(channel.id)
     webrtcStore.joinVoiceChannel(channel.id)
   }
 }
