@@ -61,6 +61,31 @@ const contextMenuY = ref(0)
 const contextMenuChannel = ref<any | null>(null)
 
 const showInviteModal = ref(false)
+const showServerSettingsModal = ref(false)
+const serverSettingsForm = ref({
+  rulesChannelId: '',
+  welcomeChannelId: ''
+})
+
+// Watch for modal open to populate form
+watch(showServerSettingsModal, (newVal) => {
+  if (newVal && chatStore.server) {
+    serverSettingsForm.value.rulesChannelId = chatStore.server.rulesChannelId || ''
+    serverSettingsForm.value.welcomeChannelId = chatStore.server.welcomeChannelId || ''
+  }
+})
+
+const saveServerSettings = () => {
+  if (chatStore.server) {
+    chatStore.updateServerSettings(
+      chatStore.server.id,
+      serverSettingsForm.value.rulesChannelId || null,
+      serverSettingsForm.value.welcomeChannelId || null
+    )
+    showServerSettingsModal.value = false
+  }
+}
+
 const inviteLink = computed(() => {
   const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
   const host = window.location.hostname || 'localhost'
@@ -379,6 +404,56 @@ const getAvatarBadgeType = (userId: string, showPresence: boolean, allowSpeaking
       </div>
     </div>
 
+    <!-- Server Settings Modal -->
+    <div v-if="showServerSettingsModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+      <div class="bg-[#313338] p-6 rounded-lg shadow-xl w-[600px] max-w-[90vw]">
+        <h2 class="text-2xl font-bold text-white mb-6">Server Settings</h2>
+        
+        <div class="space-y-6">
+          <div>
+            <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Rules or guidelines channel</label>
+            <select
+              v-model="serverSettingsForm.rulesChannelId"
+              class="w-full bg-[#1e1f22] text-gray-300 rounded p-2 outline-none border border-transparent focus:border-[#5865F2]"
+            >
+              <option value="">None</option>
+              <option
+                v-for="channel in chatStore.activeServerChannels.filter(c => c.type === 'text')"
+                :key="channel.id"
+                :value="channel.id"
+              >
+                # {{ channel.name }}
+              </option>
+            </select>
+            <p class="text-gray-400 text-xs mt-1">Select a channel where members can read the server rules.</p>
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Welcome Channel</label>
+            <select
+              v-model="serverSettingsForm.welcomeChannelId"
+              class="w-full bg-[#1e1f22] text-gray-300 rounded p-2 outline-none border border-transparent focus:border-[#5865F2]"
+            >
+              <option value="">None</option>
+              <option
+                v-for="channel in chatStore.activeServerChannels.filter(c => c.type === 'text')"
+                :key="channel.id"
+                :value="channel.id"
+              >
+                # {{ channel.name }}
+              </option>
+            </select>
+            <p class="text-gray-400 text-xs mt-1">Select a channel where new members will be welcomed.</p>
+          </div>
+        </div>
+
+        <div class="flex justify-end gap-3 mt-8">
+          <button @click="showServerSettingsModal = false" class="text-gray-400 hover:text-white text-sm font-medium px-4 py-2">Cancel</button>
+          <button @click="saveServerSettings" class="bg-[#5865F2] hover:bg-[#4752C4] text-white px-4 py-2 rounded text-sm font-medium transition-colors">Save Changes</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Invite Modal -->
     <div v-if="showInviteModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
       <div class="bg-[#313338] p-6 rounded-lg shadow-xl w-96">
@@ -481,6 +556,9 @@ const getAvatarBadgeType = (userId: string, showPresence: boolean, allowSpeaking
         >
           <h1 class="font-bold text-white truncate">{{ activeServer.name }}</h1>
           <div class="flex items-center gap-3">
+            <button v-if="chatStore.currentUserRole === 'admin'" @click.stop="showServerSettingsModal = true" class="text-gray-400 hover:text-white" title="Server Settings">
+              <Settings class="w-4 h-4" />
+            </button>
             <button @click.stop="showInviteModal = true" class="text-gray-400 hover:text-white" title="Invite People">
               <Link class="w-4 h-4" />
             </button>

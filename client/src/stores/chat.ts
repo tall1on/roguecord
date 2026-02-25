@@ -39,6 +39,13 @@ export interface SavedConnection {
   iconUrl?: string;
 }
 
+export interface Server {
+  id: string;
+  name: string;
+  rulesChannelId?: string | null;
+  welcomeChannelId?: string | null;
+}
+
 export interface ActiveMainPanel {
   type: 'text' | 'voice';
   channelId: string | null;
@@ -115,6 +122,7 @@ export const useChatStore = defineStore('chat', () => {
   const isConnected = ref(false);
   const currentUser = ref<User | null>(null);
   const currentUserRole = ref<string>('user');
+  const server = ref<Server | null>(null);
   const lastError = ref<string | null>(null);
   
   const savedConnections = ref<SavedConnection[]>(
@@ -359,6 +367,7 @@ export const useChatStore = defineStore('chat', () => {
     users.value = [];
     onlineUserIds.value.clear();
     currentUser.value = null;
+    server.value = null;
   };
 
   const messageListeners = ref<((message: any) => void)[]>([]);
@@ -391,8 +400,18 @@ export const useChatStore = defineStore('chat', () => {
       case 'authenticated':
         currentUser.value = payload.user;
         currentUserRole.value = payload.user.role || 'user';
+        if (payload.server) {
+          server.value = payload.server;
+        }
         saveLocalUsername(payload.user.username);
         getChannels();
+        break;
+        
+      case 'SERVER_SETTINGS_UPDATED':
+      case 'server_settings_updated':
+        if (payload.server) {
+          server.value = payload.server;
+        }
         break;
         
       case 'member_list':
@@ -533,6 +552,10 @@ export const useChatStore = defineStore('chat', () => {
     send('delete_channel', { channel_id });
   };
 
+  const updateServerSettings = (serverId: string, rulesChannelId: string | null, welcomeChannelId: string | null) => {
+    send('UPDATE_SERVER_SETTINGS', { serverId, rulesChannelId, welcomeChannelId });
+  };
+
   const clearError = () => {
     lastError.value = null;
   };
@@ -576,6 +599,7 @@ export const useChatStore = defineStore('chat', () => {
     isConnected,
     currentUser,
     currentUserRole,
+    server,
     lastError,
     savedConnections,
     activeConnectionId,
@@ -598,6 +622,7 @@ export const useChatStore = defineStore('chat', () => {
     authenticate,
     createChannel,
     deleteChannel,
+    updateServerSettings,
     clearError,
     sendMessage,
     submitAdminKey,
