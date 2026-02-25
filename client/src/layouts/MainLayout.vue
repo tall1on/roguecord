@@ -85,7 +85,7 @@ const handleCreateServer = () => {
   }
 }
 
-const openCreateChannelModal = (categoryId: string | null) => {
+const openCreateChannelModal = (categoryId: string | null = null) => {
   if (!isAdmin.value) return
 
   createChannelError.value = null
@@ -445,7 +445,7 @@ const groupedMembers = computed(() => {
         </header>
 
         <!-- Channels -->
-        <div class="flex-1 overflow-y-auto p-2 space-y-[2px] custom-scrollbar" @contextmenu="openChannelListContextMenu">
+        <div class="flex-1 overflow-y-auto p-2 space-y-[2px] custom-scrollbar" @contextmenu.prevent="openChannelListContextMenu">
           <template v-if="true">
           <div v-for="category in chatStore.activeServerCategories" :key="category.id">
             <!-- Category Header -->
@@ -496,6 +496,14 @@ const groupedMembers = computed(() => {
 
           <!-- Uncategorized Channels -->
           <div v-if="chatStore.activeServerChannels.filter(c => !c.category_id).length > 0">
+            <div class="pt-4 pb-1 px-2 flex items-center justify-between group cursor-pointer">
+              <div class="text-xs font-semibold text-gray-400 group-hover:text-gray-300 uppercase tracking-wider">
+                Channels
+              </div>
+              <button v-if="isAdmin" @click.stop="openCreateChannelModal()" class="text-gray-400 hover:text-gray-200 opacity-0 group-hover:opacity-100">
+                <Plus class="w-4 h-4" />
+              </button>
+            </div>
             <div 
               v-for="channel in chatStore.activeServerChannels.filter(c => !c.category_id)" 
               :key="channel.id"
