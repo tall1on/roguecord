@@ -10,6 +10,14 @@ if (!fs.existsSync(dbDir)) {
 
 const dbPath = path.join(dbDir, 'roguecord.db');
 
+let resolveChannelsSchemaReady: (() => void) | null = null;
+let rejectChannelsSchemaReady: ((error: Error) => void) | null = null;
+
+export const channelsSchemaReady = new Promise<void>((resolve, reject) => {
+  resolveChannelsSchemaReady = resolve;
+  rejectChannelsSchemaReady = reject;
+});
+
 export const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error('Error opening database:', err.message);
@@ -79,10 +87,17 @@ function initializeDatabase() {
     `, (err) => {
       if (err) {
         console.error('Error creating channels table:', err.message);
+        rejectChannelsSchemaReady?.(err);
         return;
       }
 
-      migrateChannelsTableForRss();
+      migrateChannelsTableForRss((migrationErr) => {
+        if (migrationErr) {
+          rejectChannelsSchemaReady?.(migrationErr);
+          return;
+        }
+        resolveChannelsSchemaReady?.();
+      });
     });
 
     // RSS dedupe tracking table
@@ -173,15 +188,17 @@ function initializeDatabase() {
   });
 }
 
-function migrateChannelsTableForRss() {
+function migrateChannelsTableForRss(done: (error?: Error) => void) {
   db.all('PRAGMA table_info(channels)', (pragmaErr, columns: any[]) => {
     if (pragmaErr) {
       console.error('Failed to inspect channels table for migration:', pragmaErr.message);
+      done(pragmaErr);
       return;
     }
 
     const hasFeedUrl = columns.some((column) => column.name === 'feed_url');
     if (hasFeedUrl) {
+      done();
       return;
     }
 
@@ -200,6 +217,7 @@ function migrateChannelsTableForRss() {
       (createErr) => {
         if (createErr) {
           console.error('Failed to create channels_new migration table:', createErr.message);
+          done(createErr);
           return;
         }
 
@@ -212,6 +230,7 @@ function migrateChannelsTableForRss() {
             if (copyErr) {
               console.error('Failed to copy channels into migration table:', copyErr.message);
               db.run('DROP TABLE IF EXISTS channels_new', () => {});
+              done(copyErr);
               return;
             }
 
@@ -219,15 +238,18 @@ function migrateChannelsTableForRss() {
               if (dropErr) {
                 console.error('Failed to drop old channels table during migration:', dropErr.message);
                 db.run('DROP TABLE IF EXISTS channels_new', () => {});
+                done(dropErr);
                 return;
               }
 
               db.run('ALTER TABLE channels_new RENAME TO channels', (renameErr) => {
                 if (renameErr) {
                   console.error('Failed to rename channels_new table during migration:', renameErr.message);
+                  done(renameErr);
                   return;
                 }
                 console.log('Migrated channels table to support rss channels and feed_url.');
+                done();
               });
             });
           }
