@@ -709,9 +709,9 @@ const getAvatarBadgeType = (userId: string, showPresence: boolean): AvatarBadgeT
       <!-- User Panel -->
       <div class="h-[52px] bg-[#232428] px-2 flex items-center shrink-0" v-if="chatStore.currentUser">
         <div class="flex items-center hover:bg-[#3f4147] p-1 rounded cursor-pointer flex-1 min-w-0">
-          <div class="w-8 h-8 rounded-full bg-indigo-500 relative shrink-0 flex items-center justify-center text-white font-bold">
+          <div class="w-8 h-8 rounded-full bg-indigo-500 relative shrink-0 flex items-center justify-center text-white font-bold" :class="getAvatarBadgeType(chatStore.currentUser.id, false) === 'speaking' ? 'ring-2 ring-green-400 ring-offset-1 ring-offset-[#232428]' : ''">
             {{ chatStore.currentUser.username.charAt(0).toUpperCase() }}
-            <div class="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-[#232428]"></div>
+            <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-[#232428]" :class="getAvatarBadgeType(chatStore.currentUser.id, false) === 'speaking' ? 'bg-green-400' : 'bg-green-500'"></div>
           </div>
           <div class="ml-2 flex-1 min-w-0">
             <div class="text-sm font-semibold text-white truncate">{{ chatStore.currentUser.username }}</div>
