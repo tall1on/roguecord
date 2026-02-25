@@ -52,6 +52,8 @@ const serverSettingsNavGroups = ref<ServerSettingsNavGroup[]>([
 
 const isAdmin = computed(() => chatStore.currentUserRole === 'admin')
 
+const shouldShowMemberList = computed(() => chatStore.activeMainPanel.type !== 'voice')
+
 const inviteLink = computed(() => {
   const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
   const host = window.location.hostname || 'localhost'
@@ -293,7 +295,7 @@ onUnmounted(() => {
         <RouterView />
       </div>
 
-      <MemberListSidebar />
+      <MemberListSidebar v-if="shouldShowMemberList" />
     </main>
   </div>
 </template>
