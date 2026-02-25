@@ -33,6 +33,9 @@ const contextMenuY = ref(0)
 const contextMenuChannel = ref<Channel | null>(null)
 
 const activeServer = computed(() => {
+  if (chatStore.server?.title) {
+    return { name: chatStore.server.title }
+  }
   if (chatStore.activeConnectionId) {
     const connection = chatStore.savedConnections.find((c) => c.id === chatStore.activeConnectionId)
     if (connection) {

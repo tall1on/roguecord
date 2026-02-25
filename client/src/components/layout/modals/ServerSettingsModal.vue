@@ -15,7 +15,7 @@ type ServerSettingsNavGroup = {
 }
 
 const visible = defineModel<boolean>('visible', { required: true })
-const form = defineModel<{ rulesChannelId: string; welcomeChannelId: string }>('form', { required: true })
+const form = defineModel<{ title: string; rulesChannelId: string; welcomeChannelId: string }>('form', { required: true })
 
 defineProps<{
   activeSection: string
@@ -75,6 +75,17 @@ const textChannels = computed(() => chatStore.activeServerChannels.filter((c) =>
 
         <div class="flex-1 overflow-y-auto px-6 py-5">
           <div v-if="activeSection === 'general-settings'" class="space-y-6 max-w-3xl">
+            <div>
+              <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Server Title</label>
+              <input
+                v-model="form.title"
+                type="text"
+                class="w-full bg-[#1e1f22] text-gray-300 rounded p-2 outline-none border border-transparent focus:border-[#5865F2]"
+                placeholder="My Server"
+              />
+              <p class="text-gray-400 text-xs mt-1">This title is shown across the UI for this server.</p>
+            </div>
+
             <div>
               <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Rules or guidelines channel</label>
               <select

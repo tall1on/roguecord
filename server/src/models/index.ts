@@ -33,6 +33,7 @@ export const dbAll = <T>(sql: string, params: any[] = []): Promise<T[]> => {
 export interface Server {
   id: string;
   name: string;
+  title: string;
   rulesChannelId?: string;
   welcomeChannelId?: string;
 }
@@ -43,6 +44,7 @@ export const getServer = async (): Promise<Server | undefined> => {
   return {
     id: row.id,
     name: row.name,
+    title: row.title || row.name,
     rulesChannelId: row.rules_channel_id,
     welcomeChannelId: row.welcome_channel_id
   };
@@ -50,18 +52,19 @@ export const getServer = async (): Promise<Server | undefined> => {
 
 export const createServer = async (name: string, welcomeChannelId?: string): Promise<Server> => {
   const id = crypto.randomUUID();
-  await dbRun('INSERT INTO servers (id, name, welcome_channel_id) VALUES (?, ?, ?)', [id, name, welcomeChannelId]);
+  await dbRun('INSERT INTO servers (id, name, title, welcome_channel_id) VALUES (?, ?, ?, ?)', [id, name, name, welcomeChannelId]);
   const row = await dbGet<any>('SELECT * FROM servers WHERE id = ?', [id]);
   return {
     id: row.id,
     name: row.name,
+    title: row.title || row.name,
     rulesChannelId: row.rules_channel_id,
     welcomeChannelId: row.welcome_channel_id
   };
 };
 
-export const updateServerSettings = async (id: string, rulesChannelId: string | null, welcomeChannelId: string | null): Promise<void> => {
-  await dbRun('UPDATE servers SET rules_channel_id = ?, welcome_channel_id = ? WHERE id = ?', [rulesChannelId, welcomeChannelId, id]);
+export const updateServerSettings = async (id: string, title: string, rulesChannelId: string | null, welcomeChannelId: string | null): Promise<void> => {
+  await dbRun('UPDATE servers SET title = ?, rules_channel_id = ?, welcome_channel_id = ? WHERE id = ?', [title, rulesChannelId, welcomeChannelId, id]);
 };
 
 // --- Users ---

@@ -222,7 +222,7 @@ const handleGetChannels = async (client: ClientConnection) => {
     // Set welcome channel
     const server = await getServer();
     if (server) {
-      await updateServerSettings(server.id, server.rulesChannelId || null, channel.id);
+      await updateServerSettings(server.id, server.title || server.name, server.rulesChannelId || null, channel.id);
     }
   }
 
@@ -631,7 +631,7 @@ const handleSubmitAdminKey = async (client: ClientConnection, payload: { key: st
   }
 };
 
-const handleUpdateServerSettings = async (client: ClientConnection, payload: { serverId: string, rulesChannelId: string | null, welcomeChannelId: string | null }) => {
+const handleUpdateServerSettings = async (client: ClientConnection, payload: { serverId: string, title: string, rulesChannelId: string | null, welcomeChannelId: string | null }) => {
   if (!client.userId) return;
   
   const user = await getUserById(client.userId);
@@ -640,15 +640,21 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
     return;
   }
 
-  const { serverId, rulesChannelId, welcomeChannelId } = payload;
+  const { serverId, title, rulesChannelId, welcomeChannelId } = payload;
   
   if (!serverId) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID is required' } }));
     return;
   }
 
+  const normalizedTitle = (title || '').trim();
+  if (!normalizedTitle) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server title is required' } }));
+    return;
+  }
+
   try {
-    await updateServerSettings(serverId, rulesChannelId, welcomeChannelId);
+    await updateServerSettings(serverId, normalizedTitle, rulesChannelId, welcomeChannelId);
     const updatedServer = await getServer();
     
     connectionManager.broadcastToAuthenticated({
@@ -705,7 +711,7 @@ const handleCreateServer = async (client: ClientConnection, payload: { name: str
   const channel = await createChannel(category.id, 'general', 'text', 0);
   
   // Update server's welcomeChannelId
-  await updateServerSettings(server.id, null, channel.id);
+  await updateServerSettings(server.id, server.title || server.name, null, channel.id);
   
   const updatedServer = await getServer();
   
@@ -715,7 +721,7 @@ const handleCreateServer = async (client: ClientConnection, payload: { name: str
   }));
 };
 
-const handleUpdateServerSettingsUppercase = async (client: ClientConnection, payload: { serverId: string, rulesChannelId: string | null, welcomeChannelId: string | null }) => {
+const handleUpdateServerSettingsUppercase = async (client: ClientConnection, payload: { serverId: string, title: string, rulesChannelId: string | null, welcomeChannelId: string | null }) => {
   if (!client.userId) return;
   
   const user = await getUserById(client.userId);
@@ -725,15 +731,21 @@ const handleUpdateServerSettingsUppercase = async (client: ClientConnection, pay
     return;
   }
 
-  const { serverId, rulesChannelId, welcomeChannelId } = payload;
+  const { serverId, title, rulesChannelId, welcomeChannelId } = payload;
   
   if (!serverId) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID is required' } }));
     return;
   }
 
+  const normalizedTitle = (title || '').trim();
+  if (!normalizedTitle) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server title is required' } }));
+    return;
+  }
+
   try {
-    await updateServerSettings(serverId, rulesChannelId, welcomeChannelId);
+    await updateServerSettings(serverId, normalizedTitle, rulesChannelId, welcomeChannelId);
     const updatedServer = await getServer();
     
     connectionManager.broadcastToAuthenticated({

@@ -1,7 +1,10 @@
 <script setup lang="ts">
 const visible = defineModel<boolean>('visible', { required: true })
-const serverName = defineModel<string>('serverName', { required: true })
 const serverAddress = defineModel<string>('serverAddress', { required: true })
+
+defineProps<{
+  errorMessage?: string | null
+}>()
 
 const emit = defineEmits<{
   (e: 'create'): void
@@ -14,16 +17,6 @@ const emit = defineEmits<{
       <h2 class="text-2xl font-bold text-white mb-4 text-center">Add a Connection</h2>
       <p class="text-gray-400 mb-6 text-center text-sm">Connect to a new server.</p>
 
-      <div class="mb-4">
-        <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Connection Name</label>
-        <input
-          v-model="serverName"
-          type="text"
-          class="w-full bg-[#1e1f22] text-white p-2.5 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          placeholder="My Server"
-        />
-      </div>
-
       <div class="mb-6">
         <label class="block text-xs font-bold text-gray-300 uppercase mb-2">WebSocket Address</label>
         <input
@@ -33,6 +26,7 @@ const emit = defineEmits<{
           placeholder="wss://localhost:3000"
           @keyup.enter="emit('create')"
         />
+        <p v-if="errorMessage" class="mt-2 text-sm text-red-400">{{ errorMessage }}</p>
       </div>
 
       <div class="flex justify-between items-center">
