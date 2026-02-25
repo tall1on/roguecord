@@ -25,7 +25,33 @@ const activeVoiceParticipants = computed(() => {
   return webrtcStore.channelParticipants.get(activeVoiceChannel.value.id) || []
 })
 
+const voiceParticipantCount = computed(() => activeVoiceParticipants.value.length)
+
 const isTwoParticipantVoiceLayout = computed(() => activeVoiceParticipants.value.length === 2)
+
+const voiceGridClass = computed(() => {
+  if (isTwoParticipantVoiceLayout.value) {
+    return 'grid-cols-1 grid-rows-2 auto-rows-fr'
+  }
+
+  return 'grid-cols-[repeat(auto-fit,minmax(min(100%,360px),1fr))] auto-rows-fr'
+})
+
+const voiceTileClass = computed(() => {
+  if (isTwoParticipantVoiceLayout.value) {
+    return 'w-full h-full min-h-0'
+  }
+
+  if (voiceParticipantCount.value === 1) {
+    return 'w-full h-full min-h-[320px]'
+  }
+
+  if (voiceParticipantCount.value <= 4) {
+    return 'w-full h-full min-h-[220px]'
+  }
+
+  return 'w-full h-full min-h-[180px]'
+})
 
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
 
@@ -126,15 +152,13 @@ watch(() => chatStore.activeChannelMessages, async () => {
         <div
           v-if="activeVoiceParticipants.length > 0"
           class="grid gap-4 h-full"
-          :class="isTwoParticipantVoiceLayout
-            ? 'grid-cols-2 grid-rows-1'
-            : 'grid-cols-[repeat(auto-fit,minmax(min(100%,280px),1fr))]'"
+          :class="voiceGridClass"
         >
           <div
             v-for="user in activeVoiceParticipants"
             :key="user.id"
             class="rounded-xl bg-[#2b2d31] border border-[#3f4147] flex items-center justify-center"
-            :class="isTwoParticipantVoiceLayout ? 'h-full' : 'aspect-video'"
+            :class="voiceTileClass"
           >
             <div class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
               <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
