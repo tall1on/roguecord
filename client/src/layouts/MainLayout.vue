@@ -15,6 +15,13 @@ const handleClickOutside = (event: MouseEvent) => {
   if (showVoiceStats.value && voiceStatsContainerRef.value && !voiceStatsContainerRef.value.contains(event.target as Node)) {
     showVoiceStats.value = false
   }
+
+  if (contextMenuVisible.value) {
+    const target = event.target as HTMLElement | null
+    if (!target?.closest('.channel-context-menu')) {
+      contextMenuVisible.value = false
+    }
+  }
 }
 
 watch(() => webrtcStore.activeVoiceChannelId, (newVal) => {
@@ -25,6 +32,7 @@ watch(() => webrtcStore.activeVoiceChannelId, (newVal) => {
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
+  chatStore.addMessageListener(handleChatStoreMessage)
   const lastUsedServer = localStorage.getItem('lastUsedServer')
   if (lastUsedServer) {
     chatStore.connect(lastUsedServer, true)
@@ -33,6 +41,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
+  chatStore.removeMessageListener(handleChatStoreMessage)
 })
 
 const usernameInput = ref('')
@@ -44,6 +53,10 @@ const showCreateChannelModal = ref(false)
 const newChannelName = ref('')
 const newChannelType = ref<'text' | 'voice'>('text')
 const selectedCategoryId = ref<string | null>(null)
+const createChannelError = ref<string | null>(null)
+const contextMenuVisible = ref(false)
+const contextMenuX = ref(0)
+const contextMenuY = ref(0)
 
 const showInviteModal = ref(false)
 const inviteLink = computed(() => {
@@ -55,6 +68,7 @@ const inviteLink = computed(() => {
 
 const showAdminModal = ref(false)
 const adminKeyInput = ref('')
+const isAdmin = computed(() => chatStore.currentUserRole === 'admin')
 
 const login = () => {
   if (usernameInput.value.trim()) {
@@ -72,20 +86,59 @@ const handleCreateServer = () => {
 }
 
 const openCreateChannelModal = (categoryId: string | null) => {
+  if (!isAdmin.value) return
+
+  createChannelError.value = null
+  chatStore.clearError()
   selectedCategoryId.value = categoryId
   showCreateChannelModal.value = true
 }
 
 const handleCreateChannel = () => {
-  if (newChannelName.value.trim()) {
-    chatStore.createChannel(
-      selectedCategoryId.value,
-      newChannelName.value.trim(),
-      newChannelType.value
-    )
+  if (!isAdmin.value) return
+
+  const trimmedName = newChannelName.value.trim()
+  if (!trimmedName) {
+    createChannelError.value = 'Channel name is required'
+    return
+  }
+
+  createChannelError.value = null
+  chatStore.clearError()
+  chatStore.createChannel(selectedCategoryId.value, trimmedName, newChannelType.value)
+}
+
+const openCreateChannelFromContextMenu = (type: 'text' | 'voice') => {
+  if (!isAdmin.value) return
+
+  contextMenuVisible.value = false
+  newChannelType.value = type
+  openCreateChannelModal(null)
+}
+
+const openChannelListContextMenu = (event: MouseEvent) => {
+  if (!isAdmin.value) return
+
+  event.preventDefault()
+  contextMenuX.value = event.clientX
+  contextMenuY.value = event.clientY
+  contextMenuVisible.value = true
+}
+
+const handleChatStoreMessage = (message: any) => {
+  if (!showCreateChannelModal.value) return
+
+  if (message.type === 'channel_created') {
     showCreateChannelModal.value = false
     newChannelName.value = ''
     newChannelType.value = 'text'
+    createChannelError.value = null
+    chatStore.clearError()
+    return
+  }
+
+  if (message.type === 'error') {
+    createChannelError.value = message.payload?.message || 'Failed to create channel'
   }
 }
 
@@ -265,6 +318,9 @@ const groupedMembers = computed(() => {
               placeholder="new-channel"
             />
           </div>
+          <p v-if="createChannelError || chatStore.lastError" class="mt-2 text-xs text-red-400">
+            {{ createChannelError || chatStore.lastError }}
+          </p>
         </div>
         
         <div class="flex justify-end gap-4">
@@ -389,7 +445,7 @@ const groupedMembers = computed(() => {
         </header>
 
         <!-- Channels -->
-        <div class="flex-1 overflow-y-auto p-2 space-y-[2px] custom-scrollbar">
+        <div class="flex-1 overflow-y-auto p-2 space-y-[2px] custom-scrollbar" @contextmenu="openChannelListContextMenu">
           <template v-if="true">
           <div v-for="category in chatStore.activeServerCategories" :key="category.id">
             <!-- Category Header -->
@@ -398,7 +454,7 @@ const groupedMembers = computed(() => {
                 <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
                 {{ category.name }}
               </div>
-              <button v-if="chatStore.currentUserRole === 'admin'" @click.stop="openCreateChannelModal(category.id)" class="text-gray-400 hover:text-gray-200 opacity-0 group-hover:opacity-100">
+              <button v-if="isAdmin" @click.stop="openCreateChannelModal(category.id)" class="text-gray-400 hover:text-gray-200 opacity-0 group-hover:opacity-100">
                 <Plus class="w-4 h-4" />
               </button>
             </div>
@@ -474,6 +530,27 @@ const groupedMembers = computed(() => {
             </div>
           </div>
         </template>
+      </div>
+
+      <div
+        v-if="contextMenuVisible && isAdmin"
+        class="channel-context-menu fixed z-50 w-52 rounded-md border border-[#1e1f22] bg-[#111214] shadow-xl py-1"
+        :style="{ left: `${contextMenuX}px`, top: `${contextMenuY}px` }"
+      >
+        <button
+          class="w-full px-3 py-2 text-left text-sm text-gray-200 hover:bg-[#2b2d31] flex items-center gap-2"
+          @click="openCreateChannelFromContextMenu('text')"
+        >
+          <Hash class="w-4 h-4" />
+          Create text channel
+        </button>
+        <button
+          class="w-full px-3 py-2 text-left text-sm text-gray-200 hover:bg-[#2b2d31] flex items-center gap-2"
+          @click="openCreateChannelFromContextMenu('voice')"
+        >
+          <Volume2 class="w-4 h-4" />
+          Create voice channel
+        </button>
       </div>
       </template>
       <template v-else>

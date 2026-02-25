@@ -205,7 +205,17 @@ const handleGetChannels = async (client: ClientConnection) => {
 const handleCreateChannel = async (client: ClientConnection, payload: { category_id: string | null, name: string, type: 'text' | 'voice' }) => {
   if (!client.userId) return;
   const { category_id, name, type } = payload;
-  if (!name || !type) return;
+
+  const normalizedName = (name || '').trim();
+  if (!normalizedName) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Channel name is required' } }));
+    return;
+  }
+
+  if (type !== 'text' && type !== 'voice') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid channel type' } }));
+    return;
+  }
 
   const user = await getUserById(client.userId);
   if (!user || user.role !== 'admin') {
@@ -213,13 +223,18 @@ const handleCreateChannel = async (client: ClientConnection, payload: { category
     return;
   }
 
-  const channel = await createChannel(category_id, name, type);
+  try {
+    const channel = await createChannel(category_id, normalizedName, type);
 
-  // Broadcast to all authenticated users
-  connectionManager.broadcastToAuthenticated({
-    type: 'channel_created',
-    payload: { channel }
-  });
+    // Broadcast to all authenticated users
+    connectionManager.broadcastToAuthenticated({
+      type: 'channel_created',
+      payload: { channel }
+    });
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to create channel:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to create channel' } }));
+  }
 };
 
 const handleGetMessages = async (client: ClientConnection, payload: { channel_id: string }) => {

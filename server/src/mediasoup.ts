@@ -118,6 +118,6 @@ export async function createWebRtcTransport(router: Router): Promise<WebRtcTrans
     enableUdp: true,
     enableTcp: true,
     preferUdp: true,
-    initialAvailableOutgoingBitrate: 1000000,
+    initialAvailableOutgoingBitrate: 100000000,
   });
 }
