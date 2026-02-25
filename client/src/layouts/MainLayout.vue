@@ -258,8 +258,8 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
 
 type AvatarBadgeType = 'speaking' | 'presence' | null
 
-const getAvatarBadgeType = (userId: string, showPresence: boolean): AvatarBadgeType => {
-  if (isVoiceUserSpeaking(userId)) return 'speaking'
+const getAvatarBadgeType = (userId: string, showPresence: boolean, allowSpeaking: boolean = true): AvatarBadgeType => {
+  if (allowSpeaking && isVoiceUserSpeaking(userId)) return 'speaking'
   return showPresence ? 'presence' : null
 }
 </script>
@@ -530,11 +530,6 @@ const getAvatarBadgeType = (userId: string, showPresence: boolean): AvatarBadgeT
                   <div class="relative w-6 h-6 rounded-full bg-indigo-500 mr-2 flex items-center justify-center text-xs font-bold text-white overflow-hidden" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-2 ring-green-400 ring-offset-1 ring-offset-[#2b2d31]' : ''">
                     <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
                     <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
-                    <div
-                      v-if="getAvatarBadgeType(user.id, false)"
-                      class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border border-[#2b2d31]"
-                      :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'bg-green-400' : 'bg-green-500'"
-                    ></div>
                   </div>
                   <span class="truncate flex-1">{{ user.username }}</span>
                   <div class="flex items-center gap-1 ml-2">
@@ -580,11 +575,6 @@ const getAvatarBadgeType = (userId: string, showPresence: boolean): AvatarBadgeT
                   <div class="relative w-6 h-6 rounded-full bg-indigo-500 mr-2 flex items-center justify-center text-xs font-bold text-white overflow-hidden" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-2 ring-green-400 ring-offset-1 ring-offset-[#2b2d31]' : ''">
                     <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
                     <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
-                    <div
-                      v-if="getAvatarBadgeType(user.id, false)"
-                      class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border border-[#2b2d31]"
-                      :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'bg-green-400' : 'bg-green-500'"
-                    ></div>
                   </div>
                   <span class="truncate flex-1">{{ user.username }}</span>
                   <div class="flex items-center gap-1 ml-2">
@@ -754,13 +744,13 @@ const getAvatarBadgeType = (userId: string, showPresence: boolean): AvatarBadgeT
                 :key="user.id"
                 class="flex items-center px-2 py-1.5 hover:bg-[#3f4147] rounded cursor-pointer group"
               >
-                <div class="relative w-8 h-8 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mr-3" :class="getAvatarBadgeType(user.id, true) === 'speaking' ? 'ring-2 ring-green-400 ring-offset-1 ring-offset-[#2b2d31]' : ''">
+                <div class="relative w-8 h-8 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mr-3" :class="getAvatarBadgeType(user.id, true, false) === 'speaking' ? 'ring-2 ring-green-400 ring-offset-1 ring-offset-[#2b2d31]' : ''">
                   <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover rounded-full" />
                   <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
                   <div
-                    v-if="getAvatarBadgeType(user.id, true)"
+                    v-if="getAvatarBadgeType(user.id, true, false)"
                     class="absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full border-2 border-[#2b2d31] group-hover:border-[#3f4147]"
-                    :class="getAvatarBadgeType(user.id, true) === 'speaking' ? 'bg-green-400' : 'bg-green-500'"
+                    :class="getAvatarBadgeType(user.id, true, false) === 'speaking' ? 'bg-green-400' : 'bg-green-500'"
                   ></div>
                 </div>
                 <div class="flex-1 min-w-0">
