@@ -110,6 +110,7 @@ export const useChatStore = defineStore('chat', () => {
   const isConnected = ref(false);
   const currentUser = ref<User | null>(null);
   const currentUserRole = ref<string>('user');
+  const lastError = ref<string | null>(null);
   
   const savedConnections = ref<SavedConnection[]>(
     JSON.parse(localStorage.getItem('savedConnections') || '[]').map((c: SavedConnection) => ({
@@ -382,6 +383,7 @@ export const useChatStore = defineStore('chat', () => {
 
       case 'authenticated':
         currentUser.value = payload.user;
+        currentUserRole.value = payload.user.role || 'user';
         saveLocalUsername(payload.user.username);
         getChannels();
         break;
@@ -448,6 +450,7 @@ export const useChatStore = defineStore('chat', () => {
         break;
         
       case 'error':
+        lastError.value = payload.message;
         console.error('Server error:', payload.message);
         break;
         
@@ -479,7 +482,15 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const createChannel = (category_id: string | null, name: string, type: 'text' | 'voice') => {
+    if (!name.trim()) {
+      lastError.value = 'Channel name is required';
+      return;
+    }
     send('create_channel', { category_id, name, type });
+  };
+
+  const clearError = () => {
+    lastError.value = null;
   };
 
   const getMessages = (channel_id: string) => {
@@ -516,6 +527,7 @@ export const useChatStore = defineStore('chat', () => {
     isConnected,
     currentUser,
     currentUserRole,
+    lastError,
     savedConnections,
     activeConnectionId,
     localUsername,
@@ -535,6 +547,7 @@ export const useChatStore = defineStore('chat', () => {
     disconnect,
     authenticate,
     createChannel,
+    clearError,
     sendMessage,
     submitAdminKey,
     setActiveChannel,
