@@ -29,6 +29,41 @@ export const dbAll = <T>(sql: string, params: any[] = []): Promise<T[]> => {
   });
 };
 
+// --- Servers ---
+export interface Server {
+  id: string;
+  name: string;
+  rulesChannelId?: string;
+  welcomeChannelId?: string;
+}
+
+export const getServer = async (): Promise<Server | undefined> => {
+  const row = await dbGet<any>('SELECT * FROM servers LIMIT 1');
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    name: row.name,
+    rulesChannelId: row.rules_channel_id,
+    welcomeChannelId: row.welcome_channel_id
+  };
+};
+
+export const createServer = async (name: string, welcomeChannelId?: string): Promise<Server> => {
+  const id = crypto.randomUUID();
+  await dbRun('INSERT INTO servers (id, name, welcome_channel_id) VALUES (?, ?, ?)', [id, name, welcomeChannelId]);
+  const row = await dbGet<any>('SELECT * FROM servers WHERE id = ?', [id]);
+  return {
+    id: row.id,
+    name: row.name,
+    rulesChannelId: row.rules_channel_id,
+    welcomeChannelId: row.welcome_channel_id
+  };
+};
+
+export const updateServerSettings = async (id: string, rulesChannelId: string | null, welcomeChannelId: string | null): Promise<void> => {
+  await dbRun('UPDATE servers SET rules_channel_id = ?, welcome_channel_id = ? WHERE id = ?', [rulesChannelId, welcomeChannelId, id]);
+};
+
 // --- Users ---
 export interface User {
   id: string;

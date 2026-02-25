@@ -21,6 +21,26 @@ export const db = new sqlite3.Database(dbPath, (err) => {
 
 function initializeDatabase() {
   db.serialize(() => {
+    // Servers Table
+    db.run(`
+      CREATE TABLE IF NOT EXISTS servers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        rules_channel_id TEXT,
+        welcome_channel_id TEXT
+      )
+    `, (err) => {
+      if (!err) {
+        // Try to add columns in case the table already existed without them
+        try {
+          db.run('ALTER TABLE servers ADD COLUMN rules_channel_id TEXT', () => {});
+          db.run('ALTER TABLE servers ADD COLUMN welcome_channel_id TEXT', () => {});
+        } catch (e) {
+          console.error('Migration error:', e);
+        }
+      }
+    });
+
     // Users Table
     db.run(`
       CREATE TABLE IF NOT EXISTS users (
@@ -67,6 +87,24 @@ function initializeDatabase() {
       )
     `);
 
+    // Ensure default server exists
+    db.get('SELECT count(*) as count FROM servers', (err, row: any) => {
+      if (err) {
+        console.error('Error checking servers:', err);
+        return;
+      }
+      if (row.count === 0) {
+        const serverId = crypto.randomUUID();
+        db.run('INSERT INTO servers (id, name) VALUES (?, ?)', [serverId, 'My Server'], (err) => {
+          if (err) {
+            console.error('Error creating default server:', err);
+          } else {
+            console.log('Created default server.');
+          }
+        });
+      }
+    });
+
     // Ensure default channels exist
     db.get('SELECT count(*) as count FROM channels', (err, row: any) => {
       if (err) {
@@ -80,6 +118,15 @@ function initializeDatabase() {
             console.error('Error creating default text channel:', err);
           } else {
             console.log('Created default "general" text channel.');
+            // Ensure default server exists and set welcome channel
+            db.get('SELECT count(*) as count FROM servers', (err, row: any) => {
+              if (row && row.count === 0) {
+                const serverId = crypto.randomUUID();
+                db.run('INSERT INTO servers (id, name, welcome_channel_id) VALUES (?, ?, ?)', [serverId, 'My Server', textId]);
+              } else {
+                db.run('UPDATE servers SET welcome_channel_id = ? WHERE welcome_channel_id IS NULL', [textId]);
+              }
+            });
           }
         });
 

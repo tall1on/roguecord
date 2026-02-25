@@ -5,6 +5,7 @@ export interface ClientConnection {
   userId?: string;
   challenge?: string;
   pendingPublicKey?: string;
+  isNewUser?: boolean;
   isAlive: boolean;
 }
 

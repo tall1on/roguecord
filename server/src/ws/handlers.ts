@@ -12,7 +12,10 @@ import {
   createMessage,
   getUserById,
   updateUserRole,
-  getUsers
+  getUsers,
+  getServer,
+  createServer,
+  updateServerSettings
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -73,8 +76,20 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'submit_admin_key':
         await handleSubmitAdminKey(client, payload);
         break;
+      case 'update_server_settings':
+        await handleUpdateServerSettings(client, payload);
+        break;
       case 'voice_state_update':
         await handleVoiceStateUpdate(client, payload);
+        break;
+      case 'CREATE_SERVER':
+        await handleCreateServer(client, payload);
+        break;
+      case 'UPDATE_SERVER_SETTINGS':
+        await handleUpdateServerSettingsUppercase(client, payload);
+        break;
+      case 'JOIN_SERVER':
+        await handleJoinServer(client, payload);
         break;
       case 'ping':
         client.ws.send(JSON.stringify({ type: 'pong', payload: {} }));
@@ -93,13 +108,16 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
   if (!username || !publicKey) return;
 
   let user = await getUserByPublicKey(publicKey);
+  let isNewUser = false;
   if (!user) {
     user = await createUser(username, publicKey);
+    isNewUser = true;
   }
 
   const challenge = crypto.randomBytes(32).toString('hex');
   client.challenge = challenge;
   client.pendingPublicKey = publicKey;
+  client.isNewUser = isNewUser;
 
   client.ws.send(JSON.stringify({
     type: 'auth:challenge',
@@ -134,9 +152,10 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
         client.challenge = undefined;
         client.pendingPublicKey = undefined;
 
+        const server = await getServer();
         client.ws.send(JSON.stringify({
           type: 'authenticated',
-          payload: { user }
+          payload: { user, server }
         }));
 
         // Send full member list to the newly authenticated user
@@ -156,6 +175,24 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
             type: 'user_online',
             payload: { user }
           });
+        }
+
+        // Send welcome message if new user
+        if (client.isNewUser) {
+          const server = await getServer();
+          if (server && server.welcomeChannelId) {
+            // Create a system user or use the new user's ID for the welcome message
+            // Let's use the new user's ID but format it as a system message, or just a regular message
+            const welcomeContent = `Welcome ${user.username} to the server!`;
+            const message = await createMessage(server.welcomeChannelId, user.id, welcomeContent);
+            const messageWithUser = { ...message, user };
+            
+            connectionManager.broadcastToAuthenticated({
+              type: 'new_message',
+              payload: { message: messageWithUser }
+            });
+          }
+          client.isNewUser = false;
         }
       } else {
         client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
@@ -181,6 +218,12 @@ const handleGetChannels = async (client: ClientConnection) => {
     const channel = await createChannel(category.id, 'general', 'text', 0);
     categories.push(category);
     channels.push(channel);
+    
+    // Set welcome channel
+    const server = await getServer();
+    if (server) {
+      await updateServerSettings(server.id, server.rulesChannelId || null, channel.id);
+    }
   }
 
   client.ws.send(JSON.stringify({
@@ -588,6 +631,36 @@ const handleSubmitAdminKey = async (client: ClientConnection, payload: { key: st
   }
 };
 
+const handleUpdateServerSettings = async (client: ClientConnection, payload: { serverId: string, rulesChannelId: string | null, welcomeChannelId: string | null }) => {
+  if (!client.userId) return;
+  
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can update server settings' } }));
+    return;
+  }
+
+  const { serverId, rulesChannelId, welcomeChannelId } = payload;
+  
+  if (!serverId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID is required' } }));
+    return;
+  }
+
+  try {
+    await updateServerSettings(serverId, rulesChannelId, welcomeChannelId);
+    const updatedServer = await getServer();
+    
+    connectionManager.broadcastToAuthenticated({
+      type: 'server_settings_updated',
+      payload: { server: updatedServer }
+    });
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to update server settings:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to update server settings' } }));
+  }
+};
+
 const handleVoiceStateUpdate = async (client: ClientConnection, payload: { channel_id: string, isMuted: boolean, isDeafened: boolean }) => {
   if (!client.userId) return;
   const { channel_id, isMuted, isDeafened } = payload;
@@ -619,5 +692,84 @@ const handleVoiceStateUpdate = async (client: ClientConnection, payload: { chann
       isDeafened
     }
   });
+};
+
+const handleCreateServer = async (client: ClientConnection, payload: { name: string }) => {
+  if (!client.userId) return;
+  const { name } = payload;
+  
+  const server = await createServer(name);
+  
+  // Create default category and channel
+  const category = await createCategory('Text Channels', 0);
+  const channel = await createChannel(category.id, 'general', 'text', 0);
+  
+  // Update server's welcomeChannelId
+  await updateServerSettings(server.id, null, channel.id);
+  
+  const updatedServer = await getServer();
+  
+  client.ws.send(JSON.stringify({
+    type: 'SERVER_CREATED',
+    payload: { server: updatedServer }
+  }));
+};
+
+const handleUpdateServerSettingsUppercase = async (client: ClientConnection, payload: { serverId: string, rulesChannelId: string | null, welcomeChannelId: string | null }) => {
+  if (!client.userId) return;
+  
+  const user = await getUserById(client.userId);
+  // Assuming admin is the server owner for now, as there is no ownerId
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only server owners can update server settings' } }));
+    return;
+  }
+
+  const { serverId, rulesChannelId, welcomeChannelId } = payload;
+  
+  if (!serverId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID is required' } }));
+    return;
+  }
+
+  try {
+    await updateServerSettings(serverId, rulesChannelId, welcomeChannelId);
+    const updatedServer = await getServer();
+    
+    connectionManager.broadcastToAuthenticated({
+      type: 'SERVER_UPDATED',
+      payload: { server: updatedServer }
+    });
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to update server settings:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to update server settings' } }));
+  }
+};
+
+const handleJoinServer = async (client: ClientConnection, payload: { serverId: string }) => {
+  if (!client.userId) return;
+  const { serverId } = payload;
+  
+  const server = await getServer();
+  if (!server || server.id !== serverId) return;
+  
+  const user = await getUserById(client.userId);
+  if (!user) return;
+  
+  if (server.welcomeChannelId) {
+    const welcomeContent = `Just joined the server!`;
+    const message = await createMessage(server.welcomeChannelId, user.id, welcomeContent);
+    const messageWithUser = { ...message, user };
+    
+    connectionManager.broadcastToAuthenticated({
+      type: 'NEW_MESSAGE',
+      payload: { message: messageWithUser }
+    });
+  }
+  
+  client.ws.send(JSON.stringify({
+    type: 'SERVER_JOINED',
+    payload: { serverId }
+  }));
 };
 
