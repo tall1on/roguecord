@@ -362,9 +362,14 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   };
 
   const joinVoiceChannel = (channelId: string) => {
+    if (activeVoiceChannelId.value === channelId) {
+      return;
+    }
+
     if (activeVoiceChannelId.value) {
       leaveVoiceChannel();
     }
+
     activeVoiceChannelId.value = channelId;
     chatStore.send('join_voice_channel', { 
       channel_id: channelId,

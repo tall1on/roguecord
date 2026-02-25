@@ -61,6 +61,25 @@ const voiceTileClass = computed(() => {
 
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
 
+const privilegedRoles = new Set(['admin', 'owner', 'mod', 'moderator', 'bot', 'system'])
+
+const isReadOnlyRssChannel = computed(() => {
+  if (!activeTextChannel.value || activeTextChannel.value.type !== 'rss') {
+    return false
+  }
+
+  const role = chatStore.currentUserRole || 'user'
+  return !privilegedRoles.has(role)
+})
+
+const messagePlaceholder = computed(() => {
+  if (!activeTextChannel.value) return ''
+  if (isReadOnlyRssChannel.value) {
+    return 'This RSS channel is read-only for your role'
+  }
+  return `Message #${activeTextChannel.value.name}`
+})
+
 type AvatarBadgeType = 'speaking' | 'presence' | null
 
 const getAvatarBadgeType = (userId: string, showPresence: boolean): AvatarBadgeType => {
@@ -69,6 +88,10 @@ const getAvatarBadgeType = (userId: string, showPresence: boolean): AvatarBadgeT
 }
 
 const sendMessage = () => {
+  if (isReadOnlyRssChannel.value) {
+    return
+  }
+
   if (messageInput.value.trim() && activeTextChannel.value) {
     chatStore.sendMessage(activeTextChannel.value.id, messageInput.value.trim())
     messageInput.value = ''
@@ -131,7 +154,7 @@ watch(() => chatStore.activeChannelMessages, async () => {
 
       <!-- Chat Input Area -->
       <div class="p-4 shrink-0">
-        <div class="bg-[#383a40] rounded-lg p-3 flex items-center gap-3">
+        <div class="bg-[#383a40] rounded-lg p-3 flex items-center gap-3" :class="isReadOnlyRssChannel ? 'opacity-80' : ''">
           <button class="w-6 h-6 rounded-full bg-[#4e5058] flex items-center justify-center text-gray-300 hover:text-white shrink-0 transition-colors">
             +
           </button>
@@ -139,10 +162,14 @@ watch(() => chatStore.activeChannelMessages, async () => {
             v-model="messageInput"
             @keyup.enter="sendMessage"
             type="text" 
-            :placeholder="`Message #${activeTextChannel.name}`" 
+            :placeholder="messagePlaceholder"
+            :disabled="isReadOnlyRssChannel"
             class="bg-transparent border-none outline-none flex-1 text-gray-200 placeholder-gray-500"
           />
         </div>
+        <p v-if="isReadOnlyRssChannel" class="mt-2 text-xs text-gray-400">
+          RSS feed channels are read-only for normal users.
+        </p>
       </div>
     </template>
 
