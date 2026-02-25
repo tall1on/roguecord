@@ -36,8 +36,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const speakingContext = shallowRef<AudioContext | null>(null);
   let speakingInterval: number | null = null;
 
-  const SPEAKING_THRESHOLD = 0.018;
-  const SPEAKING_HOLD_MS = 250;
+  const SPEAKING_THRESHOLD = 0.026;
+  const SPEAKING_HOLD_MS = 180;
 
   const ping = ref<number>(0);
   const bandwidth = ref<number>(0);
@@ -123,7 +123,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     const source = context.createMediaStreamSource(stream);
     const analyser = context.createAnalyser();
     analyser.fftSize = 1024;
-    analyser.smoothingTimeConstant = 0.2;
+    analyser.smoothingTimeConstant = 0.45;
 
     source.connect(analyser);
 
