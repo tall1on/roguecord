@@ -255,6 +255,13 @@ const groupedMembers = computed(() => {
 })
 
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
+
+type AvatarBadgeType = 'speaking' | 'presence' | null
+
+const getAvatarBadgeType = (userId: string, showPresence: boolean): AvatarBadgeType => {
+  if (isVoiceUserSpeaking(userId)) return 'speaking'
+  return showPresence ? 'presence' : null
+}
 </script>
 
 <template>
@@ -520,11 +527,14 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
               <!-- Voice Participants -->
               <div v-if="channel.type === 'voice' && webrtcStore.channelParticipants.get(channel.id)?.length" class="pl-8 pr-2 pb-2 space-y-1">
                 <div v-for="user in webrtcStore.channelParticipants.get(channel.id)" :key="user.id" class="flex items-center text-gray-300 text-sm">
-                  <div class="relative w-6 h-6 rounded-full bg-indigo-500 mr-2 flex items-center justify-center text-xs font-bold text-white overflow-hidden" :class="isVoiceUserSpeaking(user.id) ? 'ring-2 ring-green-400 ring-offset-1 ring-offset-[#2b2d31]' : ''">
+                  <div class="relative w-6 h-6 rounded-full bg-indigo-500 mr-2 flex items-center justify-center text-xs font-bold text-white overflow-hidden" :class="getAvatarBadgeType(user.id, true) === 'speaking' ? 'ring-2 ring-green-400 ring-offset-1 ring-offset-[#2b2d31]' : ''">
                     <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
                     <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
-                    <div v-if="isVoiceUserSpeaking(user.id)" class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-green-400 border border-[#2b2d31]"></div>
-                    <div v-else class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-green-500 border border-[#2b2d31]"></div>
+                    <div
+                      v-if="getAvatarBadgeType(user.id, true)"
+                      class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border border-[#2b2d31]"
+                      :class="getAvatarBadgeType(user.id, true) === 'speaking' ? 'bg-green-400' : 'bg-green-500'"
+                    ></div>
                   </div>
                   <span class="truncate flex-1">{{ user.username }}</span>
                   <div class="flex items-center gap-1 ml-2">
@@ -567,11 +577,14 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
               <!-- Voice Participants -->
               <div v-if="channel.type === 'voice' && webrtcStore.channelParticipants.get(channel.id)?.length" class="pl-8 pr-2 pb-2 space-y-1">
                 <div v-for="user in webrtcStore.channelParticipants.get(channel.id)" :key="user.id" class="flex items-center text-gray-300 text-sm">
-                  <div class="relative w-6 h-6 rounded-full bg-indigo-500 mr-2 flex items-center justify-center text-xs font-bold text-white overflow-hidden" :class="isVoiceUserSpeaking(user.id) ? 'ring-2 ring-green-400 ring-offset-1 ring-offset-[#2b2d31]' : ''">
+                  <div class="relative w-6 h-6 rounded-full bg-indigo-500 mr-2 flex items-center justify-center text-xs font-bold text-white overflow-hidden" :class="getAvatarBadgeType(user.id, true) === 'speaking' ? 'ring-2 ring-green-400 ring-offset-1 ring-offset-[#2b2d31]' : ''">
                     <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
                     <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
-                    <div v-if="isVoiceUserSpeaking(user.id)" class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-green-400 border border-[#2b2d31]"></div>
-                    <div v-else class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-green-500 border border-[#2b2d31]"></div>
+                    <div
+                      v-if="getAvatarBadgeType(user.id, true)"
+                      class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border border-[#2b2d31]"
+                      :class="getAvatarBadgeType(user.id, true) === 'speaking' ? 'bg-green-400' : 'bg-green-500'"
+                    ></div>
                   </div>
                   <span class="truncate flex-1">{{ user.username }}</span>
                   <div class="flex items-center gap-1 ml-2">
@@ -741,10 +754,14 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
                 :key="user.id"
                 class="flex items-center px-2 py-1.5 hover:bg-[#3f4147] rounded cursor-pointer group"
               >
-                <div class="relative w-8 h-8 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mr-3">
+                <div class="relative w-8 h-8 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mr-3" :class="getAvatarBadgeType(user.id, true) === 'speaking' ? 'ring-2 ring-green-400 ring-offset-1 ring-offset-[#2b2d31]' : ''">
                   <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover rounded-full" />
                   <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
-                  <div class="absolute bottom-0 right-0 w-3.5 h-3.5 bg-green-500 rounded-full border-2 border-[#2b2d31] group-hover:border-[#3f4147]"></div>
+                  <div
+                    v-if="getAvatarBadgeType(user.id, true)"
+                    class="absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full border-2 border-[#2b2d31] group-hover:border-[#3f4147]"
+                    :class="getAvatarBadgeType(user.id, true) === 'speaking' ? 'bg-green-400' : 'bg-green-500'"
+                  ></div>
                 </div>
                 <div class="flex-1 min-w-0">
                   <div class="text-sm font-medium truncate group-hover:text-gray-100" :class="user.role === 'admin' ? 'text-red-500' : 'text-gray-300'">{{ user.username }}</div>
