@@ -199,6 +199,18 @@ const handleChannelClick = (channel: any) => {
   }
 }
 
+const isChannelActive = (channel: any) => {
+  if (channel.type === 'text') {
+    return chatStore.activeMainPanel.type === 'text' && chatStore.activeMainPanel.channelId === channel.id
+  }
+
+  if (channel.type === 'voice') {
+    return chatStore.activeMainPanel.type === 'voice' && chatStore.activeMainPanel.channelId === channel.id
+  }
+
+  return false
+}
+
 const activeServer = computed(() => {
   if (chatStore.activeConnectionId) {
     const connection = chatStore.savedConnections.find(c => c.id === chatStore.activeConnectionId)
@@ -496,7 +508,7 @@ const groupedMembers = computed(() => {
                 @click="handleChannelClick(channel)"
                 @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
                 class="flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
-                :class="(channel.type === 'text' && chatStore.activeChannelId === channel.id) || (channel.type === 'voice' && webrtcStore.activeVoiceChannelId === channel.id) ? 'bg-[#404249] text-white' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
+                :class="isChannelActive(channel) ? 'bg-[#404249] text-white' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
               >
                 <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
                 <Volume2 v-else class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
@@ -541,7 +553,7 @@ const groupedMembers = computed(() => {
                 @click="handleChannelClick(channel)"
                 @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
                 class="flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
-                :class="(channel.type === 'text' && chatStore.activeChannelId === channel.id) || (channel.type === 'voice' && webrtcStore.activeVoiceChannelId === channel.id) ? 'bg-[#404249] text-white' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
+                :class="isChannelActive(channel) ? 'bg-[#404249] text-white' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
               >
                 <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
                 <Volume2 v-else class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
