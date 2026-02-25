@@ -130,10 +130,6 @@ watch(() => chatStore.activeChannelMessages, async () => {
             <div class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
               <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
               <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
-              <div
-                v-if="getAvatarBadgeType(user.id, false) === 'speaking'"
-                class="absolute bottom-1 right-1 w-3.5 h-3.5 rounded-full bg-green-400 border-2 border-[#2b2d31]"
-              ></div>
             </div>
           </div>
         </div>
