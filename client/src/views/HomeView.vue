@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type ComponentPublicInstance } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
+import { Archive, Code2, File, FileText, Film, Image, Music2 } from 'lucide-vue-next'
 import { useChatStore, type Message, type FolderChannelFile } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 
@@ -510,6 +511,60 @@ const requestFolderFileDownload = (fileId: string) => {
   chatStore.downloadFolderFile(channelId, fileId)
 }
 
+type FolderFileCategory = 'image' | 'video' | 'audio' | 'archive' | 'code' | 'text' | 'pdf' | 'generic'
+
+const imageExtensions = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'])
+const videoExtensions = new Set(['mp4', 'webm', 'mkv', 'mov', 'avi', 'wmv', 'm4v'])
+const audioExtensions = new Set(['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac'])
+const archiveExtensions = new Set(['zip', 'rar', '7z', 'tar', 'gz', 'tgz', 'bz2', 'xz'])
+const codeExtensions = new Set(['js', 'ts', 'vue', 'jsx', 'tsx', 'json', 'html', 'css', 'scss', 'md', 'py', 'java', 'c', 'cpp', 'cs', 'go', 'rs', 'php', 'sql'])
+const textExtensions = new Set(['txt', 'log', 'csv'])
+
+const folderFileCategoryIcons: Record<FolderFileCategory, Component> = {
+  image: Image,
+  video: Film,
+  audio: Music2,
+  archive: Archive,
+  code: Code2,
+  text: FileText,
+  pdf: FileText,
+  generic: File
+}
+
+const folderFileCategoryIconClasses: Record<FolderFileCategory, string> = {
+  image: 'text-emerald-400',
+  video: 'text-purple-400',
+  audio: 'text-pink-400',
+  archive: 'text-amber-400',
+  code: 'text-sky-400',
+  text: 'text-cyan-400',
+  pdf: 'text-red-400',
+  generic: 'text-gray-400'
+}
+
+const getFileExtension = (fileName: string) => {
+  const trimmedName = fileName.trim()
+  const dotIndex = trimmedName.lastIndexOf('.')
+  if (dotIndex <= 0 || dotIndex === trimmedName.length - 1) return ''
+  return trimmedName.slice(dotIndex + 1).toLowerCase()
+}
+
+const getFolderFileCategory = (fileName: string): FolderFileCategory => {
+  const extension = getFileExtension(fileName)
+  if (!extension) return 'generic'
+  if (imageExtensions.has(extension)) return 'image'
+  if (videoExtensions.has(extension)) return 'video'
+  if (audioExtensions.has(extension)) return 'audio'
+  if (archiveExtensions.has(extension)) return 'archive'
+  if (extension === 'pdf') return 'pdf'
+  if (codeExtensions.has(extension)) return 'code'
+  if (textExtensions.has(extension)) return 'text'
+  return 'generic'
+}
+
+const getFolderFileIcon = (fileName: string) => folderFileCategoryIcons[getFolderFileCategory(fileName)]
+const getFolderFileIconClass = (fileName: string) => folderFileCategoryIconClasses[getFolderFileCategory(fileName)]
+
 const formatFileSize = (sizeBytes: number) => {
   if (!Number.isFinite(sizeBytes) || sizeBytes < 0) return '0 B'
   if (sizeBytes < 1024) return `${sizeBytes} B`
@@ -806,11 +861,18 @@ watch(
             :key="file.id"
             class="flex items-center justify-between gap-4 rounded-md border border-[#3f4147] bg-[#2b2d31] px-3 py-2"
           >
-            <div class="min-w-0">
-              <p class="truncate text-sm text-white font-medium">{{ file.original_name }}</p>
-              <p class="text-xs text-gray-400 truncate">
-                {{ formatFileSize(file.size_bytes) }} · {{ file.uploader_username || 'Unknown uploader' }} · {{ formatTime(file.created_at) }}
-              </p>
+            <div class="min-w-0 flex items-center gap-2.5">
+              <component
+                :is="getFolderFileIcon(file.original_name)"
+                class="w-4 h-4 shrink-0"
+                :class="getFolderFileIconClass(file.original_name)"
+              />
+              <div class="min-w-0">
+                <p class="truncate text-sm text-white font-medium">{{ file.original_name }}</p>
+                <p class="text-xs text-gray-400 truncate">
+                  {{ formatFileSize(file.size_bytes) }} · {{ file.uploader_username || 'Unknown uploader' }} · {{ formatTime(file.created_at) }}
+                </p>
+              </div>
             </div>
             <button
               type="button"
@@ -829,8 +891,15 @@ watch(
             class="rounded-md border border-[#3f4147] bg-[#2b2d31] p-3 flex flex-col gap-3"
           >
             <div class="min-w-0">
-              <p class="truncate text-sm text-white font-medium">{{ file.original_name }}</p>
-              <p class="text-xs text-gray-400 mt-1">{{ formatFileSize(file.size_bytes) }}</p>
+              <div class="flex items-center gap-2">
+                <component
+                  :is="getFolderFileIcon(file.original_name)"
+                  class="w-5 h-5 shrink-0"
+                  :class="getFolderFileIconClass(file.original_name)"
+                />
+                <p class="truncate text-sm text-white font-medium">{{ file.original_name }}</p>
+              </div>
+              <p class="text-xs text-gray-400 mt-2">{{ formatFileSize(file.size_bytes) }}</p>
               <p class="text-xs text-gray-400 truncate mt-1">{{ file.uploader_username || 'Unknown uploader' }}</p>
               <p class="text-xs text-gray-400 mt-1">{{ formatTime(file.created_at) }}</p>
             </div>
