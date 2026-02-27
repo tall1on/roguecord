@@ -4,6 +4,18 @@ import { Device } from 'mediasoup-client';
 import { useChatStore } from './chat';
 
 type MediaSourceType = 'mic' | 'screen' | 'camera';
+type ScreenStreamFps = 30 | 60;
+type ScreenStreamResolution = 'source' | '1080p' | '720p' | '480p' | '4k' | '8k';
+
+type ScreenStreamPreference = {
+  fps: ScreenStreamFps;
+  resolution: ScreenStreamResolution;
+};
+
+const DEFAULT_SCREEN_STREAM_PREFERENCE: ScreenStreamPreference = {
+  fps: 30,
+  resolution: 'source'
+};
 
 export const useWebRtcStore = defineStore('webrtc', () => {
   const chatStore = useChatStore();
@@ -30,6 +42,154 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const producerToSource = new Map<string, MediaSourceType>();
   const consumerToProducer = new Map<string, string>();
   const userScreenStreams = shallowRef<Map<string, MediaStream>>(new Map());
+  const screenStreamMuteState = ref<Map<string, boolean>>(new Map());
+  const screenStreamPreferenceState = ref<Map<string, ScreenStreamPreference>>(new Map());
+
+  const getScreenStreamPreference = (userId: string): ScreenStreamPreference => {
+    return screenStreamPreferenceState.value.get(userId) || DEFAULT_SCREEN_STREAM_PREFERENCE;
+  };
+
+  const getScreenStreamFps = (userId: string): ScreenStreamFps => {
+    return getScreenStreamPreference(userId).fps;
+  };
+
+  const getScreenStreamResolution = (userId: string): ScreenStreamResolution => {
+    return getScreenStreamPreference(userId).resolution;
+  };
+
+  const isScreenStreamMuted = (userId: string) => {
+    return screenStreamMuteState.value.get(userId) === true;
+  };
+
+  const setScreenStreamMuted = (userId: string, isMuted: boolean) => {
+    if (isMuted) {
+      screenStreamMuteState.value.set(userId, true);
+    } else {
+      screenStreamMuteState.value.delete(userId);
+    }
+    screenStreamMuteState.value = new Map(screenStreamMuteState.value);
+  };
+
+  const getResolutionTarget = (resolution: ScreenStreamResolution, sourceAspectRatio: number) => {
+    const targetHeightByResolution: Record<Exclude<ScreenStreamResolution, 'source'>, number> = {
+      '1080p': 1080,
+      '720p': 720,
+      '480p': 480,
+      '4k': 2160,
+      '8k': 4320
+    };
+
+    if (resolution === 'source') {
+      return null;
+    }
+
+    const targetHeight = targetHeightByResolution[resolution];
+    const targetWidth = Math.max(1, Math.round(targetHeight * sourceAspectRatio));
+
+    return {
+      width: targetWidth,
+      height: targetHeight
+    };
+  };
+
+  const applyScreenTrackPreference = async (track: MediaStreamTrack, preference: ScreenStreamPreference) => {
+    const settings = track.getSettings();
+    const sourceWidth = settings.width || 1920;
+    const sourceHeight = settings.height || 1080;
+    const sourceAspectRatio = sourceHeight > 0 ? sourceWidth / sourceHeight : 16 / 9;
+
+    const resolutionTarget = getResolutionTarget(preference.resolution, sourceAspectRatio);
+    const preferredConstraints: MediaTrackConstraints = {
+      frameRate: {
+        ideal: preference.fps,
+        max: preference.fps
+      }
+    };
+
+    if (resolutionTarget) {
+      preferredConstraints.width = {
+        ideal: resolutionTarget.width,
+        max: resolutionTarget.width
+      };
+      preferredConstraints.height = {
+        ideal: resolutionTarget.height,
+        max: resolutionTarget.height
+      };
+    }
+
+    try {
+      await track.applyConstraints(preferredConstraints);
+      return;
+    } catch (error) {
+      console.warn('[WebRTC][screen] Failed to apply preferred screen constraints, retrying with fps-only', {
+        preference,
+        preferredConstraints,
+        error
+      });
+    }
+
+    try {
+      await track.applyConstraints({
+        frameRate: {
+          ideal: preference.fps,
+          max: preference.fps
+        }
+      });
+      return;
+    } catch (error) {
+      console.warn('[WebRTC][screen] Failed to apply fps-only constraints, retrying with unconstrained track', {
+        preference,
+        error
+      });
+    }
+
+    try {
+      await track.applyConstraints({});
+    } catch (error) {
+      console.warn('[WebRTC][screen] Failed to reset track constraints after unsupported preference', {
+        preference,
+        error
+      });
+    }
+  };
+
+  const setScreenStreamPreference = async (
+    userId: string,
+    updates: Partial<ScreenStreamPreference>
+  ) => {
+    const currentPreference = getScreenStreamPreference(userId);
+    const nextPreference: ScreenStreamPreference = {
+      fps: updates.fps ?? currentPreference.fps,
+      resolution: updates.resolution ?? currentPreference.resolution
+    };
+
+    screenStreamPreferenceState.value.set(userId, nextPreference);
+    screenStreamPreferenceState.value = new Map(screenStreamPreferenceState.value);
+
+    const localUserId = chatStore.currentUser?.id;
+    if (localUserId !== userId) {
+      console.info('[WebRTC][screen] Screen preference updated for remote stream (hook point)', {
+        userId,
+        preference: nextPreference
+      });
+      return;
+    }
+
+    const localScreenTrack = screenShareStream.value?.getVideoTracks()[0] || null;
+    if (!localScreenTrack) {
+      return;
+    }
+
+    await applyScreenTrackPreference(localScreenTrack, nextPreference);
+  };
+
+  const setScreenStreamFps = async (userId: string, fps: ScreenStreamFps) => {
+    await setScreenStreamPreference(userId, { fps });
+  };
+
+  const setScreenStreamResolution = async (userId: string, resolution: ScreenStreamResolution) => {
+    await setScreenStreamPreference(userId, { resolution });
+  };
 
   const setUserScreenStream = (userId: string, stream: MediaStream) => {
     const existing = userScreenStreams.value.get(userId);
@@ -186,6 +346,12 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         readyState: videoTrack.readyState
       });
 
+      const localUserId = chatStore.currentUser?.id;
+      if (localUserId) {
+        const preferredScreenPreference = getScreenStreamPreference(localUserId);
+        await applyScreenTrackPreference(videoTrack, preferredScreenPreference);
+      }
+
       screenShareStream.value = displayStream;
       videoTrack.onended = () => {
         stopScreenShare();
@@ -200,7 +366,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         producerId: screenProducer.value?.id
       });
 
-      const localUserId = chatStore.currentUser?.id;
+      
       if (localUserId) {
         setUserScreenStream(localUserId, displayStream);
       }
@@ -1011,6 +1177,9 @@ export const useWebRtcStore = defineStore('webrtc', () => {
             if (isDeafened.value) {
               audio.muted = true;
             }
+            if (remoteSource === 'screen' && remoteUserId && isScreenStreamMuted(remoteUserId)) {
+              audio.muted = true;
+            }
             audio.play().catch(e => console.error('Audio play failed:', e));
             audioElements.set(consumer.id, audio);
           }
@@ -1119,9 +1288,18 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     connectionQuality,
     isMuted,
     isDeafened,
+    screenStreamMuteState,
+    screenStreamPreferenceState,
     joinVoiceChannel,
     leaveVoiceChannel,
     isUserSpeaking,
+    isScreenStreamMuted,
+    setScreenStreamMuted,
+    getScreenStreamPreference,
+    getScreenStreamFps,
+    getScreenStreamResolution,
+    setScreenStreamFps,
+    setScreenStreamResolution,
     toggleMute,
     toggleDeafen,
     startScreenShare,
