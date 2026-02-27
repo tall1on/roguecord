@@ -37,6 +37,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const recvTransport = shallowRef<any | null>(null);
   const producer = shallowRef<any | null>(null);
   const screenProducer = shallowRef<any | null>(null);
+  const screenAudioProducer = shallowRef<any | null>(null);
   const screenShareStream = shallowRef<MediaStream | null>(null);
   const screenShareError = ref<string | null>(null);
   const consumers = shallowRef<Map<string, any>>(new Map());
@@ -343,6 +344,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
   const cleanupScreenShareProducer = (notifyServer: boolean = true) => {
     const currentScreenProducerId = screenProducer.value?.id as string | undefined;
+    const currentScreenAudioProducerId = screenAudioProducer.value?.id as string | undefined;
     if (screenProducer.value) {
       try {
         screenProducer.value.close();
@@ -352,15 +354,37 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       screenProducer.value = null;
     }
 
-    if (notifyServer && currentScreenProducerId && activeVoiceChannelId.value) {
-      console.info('[WebRTC][screen] Requesting server-side producer close', {
-        channelId: activeVoiceChannelId.value,
-        producerId: currentScreenProducerId
-      });
-      chatStore.send('close_producer', {
-        channel_id: activeVoiceChannelId.value,
-        producer_id: currentScreenProducerId
-      });
+    if (screenAudioProducer.value) {
+      try {
+        screenAudioProducer.value.close();
+      } catch (_e) {
+        // no-op
+      }
+      screenAudioProducer.value = null;
+    }
+
+    if (notifyServer && activeVoiceChannelId.value) {
+      if (currentScreenProducerId) {
+        console.info('[WebRTC][screen] Requesting server-side producer close', {
+          channelId: activeVoiceChannelId.value,
+          producerId: currentScreenProducerId
+        });
+        chatStore.send('close_producer', {
+          channel_id: activeVoiceChannelId.value,
+          producer_id: currentScreenProducerId
+        });
+      }
+
+      if (currentScreenAudioProducerId) {
+        console.info('[WebRTC][screen] Requesting server-side producer close', {
+          channelId: activeVoiceChannelId.value,
+          producerId: currentScreenAudioProducerId
+        });
+        chatStore.send('close_producer', {
+          channel_id: activeVoiceChannelId.value,
+          producer_id: currentScreenAudioProducerId
+        });
+      }
     }
 
     if (screenShareStream.value) {
@@ -460,10 +484,24 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     }
 
     try {
-      const displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: false
-      });
+      let displayStream: MediaStream;
+      try {
+        displayStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            suppressLocalAudioPlayback: false
+          } as MediaTrackConstraints
+        });
+      } catch (displayAudioError) {
+        console.warn('[WebRTC][screen] getDisplayMedia with audio constraints failed, retrying with audio=true', displayAudioError);
+        displayStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true
+        });
+      }
 
       console.info('[WebRTC][screen] getDisplayMedia resolved', {
         streamId: displayStream.id,
@@ -494,6 +532,27 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         stopScreenShare();
       };
 
+      const audioTrack = displayStream.getAudioTracks()[0] || null;
+      if (audioTrack) {
+        audioTrack.onended = () => {
+          if (!screenAudioProducer.value) return;
+          const currentScreenAudioProducer = screenAudioProducer.value;
+          screenAudioProducer.value = null;
+          try {
+            currentScreenAudioProducer.close();
+          } catch (_e) {
+            // no-op
+          }
+
+          if (activeVoiceChannelId.value) {
+            chatStore.send('close_producer', {
+              channel_id: activeVoiceChannelId.value,
+              producer_id: currentScreenAudioProducer.id
+            });
+          }
+        };
+      }
+
       screenProducer.value = await readySendTransport.produce({
         track: videoTrack,
         encodings: [
@@ -507,6 +566,17 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         ],
         appData: { source: 'screen' as MediaSourceType }
       });
+
+      if (audioTrack && device.value?.canProduce('audio')) {
+        screenAudioProducer.value = await readySendTransport.produce({
+          track: audioTrack,
+          appData: { source: 'screen' as MediaSourceType }
+        });
+
+        screenAudioProducer.value.on('transportclose', () => {
+          screenAudioProducer.value = null;
+        });
+      }
 
       console.info('[WebRTC][screen] Produce resolved', {
         producerId: screenProducer.value?.id
@@ -1303,7 +1373,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           const stream = new MediaStream();
           stream.addTrack(consumer.track);
 
-          if (remoteSource === 'screen') {
+          if (remoteSource === 'screen' && payload.kind === 'video') {
             consumer.track.onended = () => {
               console.warn('[WebRTC][screen] Remote screen track ended', {
                 consumerId: consumer.id,
@@ -1338,7 +1408,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           }
 
           if (remoteUserId) {
-            if (remoteSource === 'screen') {
+            if (remoteSource === 'screen' && payload.kind === 'video') {
               setUserScreenStream(remoteUserId, stream);
             } else if (payload.kind === 'audio') {
               addSpeakingDetector(consumer.id, remoteUserId, stream);
