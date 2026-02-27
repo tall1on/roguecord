@@ -33,6 +33,15 @@ export interface Message {
   user?: User;
 }
 
+interface ChannelUnreadState {
+  channel_id: string;
+  unread: boolean | number;
+  last_read_message_id?: string | null;
+  last_read_message_created_at?: string | null;
+  latest_message_id?: string | null;
+  latest_message_created_at?: string | null;
+}
+
 interface ChannelMessagePageState {
   hasMore: boolean;
   isLoading: boolean;
@@ -170,6 +179,7 @@ export const useChatStore = defineStore('chat', () => {
   let reconnectTimer: number | null = null;
   let reconnectAttempts = 0;
   let isIntentionalDisconnect = false;
+  const lastMarkedReadMessageByChannel = ref<Record<string, string>>({});
 
   const saveLocalUsername = (username: string) => {
     localUsername.value = username;
@@ -480,6 +490,8 @@ export const useChatStore = defineStore('chat', () => {
     activeMainPanel.value = { type: 'text', channelId: null };
     messages.value = {};
     messagePageState.value = {};
+    unreadChannelIds.value = new Set();
+    lastMarkedReadMessageByChannel.value = {};
     users.value = [];
     onlineUserIds.value.clear();
     currentUser.value = null;
@@ -577,6 +589,49 @@ export const useChatStore = defineStore('chat', () => {
     unreadChannelIds.value = next;
   };
 
+  const markChannelReadOnServer = (channelId: string, message: Message | null | undefined) => {
+    if (!message?.id || !message?.created_at) {
+      return;
+    }
+
+    if (lastMarkedReadMessageByChannel.value[channelId] === message.id) {
+      return;
+    }
+
+    lastMarkedReadMessageByChannel.value = {
+      ...lastMarkedReadMessageByChannel.value,
+      [channelId]: message.id
+    };
+
+    send('mark_channel_read', {
+      channel_id: channelId,
+      last_read_message_id: message.id,
+      last_read_message_created_at: message.created_at
+    });
+  };
+
+  const markActiveChannelReadFromMessages = (channelId: string) => {
+    if (activeMainPanel.value.type !== 'text' || activeMainPanel.value.channelId !== channelId) {
+      return;
+    }
+
+    const channelMessages = messages.value[channelId] || [];
+    const lastMessage = channelMessages.length > 0 ? channelMessages[channelMessages.length - 1] : null;
+    clearChannelUnread(channelId);
+    markChannelReadOnServer(channelId, lastMessage);
+  };
+
+  const applyUnreadStatesFromServer = (incomingStates: ChannelUnreadState[] | undefined) => {
+    if (!incomingStates) return;
+
+    const unreadIds = incomingStates
+      .filter((state) => state && (state.unread === true || state.unread === 1))
+      .map((state) => state.channel_id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+
+    unreadChannelIds.value = new Set(unreadIds);
+  };
+
   const pruneUnreadChannels = (availableChannels: Channel[]) => {
     const allowedIds = new Set(
       availableChannels
@@ -591,6 +646,13 @@ export const useChatStore = defineStore('chat', () => {
 
   const removeMessageListener = (listener: (message: any) => void) => {
     messageListeners.value = messageListeners.value.filter(l => l !== listener);
+  };
+
+  const playNewMessageNotificationSound = () => {
+    const audio = new Audio('/wav/new_notification.mp3');
+    void audio.play().catch((error) => {
+      console.debug('[Chat][sound] new message notification playback blocked/failed', error);
+    });
   };
 
   const handleMessage = async (message: any) => {
@@ -701,6 +763,7 @@ export const useChatStore = defineStore('chat', () => {
       case 'channels_list':
         categories.value = payload.categories;
         channels.value = payload.channels;
+        applyUnreadStatesFromServer(payload.unreadStates as ChannelUnreadState[] | undefined);
         pruneUnreadChannels(payload.channels || []);
         
         if (!activeChannelId.value) {
@@ -767,22 +830,32 @@ export const useChatStore = defineStore('chat', () => {
         pageState.oldestMessageId = typeof payload.before_id === 'string' ? payload.before_id : null;
         pageState.initialized = true;
         pageState.isLoading = false;
+        markActiveChannelReadFromMessages(channelId);
         break;
       }
         
       case 'new_message':
         const msg = payload.message;
         const pageState = ensureMessagePageState(msg.channel_id);
+        const alreadyPresent = Boolean(messages.value[msg.channel_id]?.some((existing) => existing.id === msg.id));
         if (!messages.value[msg.channel_id]) {
           messages.value[msg.channel_id] = [];
         }
-        if (!messages.value[msg.channel_id]?.some((existing) => existing.id === msg.id)) {
+        if (!alreadyPresent) {
           messages.value[msg.channel_id]?.push(msg);
+          if (msg.user_id !== currentUser.value?.id) {
+            playNewMessageNotificationSound();
+          }
         }
         if (!pageState.initialized) {
           pageState.initialized = true;
         }
-        markChannelUnread(msg.channel_id);
+        if (activeMainPanel.value.type === 'text' && activeMainPanel.value.channelId === msg.channel_id) {
+          markChannelReadOnServer(msg.channel_id, msg);
+          clearChannelUnread(msg.channel_id);
+        } else {
+          markChannelUnread(msg.channel_id);
+        }
         break;
         
       case 'error':

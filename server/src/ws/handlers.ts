@@ -24,7 +24,9 @@ import {
   createBanRule,
   getPendingModerationActions,
   markModerationActionEnforced,
-  MessageDeleteMode
+  MessageDeleteMode,
+  getChannelUnreadStatesForUser,
+  markChannelReadUpToMessage
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -54,6 +56,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'get_messages':
         await handleGetMessages(client, payload);
+        break;
+      case 'mark_channel_read':
+        await handleMarkChannelRead(client, payload);
         break;
       case 'send_message':
         await handleSendMessage(client, payload);
@@ -297,6 +302,7 @@ const handleGetChannels = async (client: ClientConnection) => {
 
   const categories = await getCategories();
   const channels = await getChannels();
+  const unreadStates = await getChannelUnreadStatesForUser(client.userId);
 
   // Create default category and channel if none exist
   if (categories.length === 0 && channels.length === 0) {
@@ -314,7 +320,7 @@ const handleGetChannels = async (client: ClientConnection) => {
 
   client.ws.send(JSON.stringify({
     type: 'channels_list',
-    payload: { categories, channels }
+    payload: { categories, channels, unreadStates }
   }));
 
   const voiceParticipants: Record<string, any[]> = {};
@@ -333,6 +339,33 @@ const handleGetChannels = async (client: ClientConnection) => {
     type: 'voice_participants_list',
     payload: { participants: voiceParticipants }
   }));
+};
+
+const handleMarkChannelRead = async (
+  client: ClientConnection,
+  payload: { channel_id?: string; last_read_message_id?: string; last_read_message_created_at?: string }
+) => {
+  if (!client.userId) return;
+
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  const messageId = typeof payload?.last_read_message_id === 'string' ? payload.last_read_message_id : '';
+  const messageCreatedAt = typeof payload?.last_read_message_created_at === 'string' ? payload.last_read_message_created_at : '';
+
+  if (!channelId || !messageId || !messageCreatedAt) {
+    return;
+  }
+
+  const channel = await getChannelById(channelId);
+  if (!channel || (channel.type !== 'text' && channel.type !== 'rss')) {
+    return;
+  }
+
+  await markChannelReadUpToMessage({
+    userId: client.userId,
+    channelId,
+    messageId,
+    messageCreatedAt
+  });
 };
 
 const handleCreateChannel = async (
@@ -503,6 +536,13 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
   }
 
   const message = await createMessage(channel_id, client.userId, content);
+
+  await markChannelReadUpToMessage({
+    userId: client.userId,
+    channelId: channel_id,
+    messageId: message.id,
+    messageCreatedAt: message.created_at
+  });
   
   const messageWithUser = {
     ...message,

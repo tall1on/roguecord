@@ -153,6 +153,7 @@ const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss') => {
 }
 
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
+const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.has(userId)
 </script>
 
 <template>
@@ -218,6 +219,7 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
                   <span class="truncate flex-1">{{ user.username }}</span>
                   <div class="flex items-center gap-1 ml-2">
                     <MicOff v-if="user.isMuted || user.isDeafened" class="w-3.5 h-3.5 text-red-500" />
+                    <MonitorUp v-if="isUserScreenSharing(user.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
                     <div v-if="user.isDeafened" class="relative flex items-center justify-center">
                       <Headphones class="w-3.5 h-3.5 text-red-500" />
                       <div class="absolute w-4 h-[1.5px] bg-red-500 rotate-45 rounded-full"></div>
@@ -263,6 +265,7 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
                   <span class="truncate flex-1">{{ user.username }}</span>
                   <div class="flex items-center gap-1 ml-2">
                     <MicOff v-if="user.isMuted || user.isDeafened" class="w-3.5 h-3.5 text-red-500" />
+                    <MonitorUp v-if="isUserScreenSharing(user.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
                     <div v-if="user.isDeafened" class="relative flex items-center justify-center">
                       <Headphones class="w-3.5 h-3.5 text-red-500" />
                       <div class="absolute w-4 h-[1.5px] bg-red-500 rotate-45 rounded-full"></div>
