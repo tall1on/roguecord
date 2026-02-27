@@ -80,6 +80,26 @@ const setScreenVideoRef = (userId: string, video: HTMLVideoElement | null) => {
   const nextStream = getUserScreenStream(userId)
   if (video.srcObject !== nextStream) {
     video.srcObject = nextStream
+    if (nextStream) {
+      const videoTrack = nextStream.getVideoTracks()[0] || null
+      console.info('[WebRTC][screen][view] Attaching stream to video element', {
+        userId,
+        streamId: nextStream.id,
+        trackId: videoTrack?.id || null,
+        trackEnabled: videoTrack?.enabled ?? null,
+        trackMuted: videoTrack?.muted ?? null,
+        trackReadyState: videoTrack?.readyState || null,
+        mutedAttr: video.muted,
+        autoplay: video.autoplay,
+        paused: video.paused
+      })
+      void video.play().catch((error) => {
+        console.warn('[WebRTC][screen] Remote screen video play() blocked/failed on attach', {
+          userId,
+          error
+        })
+      })
+    }
   }
 }
 
@@ -115,6 +135,26 @@ watch(
       const nextStream = streams.get(userId) || null
       if (el.srcObject !== nextStream) {
         el.srcObject = nextStream
+        if (nextStream) {
+          const videoTrack = nextStream.getVideoTracks()[0] || null
+          console.info('[WebRTC][screen][view] Updating stream on existing video element', {
+            userId,
+            streamId: nextStream.id,
+            trackId: videoTrack?.id || null,
+            trackEnabled: videoTrack?.enabled ?? null,
+            trackMuted: videoTrack?.muted ?? null,
+            trackReadyState: videoTrack?.readyState || null,
+            mutedAttr: el.muted,
+            autoplay: el.autoplay,
+            paused: el.paused
+          })
+          void el.play().catch((error) => {
+            console.warn('[WebRTC][screen] Remote screen video play() blocked/failed on stream update', {
+              userId,
+              error
+            })
+          })
+        }
       }
     }
 
