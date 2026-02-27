@@ -619,9 +619,9 @@ const handleConnectWebRtcTransport = async (client: ClientConnection, payload: {
   }));
 };
 
-const handleProduce = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, kind: any, rtpParameters: any }) => {
+const handleProduce = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, kind: any, rtpParameters: any, source?: 'mic' | 'screen' | 'camera' }) => {
   if (!client.userId) return;
-  const { channel_id, transport_id, kind, rtpParameters } = payload;
+  const { channel_id, transport_id, kind, rtpParameters, source = 'mic' } = payload;
   
   const room = rooms.get(channel_id);
   if (!room) return;
@@ -630,7 +630,14 @@ const handleProduce = async (client: ClientConnection, payload: { channel_id: st
   const transport = peer.transports.get(transport_id);
   if (!transport) return;
 
-  const producer = await transport.produce({ kind, rtpParameters });
+  const producer = await transport.produce({
+    kind,
+    rtpParameters,
+    appData: {
+      source,
+      userId: client.userId
+    }
+  });
   peer.producers.set(producer.id, producer);
 
   if (peer.isMuted || peer.isDeafened) {
@@ -639,7 +646,7 @@ const handleProduce = async (client: ClientConnection, payload: { channel_id: st
 
   client.ws.send(JSON.stringify({
     type: 'produced',
-    payload: { channel_id, id: producer.id }
+    payload: { channel_id, id: producer.id, source }
   }));
 
   // Broadcast new producer to others
@@ -650,7 +657,9 @@ const handleProduce = async (client: ClientConnection, payload: { channel_id: st
         payload: {
           channel_id,
           producer_id: producer.id,
-          user_id: client.userId
+          user_id: client.userId,
+          kind: producer.kind,
+          source
         }
       });
     }
@@ -673,11 +682,21 @@ const handleConsume = async (client: ClientConnection, payload: { channel_id: st
     return;
   }
 
+  const producer = Array.from(room.peers.values())
+    .map((roomPeer) => roomPeer.producers.get(producer_id))
+    .find((roomProducer): roomProducer is NonNullable<typeof roomProducer> => roomProducer !== undefined);
+
   const consumer = await transport.consume({
     producerId: producer_id,
     rtpCapabilities,
     paused: true,
   });
+
+  const producerSource = (producer?.appData as { source?: unknown } | undefined)?.source;
+  const source: 'mic' | 'screen' | 'camera' =
+    producerSource === 'mic' || producerSource === 'screen' || producerSource === 'camera'
+      ? producerSource
+      : (consumer.kind === 'audio' ? 'mic' : 'camera');
 
   peer.consumers.set(consumer.id, consumer);
 
@@ -688,6 +707,7 @@ const handleConsume = async (client: ClientConnection, payload: { channel_id: st
       producer_id,
       id: consumer.id,
       kind: consumer.kind,
+      source,
       rtpParameters: consumer.rtpParameters,
       type: consumer.type,
       producerPaused: consumer.producerPaused
@@ -750,7 +770,9 @@ const handleGetProducers = async (client: ClientConnection, payload: { channel_i
           payload: {
             channel_id,
             producer_id: producerId,
-            user_id: peerId
+            user_id: peerId,
+            kind: producer.kind,
+            source: (producer.appData?.source as 'mic' | 'screen' | 'camera' | undefined) || (producer.kind === 'audio' ? 'mic' : 'camera')
           }
         }));
       }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import { useChatStore, type Message } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 
@@ -66,6 +66,65 @@ const voiceTileClass = computed(() => {
 })
 
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
+const screenVideoElements = new Map<string, HTMLVideoElement>()
+
+const getUserScreenStream = (userId: string) => webrtcStore.userScreenStreams.get(userId) || null
+
+const setScreenVideoRef = (userId: string, el: Element | null) => {
+  const video = el as HTMLVideoElement | null
+  if (!video) {
+    screenVideoElements.delete(userId)
+    return
+  }
+
+  screenVideoElements.set(userId, video)
+  video.srcObject = getUserScreenStream(userId)
+}
+
+const enterScreenFullscreen = async (userId: string) => {
+  const video = screenVideoElements.get(userId)
+  if (!video) return
+
+  try {
+    await video.requestFullscreen()
+  } catch (_e) {
+    // no-op
+  }
+}
+
+watch(
+  () => webrtcStore.userScreenStreams,
+  (streams) => {
+    for (const [userId, el] of screenVideoElements.entries()) {
+      const nextStream = streams.get(userId) || null
+      if (el.srcObject !== nextStream) {
+        el.srcObject = nextStream
+      }
+    }
+
+    const fsEl = document.fullscreenElement as HTMLVideoElement | null
+    if (fsEl) {
+      let isActiveShare = false
+      for (const stream of streams.values()) {
+        if (fsEl.srcObject === stream) {
+          isActiveShare = true
+          break
+        }
+      }
+
+      if (!isActiveShare) {
+        void document.exitFullscreen().catch(() => {})
+      }
+    }
+  },
+  { deep: false }
+)
+
+onBeforeUnmount(() => {
+  if (document.fullscreenElement) {
+    void document.exitFullscreen().catch(() => {})
+  }
+})
 
 const privilegedRoles = new Set(['admin', 'owner', 'mod', 'moderator', 'bot', 'system'])
 
@@ -339,7 +398,15 @@ watch(
             class="rounded-xl bg-[#2b2d31] border border-[#3f4147] flex items-center justify-center"
             :class="voiceTileClass"
           >
-            <div class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
+            <video
+              v-if="getUserScreenStream(user.id)"
+              :ref="(el) => setScreenVideoRef(user.id, el)"
+              autoplay
+              playsinline
+              class="w-full h-full object-contain rounded-xl bg-black cursor-pointer"
+              @click="enterScreenFullscreen(user.id)"
+            />
+            <div v-else class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
               <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
               <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
             </div>

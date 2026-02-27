@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss } from 'lucide-vue-next'
+import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp } from 'lucide-vue-next'
 import { useChatStore, type Channel, type User } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 
@@ -330,6 +330,14 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
             </div>
           </div>
         </div>
+        <button
+          class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] transition-colors"
+          :class="webrtcStore.screenProducer ? 'text-green-400 hover:text-green-300' : 'text-gray-400 hover:text-gray-300'"
+          :title="webrtcStore.screenProducer ? 'Stop sharing screen' : 'Share screen'"
+          @click.stop="webrtcStore.screenProducer ? webrtcStore.stopScreenShare() : webrtcStore.startScreenShare()"
+        >
+          <MonitorUp class="w-5 h-5" />
+        </button>
         <button class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] text-gray-400 hover:text-red-400 transition-colors" title="Disconnect" @click.stop="webrtcStore.leaveVoiceChannel()">
           <PhoneOff class="w-5 h-5" />
         </button>
