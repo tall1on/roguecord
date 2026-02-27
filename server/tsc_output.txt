@@ -1,4 +1,0 @@
-src/index.ts(19,43): error TS2353: Object literal may only specify known properties, and 'days' does not exist in type 'SelfsignedOptions'.
-src/index.ts(22,13): error TS2339: Property 'private' does not exist on type 'Promise<GenerateResult>'.
-src/index.ts(23,14): error TS2339: Property 'cert' does not exist on type 'Promise<GenerateResult>'.
-src/mediasoup.ts(37,3): error TS2741: Property 'preferredPayloadType' is missing in type '{ kind: "audio"; mimeType: string; clockRate: number; channels: number; }' but required in type 'RtpCodecCapability'.

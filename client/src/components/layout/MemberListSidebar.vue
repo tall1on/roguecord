@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useChatStore } from '../../stores/chat'
 import type { ModerationDeleteMode, User } from '../../stores/chat'
 
@@ -10,7 +10,12 @@ const moderationAction = ref<'kick' | 'ban'>('kick')
 const selectedMember = ref<User | null>(null)
 const reason = ref('')
 const deleteMode = ref<ModerationDeleteMode>('none')
-const deleteHours = ref(24)
+const contextMenu = ref<{ visible: boolean; x: number; y: number; member: User | null }>({
+  visible: false,
+  x: 0,
+  y: 0,
+  member: null
+})
 const blacklistIdentity = ref(true)
 const blacklistIp = ref(false)
 
@@ -25,9 +30,41 @@ const canModerate = (user: User) => {
 const resetModerationForm = () => {
   reason.value = ''
   deleteMode.value = 'none'
-  deleteHours.value = 24
   blacklistIdentity.value = true
   blacklistIp.value = false
+}
+
+const closeContextMenu = () => {
+  contextMenu.value = {
+    visible: false,
+    x: 0,
+    y: 0,
+    member: null
+  }
+}
+
+const openContextMenu = (event: MouseEvent, user: User) => {
+  if (!canModerate(user)) {
+    closeContextMenu()
+    return
+  }
+
+  event.preventDefault()
+  event.stopPropagation()
+
+  contextMenu.value = {
+    visible: true,
+    x: event.clientX,
+    y: event.clientY,
+    member: user
+  }
+}
+
+const openModerationFromContextMenu = (action: 'kick' | 'ban') => {
+  const member = contextMenu.value.member
+  if (!member) return
+  closeContextMenu()
+  openModeration(member, action)
 }
 
 const openModeration = (user: User, action: 'kick' | 'ban') => {
@@ -55,15 +92,12 @@ const targetIp = computed(() => {
 
 const submitModeration = () => {
   if (!selectedMember.value) return
-  if (deleteMode.value === 'hours' && (!Number.isFinite(deleteHours.value) || deleteHours.value <= 0)) {
-    return
-  }
 
   if (moderationAction.value === 'kick') {
     chatStore.kickMember(selectedMember.value.id, {
       reason: reason.value,
       deleteMode: deleteMode.value,
-      deleteHours: deleteMode.value === 'hours' ? deleteHours.value : undefined
+      deleteHours: deleteMode.value === 'hours' ? 1 : undefined
     })
   } else {
     if (!canSubmitBan.value) {
@@ -72,7 +106,7 @@ const submitModeration = () => {
     chatStore.banMember(selectedMember.value.id, {
       reason: reason.value,
       deleteMode: deleteMode.value,
-      deleteHours: deleteMode.value === 'hours' ? deleteHours.value : undefined,
+      deleteHours: deleteMode.value === 'hours' ? 1 : undefined,
       blacklistIdentity: blacklistIdentity.value,
       blacklistIp: blacklistIp.value
     })
@@ -110,6 +144,16 @@ const groupedMembers = computed(() => {
     offline: offline.sort((a, b) => a.username.localeCompare(b.username))
   }
 })
+
+onMounted(() => {
+  window.addEventListener('click', closeContextMenu)
+  window.addEventListener('contextmenu', closeContextMenu)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('click', closeContextMenu)
+  window.removeEventListener('contextmenu', closeContextMenu)
+})
 </script>
 
 <template>
@@ -124,6 +168,7 @@ const groupedMembers = computed(() => {
             v-for="user in members"
             :key="user.id"
             class="flex items-center px-2 py-1.5 hover:bg-[#3f4147] rounded cursor-pointer group"
+            @contextmenu="openContextMenu($event, user)"
           >
             <div class="relative w-8 h-8 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mr-3">
               <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover rounded-full" />
@@ -132,20 +177,6 @@ const groupedMembers = computed(() => {
             </div>
             <div class="flex-1 min-w-0">
               <div class="text-sm font-medium truncate group-hover:text-gray-100" :class="user.role === 'admin' ? 'text-red-500' : 'text-gray-300'">{{ user.username }}</div>
-            </div>
-            <div v-if="canModerate(user)" class="hidden group-hover:flex items-center gap-1">
-              <button
-                class="text-xs px-2 py-1 rounded bg-[#4f545c] hover:bg-[#5f6670] text-white"
-                @click.stop="openModeration(user, 'kick')"
-              >
-                Kick
-              </button>
-              <button
-                class="text-xs px-2 py-1 rounded bg-[#8b2e35] hover:bg-[#a03a42] text-white"
-                @click.stop="openModeration(user, 'ban')"
-              >
-                Ban
-              </button>
             </div>
           </div>
         </div>
@@ -160,6 +191,7 @@ const groupedMembers = computed(() => {
             v-for="user in groupedMembers.offline"
             :key="user.id"
             class="flex items-center px-2 py-1.5 hover:bg-[#3f4147] rounded cursor-pointer group opacity-50 hover:opacity-100"
+            @contextmenu="openContextMenu($event, user)"
           >
             <div class="relative w-8 h-8 rounded-full bg-gray-600 shrink-0 flex items-center justify-center text-white font-bold mr-3">
               <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover rounded-full grayscale" />
@@ -169,23 +201,29 @@ const groupedMembers = computed(() => {
             <div class="flex-1 min-w-0">
               <div class="text-sm font-medium truncate group-hover:text-gray-300" :class="user.role === 'admin' ? 'text-red-500' : 'text-gray-400'">{{ user.username }}</div>
             </div>
-            <div v-if="canModerate(user)" class="hidden group-hover:flex items-center gap-1">
-              <button
-                class="text-xs px-2 py-1 rounded bg-[#4f545c] hover:bg-[#5f6670] text-white"
-                @click.stop="openModeration(user, 'kick')"
-              >
-                Kick
-              </button>
-              <button
-                class="text-xs px-2 py-1 rounded bg-[#8b2e35] hover:bg-[#a03a42] text-white"
-                @click.stop="openModeration(user, 'ban')"
-              >
-                Ban
-              </button>
-            </div>
           </div>
         </div>
       </div>
+    </div>
+
+    <div
+      v-if="contextMenu.visible"
+      class="fixed z-[70] min-w-[10rem] bg-[#1e1f22] border border-[#3f4147] rounded shadow-xl py-1"
+      :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+      @click.stop
+    >
+      <button
+        class="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-[#3f4147]"
+        @click="openModerationFromContextMenu('kick')"
+      >
+        Kick
+      </button>
+      <button
+        class="w-full text-left px-3 py-2 text-sm text-red-300 hover:bg-[#3f4147]"
+        @click="openModerationFromContextMenu('ban')"
+      >
+        Ban
+      </button>
     </div>
 
     <div v-if="showModerationModal && selectedMember" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
@@ -215,20 +253,9 @@ const groupedMembers = computed(() => {
               class="w-full bg-[#1e1f22] text-white p-2.5 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
             >
               <option value="none">Do not delete messages</option>
-              <option value="hours">Delete last N hours</option>
+              <option value="hours">Delete last hour of messages</option>
               <option value="all">Delete all messages</option>
             </select>
-          </div>
-
-          <div v-if="deleteMode === 'hours'">
-            <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Hours to delete</label>
-            <input
-              v-model.number="deleteHours"
-              type="number"
-              min="1"
-              class="w-full bg-[#1e1f22] text-white p-2.5 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="24"
-            />
           </div>
 
           <div v-if="moderationAction === 'ban'" class="border border-[#1e1f22] rounded p-3 bg-[#2b2d31]">

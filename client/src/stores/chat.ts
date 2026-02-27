@@ -490,6 +490,35 @@ export const useChatStore = defineStore('chat', () => {
     }
   };
 
+  const removeCurrentServerAndFallback = () => {
+    const removedConnectionId = activeConnectionId.value;
+    if (!removedConnectionId) {
+      disconnect();
+      return;
+    }
+
+    const currentConnection = savedConnections.value.find((c) => c.id === removedConnectionId);
+    savedConnections.value = savedConnections.value.filter((c) => c.id !== removedConnectionId);
+    localStorage.setItem('savedConnections', JSON.stringify(savedConnections.value));
+
+    const lastUsedServer = localStorage.getItem('lastUsedServer');
+    if (currentConnection && lastUsedServer === currentConnection.address) {
+      const fallbackConnection = savedConnections.value[0];
+      if (fallbackConnection) {
+        localStorage.setItem('lastUsedServer', fallbackConnection.address);
+      } else {
+        localStorage.removeItem('lastUsedServer');
+      }
+    }
+
+    const fallbackConnection = savedConnections.value[0];
+    disconnect();
+
+    if (fallbackConnection) {
+      connect(fallbackConnection.address);
+    }
+  };
+
   const addMessageListener = (listener: (message: any) => void) => {
     messageListeners.value.push(listener);
   };
@@ -605,7 +634,7 @@ export const useChatStore = defineStore('chat', () => {
               ? `A moderator banned you from this server.${reasonText}`
               : `A moderator kicked you from this server.${reasonText}`
         };
-        disconnect();
+        removeCurrentServerAndFallback();
         break;
       }
 
@@ -616,7 +645,7 @@ export const useChatStore = defineStore('chat', () => {
           title: 'Access denied (banned)',
           message: `You are banned from this server.${reasonText}`
         };
-        disconnect();
+        removeCurrentServerAndFallback();
         break;
       }
         
