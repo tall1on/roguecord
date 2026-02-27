@@ -3,12 +3,12 @@ import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 
-const dbDir = path.join(__dirname, '..', 'data');
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
+export const dataDir = path.join(__dirname, '..', 'data');
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
 }
 
-const dbPath = path.join(dbDir, 'roguecord.db');
+const dbPath = path.join(dataDir, 'roguecord.db');
 
 let resolveChannelsSchemaReady: (() => void) | null = null;
 let rejectChannelsSchemaReady: ((error: Error) => void) | null = null;
@@ -87,7 +87,7 @@ function initializeDatabase() {
         id TEXT PRIMARY KEY,
         category_id TEXT,
         name TEXT NOT NULL,
-        type TEXT NOT NULL CHECK(type IN ('text', 'voice', 'rss')),
+        type TEXT NOT NULL CHECK(type IN ('text', 'voice', 'rss', 'folder')),
         position INTEGER NOT NULL DEFAULT 0,
         feed_url TEXT,
         FOREIGN KEY (category_id) REFERENCES categories(id)
@@ -99,12 +99,39 @@ function initializeDatabase() {
         return;
       }
 
-      migrateChannelsTableForRss((migrationErr) => {
+      migrateChannelsTableSchema((migrationErr) => {
         if (migrationErr) {
           rejectChannelsSchemaReady?.(migrationErr);
           return;
         }
         resolveChannelsSchemaReady?.();
+      });
+    });
+
+    // File metadata for folder channels
+    db.run(`
+      CREATE TABLE IF NOT EXISTS folder_channel_files (
+        id TEXT PRIMARY KEY,
+        channel_id TEXT NOT NULL,
+        original_name TEXT NOT NULL,
+        storage_name TEXT NOT NULL,
+        mime_type TEXT,
+        size_bytes INTEGER NOT NULL,
+        uploader_user_id TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (channel_id) REFERENCES channels(id),
+        FOREIGN KEY (uploader_user_id) REFERENCES users(id)
+      )
+    `, (err) => {
+      if (err) {
+        console.error('Error creating folder_channel_files table:', err.message);
+        return;
+      }
+
+      db.serialize(() => {
+        db.run('CREATE INDEX IF NOT EXISTS idx_folder_channel_files_channel_id ON folder_channel_files(channel_id)');
+        db.run('CREATE INDEX IF NOT EXISTS idx_folder_channel_files_uploader_id ON folder_channel_files(uploader_user_id)');
       });
     });
 
@@ -331,7 +358,7 @@ function initializeDatabase() {
   });
 }
 
-function migrateChannelsTableForRss(done: (error?: Error) => void) {
+function migrateChannelsTableSchema(done: (error?: Error) => void) {
   db.all('PRAGMA table_info(channels)', (pragmaErr, columns: any[]) => {
     if (pragmaErr) {
       console.error('Failed to inspect channels table for migration:', pragmaErr.message);
@@ -340,65 +367,76 @@ function migrateChannelsTableForRss(done: (error?: Error) => void) {
     }
 
     const hasFeedUrl = columns.some((column) => column.name === 'feed_url');
-    if (hasFeedUrl) {
-      done();
-      return;
-    }
+    db.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'channels'", (schemaErr, schemaRow: any) => {
+      if (schemaErr) {
+        done(schemaErr);
+        return;
+      }
 
-    db.run(
-      `
-      CREATE TABLE IF NOT EXISTS channels_new (
-        id TEXT PRIMARY KEY,
-        category_id TEXT,
-        name TEXT NOT NULL,
-        type TEXT NOT NULL CHECK(type IN ('text', 'voice', 'rss')),
-        position INTEGER NOT NULL DEFAULT 0,
-        feed_url TEXT,
-        FOREIGN KEY (category_id) REFERENCES categories(id)
-      )
-      `,
-      (createErr) => {
-        if (createErr) {
-          console.error('Failed to create channels_new migration table:', createErr.message);
-          done(createErr);
-          return;
-        }
+      const tableSql = typeof schemaRow?.sql === 'string' ? schemaRow.sql.toLowerCase() : '';
+      const supportsFolderType = tableSql.includes("'folder'");
 
-        db.run(
-          `
-          INSERT INTO channels_new (id, category_id, name, type, position, feed_url)
-          SELECT id, category_id, name, type, position, NULL FROM channels
-          `,
-          (copyErr) => {
-            if (copyErr) {
-              console.error('Failed to copy channels into migration table:', copyErr.message);
-              db.run('DROP TABLE IF EXISTS channels_new', () => {});
-              done(copyErr);
-              return;
-            }
+      if (hasFeedUrl && supportsFolderType) {
+        done();
+        return;
+      }
 
-            db.run('DROP TABLE channels', (dropErr) => {
-              if (dropErr) {
-                console.error('Failed to drop old channels table during migration:', dropErr.message);
+      db.run(
+        `
+        CREATE TABLE IF NOT EXISTS channels_new (
+          id TEXT PRIMARY KEY,
+          category_id TEXT,
+          name TEXT NOT NULL,
+          type TEXT NOT NULL CHECK(type IN ('text', 'voice', 'rss', 'folder')),
+          position INTEGER NOT NULL DEFAULT 0,
+          feed_url TEXT,
+          FOREIGN KEY (category_id) REFERENCES categories(id)
+        )
+        `,
+        (createErr) => {
+          if (createErr) {
+            console.error('Failed to create channels_new migration table:', createErr.message);
+            done(createErr);
+            return;
+          }
+
+          const feedUrlSelect = hasFeedUrl ? 'feed_url' : 'NULL';
+          db.run(
+            `
+            INSERT INTO channels_new (id, category_id, name, type, position, feed_url)
+            SELECT id, category_id, name, type, position, ${feedUrlSelect} FROM channels
+            `,
+            (copyErr) => {
+              if (copyErr) {
+                console.error('Failed to copy channels into migration table:', copyErr.message);
                 db.run('DROP TABLE IF EXISTS channels_new', () => {});
-                done(dropErr);
+                done(copyErr);
                 return;
               }
 
-              db.run('ALTER TABLE channels_new RENAME TO channels', (renameErr) => {
-                if (renameErr) {
-                  console.error('Failed to rename channels_new table during migration:', renameErr.message);
-                  done(renameErr);
+              db.run('DROP TABLE channels', (dropErr) => {
+                if (dropErr) {
+                  console.error('Failed to drop old channels table during migration:', dropErr.message);
+                  db.run('DROP TABLE IF EXISTS channels_new', () => {});
+                  done(dropErr);
                   return;
                 }
-                console.log('Migrated channels table to support rss channels and feed_url.');
-                done();
+
+                db.run('ALTER TABLE channels_new RENAME TO channels', (renameErr) => {
+                  if (renameErr) {
+                    console.error('Failed to rename channels_new table during migration:', renameErr.message);
+                    done(renameErr);
+                    return;
+                  }
+                  console.log('Migrated channels table schema to support rss feed_url and folder channels.');
+                  done();
+                });
               });
-            });
-          }
-        );
-      }
-    );
+            }
+          );
+        }
+      );
+    });
   });
 }
 

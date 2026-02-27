@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp } from 'lucide-vue-next'
+import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp, Folder } from 'lucide-vue-next'
 import { useChatStore, type Channel, type User } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 
@@ -18,7 +18,7 @@ const emit = defineEmits<{
   (e: 'open-invite'): void
   (e: 'remove-server'): void
   (e: 'open-admin'): void
-  (e: 'open-create-channel', payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' }): void
+  (e: 'open-create-channel', payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' | 'folder' }): void
 }>()
 
 const chatStore = useChatStore()
@@ -87,6 +87,10 @@ const isChannelActive = (channel: Channel) => {
     return chatStore.activeMainPanel.type === 'text' && chatStore.activeMainPanel.channelId === channel.id
   }
 
+  if (channel.type === 'folder') {
+    return chatStore.activeMainPanel.type === 'folder' && chatStore.activeMainPanel.channelId === channel.id
+  }
+
   if (channel.type === 'voice') {
     return chatStore.activeMainPanel.type === 'voice' && chatStore.activeMainPanel.channelId === channel.id
   }
@@ -103,7 +107,7 @@ const isChannelUnread = (channel: Channel) => {
 }
 
 const handleChannelClick = (channel: Channel) => {
-  if (channel.type === 'text' || channel.type === 'rss') {
+  if (channel.type === 'text' || channel.type === 'rss' || channel.type === 'folder') {
     chatStore.setActiveChannel(channel.id)
   } else if (channel.type === 'voice') {
     chatStore.setActiveVoicePanel(channel.id)
@@ -144,7 +148,7 @@ const deleteChannelFromContextMenu = () => {
   chatStore.deleteChannel(channelToDelete.id)
 }
 
-const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss') => {
+const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss' | 'folder') => {
   if (!props.isAdmin) return
 
   contextMenuVisible.value = false
@@ -206,6 +210,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
                 <div v-if="isChannelUnread(channel)" class="absolute -left-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white"></div>
                 <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
                 <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
+                <Folder v-else-if="channel.type === 'folder'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
                 <Volume2 v-else class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
                 <span class="truncate font-medium">{{ channel.name }}</span>
               </div>
@@ -252,6 +257,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
                 <div v-if="isChannelUnread(channel)" class="absolute -left-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white"></div>
                 <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
                 <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
+                <Folder v-else-if="channel.type === 'folder'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
                 <Volume2 v-else class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
                 <span class="truncate font-medium">{{ channel.name }}</span>
               </div>
@@ -312,6 +318,13 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
         >
           <Rss class="w-4 h-4" />
           Create RSS channel
+        </button>
+        <button
+          class="w-full px-3 py-2 text-left text-sm text-gray-200 hover:bg-[#2b2d31] flex items-center gap-2"
+          @click="openCreateChannelFromContextMenu('folder')"
+        >
+          <Folder class="w-4 h-4" />
+          Create folder channel
         </button>
       </div>
     </template>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type ComponentPublicInstance } from 'vue'
-import { useChatStore, type Message } from '../stores/chat'
+import { useChatStore, type Message, type FolderChannelFile } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 
 const chatStore = useChatStore()
@@ -10,6 +10,10 @@ const messagesContainer = ref<HTMLElement | null>(null)
 const preserveScrollOnNextRender = ref(false)
 const previousScrollHeight = ref(0)
 const isFetchingOlderMessages = ref(false)
+const folderFileInput = ref<HTMLInputElement | null>(null)
+const isUploadingFolderFile = ref(false)
+const folderUploadError = ref<string | null>(null)
+const folderViewMode = ref<'list' | 'tiles'>('list')
 
 const TOP_SCROLL_THRESHOLD_PX = 120
 const BOTTOM_SCROLL_THRESHOLD_PX = 120
@@ -25,6 +29,20 @@ const activeVoiceChannel = computed(() => {
   const channels = chatStore.channels || []
   return channels.find(c => c.id === chatStore.activeMainPanel.channelId && c.type === 'voice')
 })
+
+const activeFolderChannel = computed(() => {
+  if (chatStore.activeMainPanel.type !== 'folder' || !chatStore.activeMainPanel.channelId) return null
+  const channels = chatStore.channels || []
+  return channels.find(c => c.id === chatStore.activeMainPanel.channelId && c.type === 'folder') || null
+})
+
+const activeFolderFiles = computed<FolderChannelFile[]>(() => {
+  const channelId = activeFolderChannel.value?.id
+  if (!channelId) return []
+  return chatStore.folderFiles[channelId] || []
+})
+
+const canUploadToFolder = computed(() => chatStore.currentUserRole === 'admin')
 
 const activeVoiceParticipants = computed(() => {
   if (!activeVoiceChannel.value) return []
@@ -460,6 +478,49 @@ const sendMessage = () => {
   }
 }
 
+const openFolderUploadPicker = () => {
+  folderUploadError.value = null
+  folderFileInput.value?.click()
+}
+
+const onFolderFilePicked = async (event: Event) => {
+  const target = event.target as HTMLInputElement | null
+  const file = target?.files?.[0] || null
+  const channelId = activeFolderChannel.value?.id
+  if (!file || !channelId || !canUploadToFolder.value) {
+    if (target) target.value = ''
+    return
+  }
+
+  isUploadingFolderFile.value = true
+  folderUploadError.value = null
+  try {
+    await chatStore.uploadFolderFile(channelId, file)
+  } catch (error) {
+    folderUploadError.value = error instanceof Error ? error.message : 'Failed to upload file'
+  } finally {
+    isUploadingFolderFile.value = false
+    if (target) target.value = ''
+  }
+}
+
+const requestFolderFileDownload = (fileId: string) => {
+  const channelId = activeFolderChannel.value?.id
+  if (!channelId) return
+  chatStore.downloadFolderFile(channelId, fileId)
+}
+
+const formatFileSize = (sizeBytes: number) => {
+  if (!Number.isFinite(sizeBytes) || sizeBytes < 0) return '0 B'
+  if (sizeBytes < 1024) return `${sizeBytes} B`
+  const kb = sizeBytes / 1024
+  if (kb < 1024) return `${kb.toFixed(1)} KB`
+  const mb = kb / 1024
+  if (mb < 1024) return `${mb.toFixed(1)} MB`
+  const gb = mb / 1024
+  return `${gb.toFixed(1)} GB`
+}
+
 const formatTime = (dateString: string) => {
   const date = new Date(dateString)
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -605,6 +666,17 @@ watch(
     }
   }
 )
+
+watch(
+  () => activeFolderChannel.value?.id,
+  (channelId) => {
+    folderUploadError.value = null
+    if (channelId) {
+      chatStore.requestFolderFiles(channelId)
+    }
+  },
+  { immediate: true }
+)
 </script>
 
 <template>
@@ -673,6 +745,105 @@ watch(
           RSS feed channels are read-only for normal users.
         </p>
       </div>
+    </template>
+
+    <template v-else-if="activeFolderChannel">
+      <header class="h-12 border-b border-[#1e1f22] flex items-center justify-between px-4 shadow-sm shrink-0">
+        <h2 class="font-semibold text-white flex items-center">
+          <span class="text-gray-400 text-xl mr-2">📁</span>
+          {{ activeFolderChannel.name }}
+        </h2>
+        <div class="flex items-center gap-2">
+          <div class="flex items-center rounded-md border border-[#3f4147] bg-[#2b2d31] p-0.5">
+            <button
+              type="button"
+              class="px-2.5 py-1 text-xs rounded text-gray-300 transition-colors"
+              :class="folderViewMode === 'list' ? 'bg-[#404249] text-white' : 'hover:bg-[#36393f]'"
+              @click="folderViewMode = 'list'"
+            >
+              List
+            </button>
+            <button
+              type="button"
+              class="px-2.5 py-1 text-xs rounded text-gray-300 transition-colors"
+              :class="folderViewMode === 'tiles' ? 'bg-[#404249] text-white' : 'hover:bg-[#36393f]'"
+              @click="folderViewMode = 'tiles'"
+            >
+              Tiles
+            </button>
+          </div>
+
+          <template v-if="canUploadToFolder">
+            <input
+              ref="folderFileInput"
+              type="file"
+              class="hidden"
+              @change="onFolderFilePicked"
+            />
+            <button
+              type="button"
+              class="px-3 py-1.5 text-sm rounded bg-indigo-500 hover:bg-indigo-600 text-white disabled:opacity-60"
+              :disabled="isUploadingFolderFile"
+              @click="openFolderUploadPicker"
+            >
+              {{ isUploadingFolderFile ? 'Uploading...' : 'Upload File' }}
+            </button>
+          </template>
+        </div>
+      </header>
+
+      <main class="flex-1 overflow-y-auto p-4 custom-scrollbar">
+        <p v-if="folderUploadError" class="mb-3 text-sm text-red-400">{{ folderUploadError }}</p>
+        <p v-if="chatStore.lastError && chatStore.activeMainPanel.type === 'folder'" class="mb-3 text-sm text-red-400">{{ chatStore.lastError }}</p>
+
+        <div v-if="activeFolderFiles.length === 0" class="h-full flex items-center justify-center text-gray-400">
+          No files in this folder yet.
+        </div>
+
+        <div v-else-if="folderViewMode === 'list'" class="space-y-2">
+          <div
+            v-for="file in activeFolderFiles"
+            :key="file.id"
+            class="flex items-center justify-between gap-4 rounded-md border border-[#3f4147] bg-[#2b2d31] px-3 py-2"
+          >
+            <div class="min-w-0">
+              <p class="truncate text-sm text-white font-medium">{{ file.original_name }}</p>
+              <p class="text-xs text-gray-400 truncate">
+                {{ formatFileSize(file.size_bytes) }} · {{ file.uploader_username || 'Unknown uploader' }} · {{ formatTime(file.created_at) }}
+              </p>
+            </div>
+            <button
+              type="button"
+              class="shrink-0 px-3 py-1.5 text-sm rounded bg-[#404249] hover:bg-[#4e5058] text-white"
+              @click="requestFolderFileDownload(file.id)"
+            >
+              Download
+            </button>
+          </div>
+        </div>
+
+        <div v-else class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          <div
+            v-for="file in activeFolderFiles"
+            :key="file.id"
+            class="rounded-md border border-[#3f4147] bg-[#2b2d31] p-3 flex flex-col gap-3"
+          >
+            <div class="min-w-0">
+              <p class="truncate text-sm text-white font-medium">{{ file.original_name }}</p>
+              <p class="text-xs text-gray-400 mt-1">{{ formatFileSize(file.size_bytes) }}</p>
+              <p class="text-xs text-gray-400 truncate mt-1">{{ file.uploader_username || 'Unknown uploader' }}</p>
+              <p class="text-xs text-gray-400 mt-1">{{ formatTime(file.created_at) }}</p>
+            </div>
+            <button
+              type="button"
+              class="mt-auto w-full px-3 py-1.5 text-sm rounded bg-[#404249] hover:bg-[#4e5058] text-white"
+              @click="requestFolderFileDownload(file.id)"
+            >
+              Download
+            </button>
+          </div>
+        </div>
+      </main>
     </template>
 
     <template v-else-if="activeVoiceChannel">

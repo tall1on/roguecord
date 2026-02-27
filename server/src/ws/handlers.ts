@@ -26,11 +26,79 @@ import {
   markModerationActionEnforced,
   MessageDeleteMode,
   getChannelUnreadStatesForUser,
-  markChannelReadUpToMessage
+  markChannelReadUpToMessage,
+  createFolderChannelFile,
+  getFolderChannelFiles,
+  getFolderChannelFileById
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
 import { adminKey } from '../admin';
+import fs from 'node:fs';
+import path from 'node:path';
+import { dataDir } from '../db';
+
+const filesRootDir = path.join(dataDir, 'files');
+const MAX_FOLDER_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
+  'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx',
+  'html', 'htm', 'php', 'phtml',
+  'exe', 'dll', 'so', 'com', 'scr', 'msi',
+  'py', 'pyw', 'python',
+  'sh', 'bash', 'zsh',
+  'bat', 'cmd',
+  'ps1', 'psm1',
+  'vbs', 'vbe', 'wsf', 'wsh',
+  'jar', 'appimage'
+]);
+
+const ensureFilesRootDir = () => {
+  if (!fs.existsSync(filesRootDir)) {
+    fs.mkdirSync(filesRootDir, { recursive: true });
+  }
+};
+
+const sanitizeFileName = (name: string) => {
+  const base = path.basename(name || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
+  return base || 'file';
+};
+
+const getNormalizedFileExtension = (name: string) => {
+  const extension = path.extname(name || '');
+  return extension.replace('.', '').trim().toLowerCase();
+};
+
+const getSafeChannelFilesDir = (channelId: string) => {
+  ensureFilesRootDir();
+  const safeChannelId = (channelId || '').replace(/[^a-zA-Z0-9-]/g, '');
+  const dir = path.resolve(filesRootDir, safeChannelId);
+  const root = path.resolve(filesRootDir);
+  if (!dir.startsWith(root)) {
+    throw new Error('Unsafe channel path');
+  }
+  return dir;
+};
+
+const ensureChannelFilesDir = (channelId: string) => {
+  const dir = getSafeChannelFilesDir(channelId);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+};
+
+const resolveSafeStoredFilePath = (channelId: string, storageName: string) => {
+  const channelDir = getSafeChannelFilesDir(channelId);
+  const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
+  if (!safeStorageName) {
+    throw new Error('Invalid storage name');
+  }
+  const fullPath = path.resolve(channelDir, safeStorageName);
+  if (!fullPath.startsWith(channelDir)) {
+    throw new Error('Unsafe file path');
+  }
+  return fullPath;
+};
 
 export const handleMessage = async (client: ClientConnection, messageStr: string) => {
   try {
@@ -62,6 +130,15 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'send_message':
         await handleSendMessage(client, payload);
+        break;
+      case 'folder_list_files':
+        await handleFolderListFiles(client, payload);
+        break;
+      case 'folder_upload_file':
+        await handleFolderUploadFile(client, payload);
+        break;
+      case 'folder_download_file':
+        await handleFolderDownloadFile(client, payload);
         break;
       case 'join_voice_channel':
         await handleJoinVoiceChannel(client, payload);
@@ -370,7 +447,7 @@ const handleMarkChannelRead = async (
 
 const handleCreateChannel = async (
   client: ClientConnection,
-  payload: { category_id: string | null, name: string, type: 'text' | 'voice' | 'rss', feed_url?: string }
+  payload: { category_id: string | null, name: string, type: 'text' | 'voice' | 'rss' | 'folder', feed_url?: string }
 ) => {
   if (!client.userId) return;
   const { category_id, name, type } = payload;
@@ -381,7 +458,7 @@ const handleCreateChannel = async (
     return;
   }
 
-  if (type !== 'text' && type !== 'voice' && type !== 'rss') {
+  if (type !== 'text' && type !== 'voice' && type !== 'rss' && type !== 'folder') {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid channel type' } }));
     return;
   }
@@ -458,6 +535,17 @@ const handleDeleteChannel = async (client: ClientConnection, payload: { channel_
           }
         }
         rooms.delete(channel_id);
+      }
+    }
+
+    if (channel.type === 'folder') {
+      try {
+        const channelDir = getSafeChannelFilesDir(channel_id);
+        if (fs.existsSync(channelDir)) {
+          fs.rmSync(channelDir, { recursive: true, force: true });
+        }
+      } catch (cleanupError) {
+        console.warn('[WS DEBUG] Failed to cleanup folder channel files directory:', cleanupError);
       }
     }
 
@@ -555,6 +643,173 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     type: 'new_message',
     payload: { message: messageWithUser }
   });
+};
+
+const handleFolderListFiles = async (client: ClientConnection, payload: { channel_id?: string }) => {
+  if (!client.userId) return;
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  if (!channelId) return;
+
+  const channel = await getChannelById(channelId);
+  if (!channel || channel.type !== 'folder') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Folder channel not found' } }));
+    return;
+  }
+
+  const files = await getFolderChannelFiles(channelId);
+  client.ws.send(JSON.stringify({
+    type: 'folder_files_list',
+    payload: { channel_id: channelId, files }
+  }));
+};
+
+const handleFolderUploadFile = async (
+  client: ClientConnection,
+  payload: { channel_id?: string; file_name?: string; mime_type?: string; data_base64?: string }
+) => {
+  if (!client.userId) return;
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  const originalName = sanitizeFileName(typeof payload?.file_name === 'string' ? payload.file_name : '');
+  const mimeType = typeof payload?.mime_type === 'string' && payload.mime_type.trim() ? payload.mime_type.trim() : null;
+  const dataBase64 = typeof payload?.data_base64 === 'string' ? payload.data_base64 : '';
+
+  if (!channelId || !dataBase64) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid upload payload' } }));
+    return;
+  }
+
+  const channel = await getChannelById(channelId);
+  if (!channel || channel.type !== 'folder') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Folder channel not found' } }));
+    return;
+  }
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can upload files' } }));
+    return;
+  }
+
+  let fileBuffer: Buffer;
+  try {
+    fileBuffer = Buffer.from(dataBase64, 'base64');
+  } catch {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid file payload encoding' } }));
+    return;
+  }
+
+  if (!fileBuffer.length) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Uploaded file is empty' } }));
+    return;
+  }
+  if (fileBuffer.length > MAX_FOLDER_FILE_SIZE_BYTES) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Uploaded file exceeds size limit (25 MB)' } }));
+    return;
+  }
+
+  const extension = getNormalizedFileExtension(originalName);
+  if (extension && BLOCKED_FOLDER_UPLOAD_EXTENSIONS.has(extension)) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: {
+        message: `Upload blocked: .${extension} files are not allowed in folder channels.`
+      }
+    }));
+    return;
+  }
+
+  const ext = path.extname(originalName).slice(0, 20);
+  const storageName = `${crypto.randomUUID()}${ext}`;
+  const filePath = resolveSafeStoredFilePath(channelId, storageName);
+
+  try {
+    ensureChannelFilesDir(channelId);
+    fs.writeFileSync(filePath, fileBuffer);
+    const created = await createFolderChannelFile({
+      channelId,
+      originalName,
+      storageName,
+      mimeType,
+      sizeBytes: fileBuffer.length,
+      uploaderUserId: client.userId
+    });
+
+    const payloadFile = {
+      ...created,
+      uploader_username: user.username
+    };
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'folder_file_uploaded',
+      payload: {
+        channel_id: channelId,
+        file: payloadFile
+      }
+    });
+
+    client.ws.send(JSON.stringify({
+      type: 'folder_upload_success',
+      payload: { channel_id: channelId, file_id: created.id }
+    }));
+  } catch (error) {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch {
+      // no-op
+    }
+    console.error('[WS DEBUG] Failed to upload folder file:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to upload file' } }));
+  }
+};
+
+const handleFolderDownloadFile = async (
+  client: ClientConnection,
+  payload: { channel_id?: string; file_id?: string }
+) => {
+  if (!client.userId) return;
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  const fileId = typeof payload?.file_id === 'string' ? payload.file_id : '';
+  if (!channelId || !fileId) return;
+
+  const channel = await getChannelById(channelId);
+  if (!channel || channel.type !== 'folder') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Folder channel not found' } }));
+    return;
+  }
+
+  const file = await getFolderChannelFileById(fileId);
+  if (!file || file.channel_id !== channelId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'File not found' } }));
+    return;
+  }
+
+  try {
+    const fullPath = resolveSafeStoredFilePath(channelId, file.storage_name);
+    if (!fs.existsSync(fullPath)) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Stored file is missing' } }));
+      return;
+    }
+
+    const dataBase64 = fs.readFileSync(fullPath).toString('base64');
+    client.ws.send(JSON.stringify({
+      type: 'folder_file_download',
+      payload: {
+        channel_id: channelId,
+        file: {
+          id: file.id,
+          original_name: file.original_name,
+          mime_type: file.mime_type,
+          size_bytes: file.size_bytes
+        },
+        data_base64: dataBase64
+      }
+    }));
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to read folder file:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to download file' } }));
+  }
 };
 
 export const handleClientDisconnect = (client: ClientConnection) => {

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { Hash, Rss, Volume2 } from 'lucide-vue-next'
+import { Folder, Hash, Rss, Volume2 } from 'lucide-vue-next'
 
 const visible = defineModel<boolean>('visible', { required: true })
 const channelName = defineModel<string>('channelName', { required: true })
-const channelType = defineModel<'text' | 'voice' | 'rss'>('channelType', { required: true })
+const channelType = defineModel<'text' | 'voice' | 'rss' | 'folder'>('channelType', { required: true })
 const channelFeedUrl = defineModel<string>('channelFeedUrl', { required: true })
 
 defineProps<{
@@ -47,6 +47,14 @@ const emit = defineEmits<{
               <div class="text-xs text-gray-400">Automatically post updates from an RSS/Atom feed</div>
             </div>
           </label>
+          <label class="flex items-center p-3 bg-[#2b2d31] rounded cursor-pointer hover:bg-[#3f4147]">
+            <input v-model="channelType" type="radio" value="folder" class="mr-3 text-indigo-500 focus:ring-indigo-500 bg-[#1e1f22] border-gray-600">
+            <Folder class="w-5 h-5 text-gray-400 mr-2" />
+            <div>
+              <div class="text-white font-medium">Folder</div>
+              <div class="text-xs text-gray-400">Upload and download files in a shared folder channel</div>
+            </div>
+          </label>
         </div>
       </div>
 
@@ -55,7 +63,8 @@ const emit = defineEmits<{
         <div class="relative">
           <Hash v-if="channelType === 'text'" class="w-4 h-4 text-gray-400 absolute left-3 top-3" />
           <Volume2 v-else-if="channelType === 'voice'" class="w-4 h-4 text-gray-400 absolute left-3 top-3" />
-          <Rss v-else class="w-4 h-4 text-gray-400 absolute left-3 top-3" />
+          <Rss v-else-if="channelType === 'rss'" class="w-4 h-4 text-gray-400 absolute left-3 top-3" />
+          <Folder v-else class="w-4 h-4 text-gray-400 absolute left-3 top-3" />
           <input
             v-model="channelName"
             type="text"

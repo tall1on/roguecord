@@ -27,7 +27,7 @@ const newServerAddress = ref('')
 
 const showCreateChannelModal = ref(false)
 const newChannelName = ref('')
-const newChannelType = ref<'text' | 'voice' | 'rss'>('text')
+const newChannelType = ref<'text' | 'voice' | 'rss' | 'folder'>('text')
 const newChannelFeedUrl = ref('')
 const selectedCategoryId = ref<string | null>(null)
 const createChannelError = ref<string | null>(null)
@@ -91,7 +91,7 @@ const handleCreateServer = async () => {
   }
 }
 
-const openCreateChannelModal = (payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' }) => {
+const openCreateChannelModal = (payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' | 'folder' }) => {
   if (!isAdmin.value) return
 
   createChannelError.value = null
