@@ -85,6 +85,14 @@ const isChannelActive = (channel: Channel) => {
   return false
 }
 
+const isChannelUnread = (channel: Channel) => {
+  if (channel.type !== 'text' && channel.type !== 'rss') {
+    return false
+  }
+
+  return chatStore.unreadChannelIds.has(channel.id)
+}
+
 const handleChannelClick = (channel: Channel) => {
   if (channel.type === 'text' || channel.type === 'rss') {
     chatStore.setActiveChannel(channel.id)
@@ -180,13 +188,14 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
               :key="channel.id"
             >
               <div
-                class="flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
-                :class="isChannelActive(channel) ? 'bg-[#404249] text-white' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
+                class="relative flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
+                :class="isChannelActive(channel) ? 'bg-[#404249] text-white' : isChannelUnread(channel) ? 'text-white hover:bg-[#35373c]' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
                 @click="handleChannelClick(channel)"
                 @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
               >
-                <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
-                <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
+                <div v-if="isChannelUnread(channel)" class="absolute -left-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white"></div>
+                <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
+                <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
                 <Volume2 v-else class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
                 <span class="truncate font-medium">{{ channel.name }}</span>
               </div>
@@ -224,13 +233,14 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
               :key="channel.id"
             >
               <div
-                class="flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
-                :class="isChannelActive(channel) ? 'bg-[#404249] text-white' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
+                class="relative flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
+                :class="isChannelActive(channel) ? 'bg-[#404249] text-white' : isChannelUnread(channel) ? 'text-white hover:bg-[#35373c]' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
                 @click="handleChannelClick(channel)"
                 @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
               >
-                <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
-                <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
+                <div v-if="isChannelUnread(channel)" class="absolute -left-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white"></div>
+                <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
+                <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
                 <Volume2 v-else class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
                 <span class="truncate font-medium">{{ channel.name }}</span>
               </div>

@@ -141,6 +141,7 @@ export const useChatStore = defineStore('chat', () => {
   const categories = ref<Category[]>([]);
   const channels = ref<Channel[]>([]);
   const messages = ref<Record<string, Message[]>>({}); // channel_id -> Message[]
+  const unreadChannelIds = ref<Set<string>>(new Set());
   
   const activeChannelId = ref<string | null>(null);
   const activeMainPanel = ref<ActiveMainPanel>({ type: 'text', channelId: null });
@@ -483,6 +484,47 @@ export const useChatStore = defineStore('chat', () => {
     messageListeners.value.push(listener);
   };
 
+  const isUnreadEligibleChannel = (channel: Channel | undefined) => {
+    return channel?.type === 'text' || channel?.type === 'rss';
+  };
+
+  const markChannelUnread = (channelId: string) => {
+    const channel = channels.value.find((c) => c.id === channelId);
+    if (!isUnreadEligibleChannel(channel)) {
+      return;
+    }
+
+    if (activeMainPanel.value.type === 'text' && activeMainPanel.value.channelId === channelId) {
+      return;
+    }
+
+    const next = new Set(unreadChannelIds.value);
+    next.add(channelId);
+    unreadChannelIds.value = next;
+  };
+
+  const clearChannelUnread = (channelId: string) => {
+    if (!unreadChannelIds.value.has(channelId)) {
+      return;
+    }
+
+    const next = new Set(unreadChannelIds.value);
+    next.delete(channelId);
+    unreadChannelIds.value = next;
+  };
+
+  const pruneUnreadChannels = (availableChannels: Channel[]) => {
+    const allowedIds = new Set(
+      availableChannels
+        .filter((c) => c.type === 'text' || c.type === 'rss')
+        .map((c) => c.id)
+    );
+
+    unreadChannelIds.value = new Set(
+      Array.from(unreadChannelIds.value).filter((id) => allowedIds.has(id))
+    );
+  };
+
   const removeMessageListener = (listener: (message: any) => void) => {
     messageListeners.value = messageListeners.value.filter(l => l !== listener);
   };
@@ -554,6 +596,7 @@ export const useChatStore = defineStore('chat', () => {
       case 'channels_list':
         categories.value = payload.categories;
         channels.value = payload.channels;
+        pruneUnreadChannels(payload.channels || []);
         
         if (!activeChannelId.value) {
           setFallbackActiveTextChannel(payload.channels || []);
@@ -579,6 +622,7 @@ export const useChatStore = defineStore('chat', () => {
         const deletedChannel = channels.value.find((c: Channel) => c.id === deletedChannelId);
         channels.value = channels.value.filter((c: Channel) => c.id !== deletedChannelId);
         delete messages.value[deletedChannelId];
+        clearChannelUnread(deletedChannelId);
 
         if ((deletedChannel?.type === 'text' || deletedChannel?.type === 'rss') && activeChannelId.value === deletedChannelId) {
           setFallbackActiveTextChannel(channels.value);
@@ -598,6 +642,7 @@ export const useChatStore = defineStore('chat', () => {
           messages.value[msg.channel_id] = [];
         }
         messages.value[msg.channel_id]?.push(msg);
+        markChannelUnread(msg.channel_id);
         break;
         
       case 'error':
@@ -637,6 +682,7 @@ export const useChatStore = defineStore('chat', () => {
     if (firstTextChannel) {
       activeChannelId.value = firstTextChannel.id;
       activeMainPanel.value = { type: 'text', channelId: firstTextChannel.id };
+      clearChannelUnread(firstTextChannel.id);
       getMessages(firstTextChannel.id);
     } else {
       activeChannelId.value = null;
@@ -699,6 +745,7 @@ export const useChatStore = defineStore('chat', () => {
   const setActiveChannel = (channel_id: string) => {
     activeChannelId.value = channel_id;
     activeMainPanel.value = { type: 'text', channelId: channel_id };
+    clearChannelUnread(channel_id);
     getMessages(channel_id);
   };
 
@@ -733,6 +780,7 @@ export const useChatStore = defineStore('chat', () => {
     categories,
     channels,
     messages,
+    unreadChannelIds,
     activeChannelId,
     activeMainPanel,
     activeServerChannels,
