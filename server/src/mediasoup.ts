@@ -51,7 +51,7 @@ const mediaCodecs: mediasoup.types.RtpCodecCapability[] = [
     kind: 'video',
     mimeType: 'video/H264',
     clockRate: 90000,
-    preferredPayloadType: 102,
+    preferredPayloadType: 103,
     parameters: {
       'packetization-mode': 1,
       'profile-level-id': '42e01f',
