@@ -77,7 +77,10 @@ const setScreenVideoRef = (userId: string, video: HTMLVideoElement | null) => {
   }
 
   screenVideoElements.set(userId, video)
-  video.srcObject = getUserScreenStream(userId)
+  const nextStream = getUserScreenStream(userId)
+  if (video.srcObject !== nextStream) {
+    video.srcObject = nextStream
+  }
 }
 
 const setScreenVideoTemplateRef = (
@@ -412,14 +415,14 @@ watch(
             :class="voiceTileClass"
           >
             <video
-              v-if="getUserScreenStream(user.id)"
+              v-show="getUserScreenStream(user.id)"
               :ref="(el) => setScreenVideoTemplateRef(user.id, el)"
               autoplay
               playsinline
               class="w-full h-full object-contain rounded-xl bg-black cursor-pointer"
               @click="enterScreenFullscreen(user.id)"
             />
-            <div v-else class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
+            <div v-show="!getUserScreenStream(user.id)" class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
               <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
               <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
             </div>
