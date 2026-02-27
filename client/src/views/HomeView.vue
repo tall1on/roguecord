@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onBeforeUnmount, type ComponentPublicInstance } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type ComponentPublicInstance } from 'vue'
 import { useChatStore, type Message } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 
@@ -68,6 +68,146 @@ const voiceTileClass = computed(() => {
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
 const screenVideoElements = new Map<string, HTMLVideoElement>()
 
+type ScreenContextMenuState = {
+  visible: boolean
+  x: number
+  y: number
+  userId: string | null
+  isOwner: boolean
+}
+
+type ScreenStreamFps = 30 | 60
+type ScreenStreamResolution = 'source' | '1080p' | '720p' | '480p' | '4k' | '8k'
+
+const screenContextMenu = ref<ScreenContextMenuState>({
+  visible: false,
+  x: 0,
+  y: 0,
+  userId: null,
+  isOwner: false
+})
+const screenContextMenuRef = ref<HTMLElement | null>(null)
+
+const screenFpsOptions: Array<{ value: ScreenStreamFps; label: string }> = [
+  { value: 30, label: '30 FPS' },
+  { value: 60, label: '60 FPS' }
+]
+
+const baseScreenResolutionOptions: Array<{ value: ScreenStreamResolution; label: string }> = [
+  { value: 'source', label: 'Source' },
+  { value: '1080p', label: '1080p' },
+  { value: '720p', label: '720p' },
+  { value: '480p', label: '480p' }
+]
+
+const getScreenResolutionOptions = (userId: string): Array<{ value: ScreenStreamResolution; label: string }> => {
+  const stream = getUserScreenStream(userId)
+  const track = stream?.getVideoTracks()[0] || null
+  const settings = track?.getSettings()
+
+  const sourceWidth = settings?.width || 0
+  const sourceHeight = settings?.height || 0
+  const screenWidth = Math.floor(window.screen.width * (window.devicePixelRatio || 1))
+  const screenHeight = Math.floor(window.screen.height * (window.devicePixelRatio || 1))
+
+  const isCapabilityUnknown = sourceWidth === 0 || sourceHeight === 0
+  const allow4k =
+    isCapabilityUnknown ||
+    sourceWidth >= 3840 ||
+    sourceHeight >= 2160 ||
+    screenWidth >= 3840 ||
+    screenHeight >= 2160
+  const allow8k =
+    isCapabilityUnknown ||
+    sourceWidth >= 7680 ||
+    sourceHeight >= 4320 ||
+    screenWidth >= 7680 ||
+    screenHeight >= 4320
+
+  const options = [...baseScreenResolutionOptions]
+
+  if (allow4k) {
+    options.push({ value: '4k', label: '4K' })
+  }
+
+  if (allow8k) {
+    options.push({ value: '8k', label: '8K' })
+  }
+
+  return options
+}
+
+const isCurrentUserStreamOwner = (userId: string) => chatStore.currentUser?.id === userId
+
+const closeScreenContextMenu = () => {
+  screenContextMenu.value.visible = false
+}
+
+const syncScreenVideoMutedState = (userId: string) => {
+  const video = screenVideoElements.get(userId)
+  if (!video) return
+  video.muted = webrtcStore.isScreenStreamMuted(userId)
+}
+
+const openScreenContextMenu = (event: MouseEvent, userId: string) => {
+  event.preventDefault()
+  const isOwner = isCurrentUserStreamOwner(userId)
+  const estimatedHeight = isOwner ? 336 : 52
+  const estimatedWidth = 188
+  const maxX = Math.max(8, window.innerWidth - estimatedWidth - 8)
+  const maxY = Math.max(8, window.innerHeight - estimatedHeight - 8)
+
+  screenContextMenu.value = {
+    visible: true,
+    x: Math.min(event.clientX, maxX),
+    y: Math.min(event.clientY, maxY),
+    userId,
+    isOwner
+  }
+}
+
+const onSelectScreenFps = (fps: ScreenStreamFps) => {
+  const userId = screenContextMenu.value.userId
+  if (!userId) return
+  void webrtcStore.setScreenStreamFps(userId, fps)
+  closeScreenContextMenu()
+}
+
+const onSelectScreenResolution = (resolution: ScreenStreamResolution) => {
+  const userId = screenContextMenu.value.userId
+  if (!userId) return
+  void webrtcStore.setScreenStreamResolution(userId, resolution)
+  closeScreenContextMenu()
+}
+
+const onToggleLocalScreenMute = () => {
+  const userId = screenContextMenu.value.userId
+  if (!userId) return
+  webrtcStore.setScreenStreamMuted(userId, !webrtcStore.isScreenStreamMuted(userId))
+  syncScreenVideoMutedState(userId)
+  closeScreenContextMenu()
+}
+
+const onGlobalPointerDown = (event: MouseEvent) => {
+  if (!screenContextMenu.value.visible) return
+  const target = event.target as Node | null
+  if (screenContextMenuRef.value?.contains(target || null)) return
+  closeScreenContextMenu()
+}
+
+const onGlobalContextMenu = (event: MouseEvent) => {
+  if (!screenContextMenu.value.visible) return
+  const target = event.target as Node | null
+  if (screenContextMenuRef.value?.contains(target || null)) return
+  closeScreenContextMenu()
+}
+
+const onGlobalKeyDown = (event: KeyboardEvent) => {
+  if (event.key === 'Escape') {
+    closeScreenContextMenu()
+  }
+}
+
 const getUserScreenStream = (userId: string) => webrtcStore.userScreenStreams.get(userId) || null
 
 const setScreenVideoRef = (userId: string, video: HTMLVideoElement | null) => {
@@ -77,6 +217,7 @@ const setScreenVideoRef = (userId: string, video: HTMLVideoElement | null) => {
   }
 
   screenVideoElements.set(userId, video)
+  syncScreenVideoMutedState(userId)
   const nextStream = getUserScreenStream(userId)
   if (video.srcObject !== nextStream) {
     video.srcObject = nextStream
@@ -177,9 +318,18 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  window.removeEventListener('mousedown', onGlobalPointerDown)
+  window.removeEventListener('contextmenu', onGlobalContextMenu)
+  window.removeEventListener('keydown', onGlobalKeyDown)
   if (document.fullscreenElement) {
     void document.exitFullscreen().catch(() => {})
   }
+})
+
+onMounted(() => {
+  window.addEventListener('mousedown', onGlobalPointerDown)
+  window.addEventListener('contextmenu', onGlobalContextMenu)
+  window.addEventListener('keydown', onGlobalKeyDown)
 })
 
 const privilegedRoles = new Set(['admin', 'owner', 'mod', 'moderator', 'bot', 'system'])
@@ -457,10 +607,12 @@ watch(
             <video
               v-show="getUserScreenStream(user.id)"
               :ref="(el) => setScreenVideoTemplateRef(user.id, el)"
+              :muted="webrtcStore.isScreenStreamMuted(user.id)"
               autoplay
               playsinline
               class="w-full h-full object-contain rounded-xl bg-black cursor-pointer"
               @click="enterScreenFullscreen(user.id)"
+              @contextmenu="openScreenContextMenu($event, user.id)"
             />
             <div v-show="!getUserScreenStream(user.id)" class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
               <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
@@ -473,6 +625,57 @@ watch(
           No participants in this voice channel.
         </div>
       </main>
+
+      <div
+        v-if="screenContextMenu.visible"
+        ref="screenContextMenuRef"
+        class="fixed z-50 min-w-[188px] rounded-md border border-[#1e1f22] bg-[#1f2124] py-1 shadow-xl"
+        :style="{ left: `${screenContextMenu.x}px`, top: `${screenContextMenu.y}px` }"
+        role="menu"
+      >
+        <template v-if="screenContextMenu.isOwner && screenContextMenu.userId">
+          <div class="px-3 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wide text-gray-500">FPS</div>
+          <button
+            v-for="option in screenFpsOptions"
+            :key="option.value"
+            type="button"
+            class="flex w-full items-center justify-between px-3 py-2 text-sm text-left text-gray-200 hover:bg-[#2b2d31]"
+            :class="webrtcStore.getScreenStreamFps(screenContextMenu.userId) === option.value ? 'text-white' : 'text-gray-300'"
+            role="menuitemradio"
+            :aria-checked="webrtcStore.getScreenStreamFps(screenContextMenu.userId) === option.value"
+            @click="onSelectScreenFps(option.value)"
+          >
+            <span>{{ option.label }}</span>
+            <span v-if="webrtcStore.getScreenStreamFps(screenContextMenu.userId) === option.value">✓</span>
+          </button>
+
+          <div class="my-1 border-t border-[#2b2d31]"></div>
+          <div class="px-3 pb-1 pt-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Resolution</div>
+          <button
+            v-for="option in getScreenResolutionOptions(screenContextMenu.userId)"
+            :key="option.value"
+            type="button"
+            class="flex w-full items-center justify-between px-3 py-2 text-sm text-left text-gray-200 hover:bg-[#2b2d31]"
+            :class="webrtcStore.getScreenStreamResolution(screenContextMenu.userId) === option.value ? 'text-white' : 'text-gray-300'"
+            role="menuitemradio"
+            :aria-checked="webrtcStore.getScreenStreamResolution(screenContextMenu.userId) === option.value"
+            @click="onSelectScreenResolution(option.value)"
+          >
+            <span>{{ option.label }}</span>
+            <span v-if="webrtcStore.getScreenStreamResolution(screenContextMenu.userId) === option.value">✓</span>
+          </button>
+        </template>
+
+        <button
+          v-else
+          type="button"
+          class="w-full px-3 py-2 text-sm text-left text-gray-200 hover:bg-[#2b2d31]"
+          role="menuitem"
+          @click="onToggleLocalScreenMute"
+        >
+          {{ screenContextMenu.userId && webrtcStore.isScreenStreamMuted(screenContextMenu.userId) ? 'Unmute stream' : 'Mute stream' }}
+        </button>
+      </div>
     </template>
     
     <template v-else>
