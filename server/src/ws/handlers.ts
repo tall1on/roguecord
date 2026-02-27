@@ -619,9 +619,9 @@ const handleConnectWebRtcTransport = async (client: ClientConnection, payload: {
   }));
 };
 
-const handleProduce = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, kind: any, rtpParameters: any, source?: 'mic' | 'screen' | 'camera' }) => {
+const handleProduce = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, kind: any, rtpParameters: any, source?: 'mic' | 'screen' | 'camera', request_id?: string }) => {
   if (!client.userId) return;
-  const { channel_id, transport_id, kind, rtpParameters, source = 'mic' } = payload;
+  const { channel_id, transport_id, kind, rtpParameters, source = 'mic', request_id } = payload;
   
   const room = rooms.get(channel_id);
   if (!room) return;
@@ -646,7 +646,7 @@ const handleProduce = async (client: ClientConnection, payload: { channel_id: st
 
   client.ws.send(JSON.stringify({
     type: 'produced',
-    payload: { channel_id, id: producer.id, source }
+    payload: { channel_id, id: producer.id, source, request_id: request_id || null }
   }));
 
   // Broadcast new producer to others
