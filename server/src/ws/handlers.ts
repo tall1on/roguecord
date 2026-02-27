@@ -938,7 +938,15 @@ const handleProduce = async (client: ClientConnection, payload: { channel_id: st
   });
   peer.producers.set(producer.id, producer);
 
-  if (peer.isMuted || peer.isDeafened) {
+  // Voice mute/deafen flags should only gate microphone producers.
+  // Screen-share audio must continue to flow so viewers can hear shared system audio,
+  // and screen/camera video must not be paused by voice-state flags.
+  const normalizedSource: 'mic' | 'screen' | 'camera' =
+    source === 'mic' || source === 'screen' || source === 'camera'
+      ? source
+      : (kind === 'audio' ? 'mic' : 'camera');
+
+  if (normalizedSource === 'mic' && (peer.isMuted || peer.isDeafened)) {
     await producer.pause();
   }
 
