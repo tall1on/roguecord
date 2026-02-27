@@ -111,6 +111,10 @@ const formatMessageContent = (item: ParsedFeedItem): string => {
   return item.title;
 };
 
+const buildContentFingerprint = (item: ParsedFeedItem): string => {
+  return buildItemKey([item.title, item.link]);
+};
+
 const pollChannelFeed = async (channel: Channel) => {
   if (!channel.feed_url) return;
 
@@ -131,6 +135,31 @@ const pollChannelFeed = async (channel: Channel) => {
     .sort((a, b) => a.publishedAt - b.publishedAt)
     .slice(-MAX_ITEMS_PER_CHANNEL_PER_POLL);
 
+  const fingerprints = new Map<string, ParsedFeedItem[]>();
+  for (const item of parsedItems) {
+    const fingerprint = buildContentFingerprint(item);
+    const existing = fingerprints.get(fingerprint) || [];
+    existing.push(item);
+    fingerprints.set(fingerprint, existing);
+  }
+
+  const duplicateFingerprints = [...fingerprints.entries()].filter(([, items]) => items.length > 1);
+  if (duplicateFingerprints.length > 0) {
+    console.warn(
+      `[RSS DEBUG] Channel ${channel.id} feed ${channel.feed_url} returned duplicate content fingerprints in a single poll:`,
+      duplicateFingerprints.map(([fingerprint, items]) => ({
+        fingerprint,
+        count: items.length,
+        sample: {
+          title: items[0]?.title,
+          link: items[0]?.link,
+          key: items[0]?.key,
+          publishedAt: items[0]?.publishedAt
+        }
+      }))
+    );
+  }
+
   if (parsedItems.length === 0) {
     return;
   }
@@ -138,12 +167,19 @@ const pollChannelFeed = async (channel: Channel) => {
   const rssBotUser = await getOrCreateRssBotUser();
 
   for (const item of parsedItems) {
-    const reserved = await reserveRssItem(channel.id, item.key);
+    const contentFingerprint = buildContentFingerprint(item);
+    const reserved = await reserveRssItem(channel.id, item.key, contentFingerprint);
     if (!reserved) {
+      console.log(
+        `[RSS DEBUG] Reservation skipped existing key for channel=${channel.id} key=${item.key} fingerprint=${contentFingerprint} title=${JSON.stringify(item.title)} link=${JSON.stringify(item.link)} publishedAt=${item.publishedAt}`
+      );
       continue;
     }
 
     try {
+      console.log(
+        `[RSS DEBUG] Inserting RSS message channel=${channel.id} key=${item.key} fingerprint=${contentFingerprint} title=${JSON.stringify(item.title)} link=${JSON.stringify(item.link)} publishedAt=${item.publishedAt}`
+      );
       const message = await createMessage(channel.id, rssBotUser.id, formatMessageContent(item));
       await completeRssItem(channel.id, item.key, message.id);
 
@@ -157,6 +193,10 @@ const pollChannelFeed = async (channel: Channel) => {
         }
       });
     } catch (error) {
+      console.error(
+        `[RSS DEBUG] Insert failed, releasing reservation channel=${channel.id} key=${item.key} fingerprint=${contentFingerprint}`,
+        error
+      );
       await releaseRssItemReservation(channel.id, item.key);
       throw error;
     }

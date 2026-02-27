@@ -3,6 +3,32 @@ import { ref, shallowRef, watch } from 'vue';
 import { Device } from 'mediasoup-client';
 import { useChatStore } from './chat';
 
+type MediaSourceType = 'mic' | 'screen' | 'camera';
+type ScreenStreamFps = 30 | 60;
+type ScreenStreamResolution = 'source' | '1080p' | '720p' | '480p' | '4k' | '8k';
+
+type ScreenStreamPreference = {
+  fps: ScreenStreamFps;
+  resolution: ScreenStreamResolution;
+};
+
+type ScreenStreamVolumePreference = {
+  volume: number;
+  muted: boolean;
+  lastNonZeroVolume: number;
+};
+
+const DEFAULT_SCREEN_STREAM_PREFERENCE: ScreenStreamPreference = {
+  fps: 30,
+  resolution: 'source'
+};
+
+const DEFAULT_SCREEN_STREAM_VOLUME_PREFERENCE: ScreenStreamVolumePreference = {
+  volume: 1,
+  muted: false,
+  lastNonZeroVolume: 1
+};
+
 export const useWebRtcStore = defineStore('webrtc', () => {
   const chatStore = useChatStore();
   
@@ -10,6 +36,10 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const sendTransport = shallowRef<any | null>(null);
   const recvTransport = shallowRef<any | null>(null);
   const producer = shallowRef<any | null>(null);
+  const screenProducer = shallowRef<any | null>(null);
+  const screenAudioProducer = shallowRef<any | null>(null);
+  const screenShareStream = shallowRef<MediaStream | null>(null);
+  const screenShareError = ref<string | null>(null);
   const consumers = shallowRef<Map<string, any>>(new Map());
   
   const activeVoiceChannelId = ref<string | null>(null);
@@ -22,7 +52,558 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const audioElements = new Map<string, HTMLAudioElement>();
   
   const producerToUser = new Map<string, string>();
+  const producerToSource = new Map<string, MediaSourceType>();
   const consumerToProducer = new Map<string, string>();
+  const screenShareNotificationProducerIds = new Set<string>();
+  const userScreenStreams = shallowRef<Map<string, MediaStream>>(new Map());
+  const screenStreamMuteState = ref<Map<string, boolean>>(new Map());
+  const screenStreamPreferenceState = ref<Map<string, ScreenStreamPreference>>(new Map());
+  const screenStreamVolumeState = ref<Map<string, number>>(new Map());
+  const screenStreamLastNonZeroVolumeState = ref<Map<string, number>>(new Map());
+  const screenAudioConsumersByUser = new Map<string, Set<string>>();
+
+  const closeConsumer = (consumerId: string, reason: string) => {
+    const producerId = consumerToProducer.get(consumerId);
+    const source = producerId ? producerToSource.get(producerId) : null;
+    const userId = producerId ? producerToUser.get(producerId) : null;
+
+    const consumer = consumers.value.get(consumerId);
+    if (consumer) {
+      try {
+        consumer.close();
+      } catch (_e) {
+        // no-op
+      }
+      consumers.value.delete(consumerId);
+    }
+
+    removeSpeakingDetector(consumerId);
+    remoteStreams.value.delete(consumerId);
+
+    const audio = audioElements.get(consumerId);
+    if (audio) {
+      audio.pause();
+      audio.srcObject = null;
+      audioElements.delete(consumerId);
+    }
+
+    if (source === 'screen' && userId) {
+      const consumerIds = screenAudioConsumersByUser.get(userId);
+      if (consumerIds) {
+        consumerIds.delete(consumerId);
+        if (consumerIds.size === 0) {
+          screenAudioConsumersByUser.delete(userId);
+        }
+      }
+    }
+
+    consumerToProducer.delete(consumerId);
+
+    console.info('[WebRTC][consume] Consumer closed locally', {
+      consumerId,
+      reason
+    });
+  };
+
+  const playScreenShareNotificationSound = () => {
+    const audio = new Audio('/wav/screenshare.mp3');
+    void audio.play().catch((error) => {
+      console.debug('[WebRTC][sound] screenshare notification playback blocked/failed', error);
+    });
+  };
+
+  const getScreenStreamPreference = (userId: string): ScreenStreamPreference => {
+    return screenStreamPreferenceState.value.get(userId) || DEFAULT_SCREEN_STREAM_PREFERENCE;
+  };
+
+  const getScreenStreamFps = (userId: string): ScreenStreamFps => {
+    return getScreenStreamPreference(userId).fps;
+  };
+
+  const getScreenStreamResolution = (userId: string): ScreenStreamResolution => {
+    return getScreenStreamPreference(userId).resolution;
+  };
+
+  const isScreenStreamMuted = (userId: string) => {
+    return screenStreamMuteState.value.get(userId) === true;
+  };
+
+  const getScreenStreamVolume = (userId: string) => {
+    return screenStreamVolumeState.value.get(userId) ?? DEFAULT_SCREEN_STREAM_VOLUME_PREFERENCE.volume;
+  };
+
+  const getScreenStreamLastNonZeroVolume = (userId: string) => {
+    return screenStreamLastNonZeroVolumeState.value.get(userId) ?? DEFAULT_SCREEN_STREAM_VOLUME_PREFERENCE.lastNonZeroVolume;
+  };
+
+  const clampScreenStreamVolume = (volume: number) => {
+    if (!Number.isFinite(volume)) return DEFAULT_SCREEN_STREAM_VOLUME_PREFERENCE.volume;
+    return Math.min(1, Math.max(0, volume));
+  };
+
+  const applyScreenStreamAudioState = (userId: string) => {
+    const volume = getScreenStreamVolume(userId);
+    const muted = isScreenStreamMuted(userId) || volume <= 0;
+
+    const consumerIds = screenAudioConsumersByUser.get(userId);
+    if (!consumerIds) {
+      return;
+    }
+
+    for (const consumerId of consumerIds) {
+      const audio = audioElements.get(consumerId);
+      if (!audio) continue;
+      audio.volume = volume;
+      audio.muted = muted;
+    }
+  };
+
+  const setScreenStreamVolume = (userId: string, volume: number) => {
+    const clampedVolume = clampScreenStreamVolume(volume);
+
+    if (clampedVolume >= 1) {
+      screenStreamVolumeState.value.delete(userId);
+    } else {
+      screenStreamVolumeState.value.set(userId, clampedVolume);
+    }
+    screenStreamVolumeState.value = new Map(screenStreamVolumeState.value);
+
+    if (clampedVolume > 0) {
+      screenStreamLastNonZeroVolumeState.value.set(userId, clampedVolume);
+      screenStreamLastNonZeroVolumeState.value = new Map(screenStreamLastNonZeroVolumeState.value);
+      if (isScreenStreamMuted(userId)) {
+        screenStreamMuteState.value.delete(userId);
+        screenStreamMuteState.value = new Map(screenStreamMuteState.value);
+      }
+    } else {
+      if (!isScreenStreamMuted(userId)) {
+        screenStreamMuteState.value.set(userId, true);
+        screenStreamMuteState.value = new Map(screenStreamMuteState.value);
+      }
+    }
+
+    applyScreenStreamAudioState(userId);
+  };
+
+  const setScreenStreamMuted = (userId: string, isMuted: boolean) => {
+    if (isMuted) {
+      screenStreamMuteState.value.set(userId, true);
+      const currentVolume = getScreenStreamVolume(userId);
+      if (currentVolume > 0) {
+        screenStreamLastNonZeroVolumeState.value.set(userId, currentVolume);
+        screenStreamLastNonZeroVolumeState.value = new Map(screenStreamLastNonZeroVolumeState.value);
+      }
+    } else {
+      screenStreamMuteState.value.delete(userId);
+      if (getScreenStreamVolume(userId) <= 0) {
+        const restoredVolume = getScreenStreamLastNonZeroVolume(userId);
+        if (restoredVolume >= 1) {
+          screenStreamVolumeState.value.delete(userId);
+        } else {
+          screenStreamVolumeState.value.set(userId, restoredVolume);
+        }
+        screenStreamVolumeState.value = new Map(screenStreamVolumeState.value);
+      }
+    }
+    screenStreamMuteState.value = new Map(screenStreamMuteState.value);
+    applyScreenStreamAudioState(userId);
+  };
+
+  const getResolutionTarget = (resolution: ScreenStreamResolution, sourceAspectRatio: number) => {
+    const targetHeightByResolution: Record<Exclude<ScreenStreamResolution, 'source'>, number> = {
+      '1080p': 1080,
+      '720p': 720,
+      '480p': 480,
+      '4k': 2160,
+      '8k': 4320
+    };
+
+    if (resolution === 'source') {
+      return null;
+    }
+
+    const targetHeight = targetHeightByResolution[resolution];
+    const targetWidth = Math.max(1, Math.round(targetHeight * sourceAspectRatio));
+
+    return {
+      width: targetWidth,
+      height: targetHeight
+    };
+  };
+
+  const applyScreenTrackPreference = async (track: MediaStreamTrack, preference: ScreenStreamPreference) => {
+    const settings = track.getSettings();
+    const sourceWidth = settings.width || 1920;
+    const sourceHeight = settings.height || 1080;
+    const sourceAspectRatio = sourceHeight > 0 ? sourceWidth / sourceHeight : 16 / 9;
+
+    const resolutionTarget = getResolutionTarget(preference.resolution, sourceAspectRatio);
+    const preferredConstraints: MediaTrackConstraints = {
+      frameRate: {
+        ideal: preference.fps,
+        max: preference.fps
+      }
+    };
+
+    if (resolutionTarget) {
+      preferredConstraints.width = {
+        ideal: resolutionTarget.width,
+        max: resolutionTarget.width
+      };
+      preferredConstraints.height = {
+        ideal: resolutionTarget.height,
+        max: resolutionTarget.height
+      };
+    }
+
+    try {
+      await track.applyConstraints(preferredConstraints);
+      return;
+    } catch (error) {
+      console.warn('[WebRTC][screen] Failed to apply preferred screen constraints, retrying with fps-only', {
+        preference,
+        preferredConstraints,
+        error
+      });
+    }
+
+    try {
+      await track.applyConstraints({
+        frameRate: {
+          ideal: preference.fps,
+          max: preference.fps
+        }
+      });
+      return;
+    } catch (error) {
+      console.warn('[WebRTC][screen] Failed to apply fps-only constraints, retrying with unconstrained track', {
+        preference,
+        error
+      });
+    }
+
+    try {
+      await track.applyConstraints({});
+    } catch (error) {
+      console.warn('[WebRTC][screen] Failed to reset track constraints after unsupported preference', {
+        preference,
+        error
+      });
+    }
+  };
+
+  const setScreenStreamPreference = async (
+    userId: string,
+    updates: Partial<ScreenStreamPreference>
+  ) => {
+    const currentPreference = getScreenStreamPreference(userId);
+    const nextPreference: ScreenStreamPreference = {
+      fps: updates.fps ?? currentPreference.fps,
+      resolution: updates.resolution ?? currentPreference.resolution
+    };
+
+    screenStreamPreferenceState.value.set(userId, nextPreference);
+    screenStreamPreferenceState.value = new Map(screenStreamPreferenceState.value);
+
+    const localUserId = chatStore.currentUser?.id;
+    if (localUserId !== userId) {
+      console.info('[WebRTC][screen] Screen preference updated for remote stream (hook point)', {
+        userId,
+        preference: nextPreference
+      });
+      return;
+    }
+
+    const localScreenTrack = screenShareStream.value?.getVideoTracks()[0] || null;
+    if (!localScreenTrack) {
+      return;
+    }
+
+    await applyScreenTrackPreference(localScreenTrack, nextPreference);
+  };
+
+  const setScreenStreamFps = async (userId: string, fps: ScreenStreamFps) => {
+    await setScreenStreamPreference(userId, { fps });
+  };
+
+  const setScreenStreamResolution = async (userId: string, resolution: ScreenStreamResolution) => {
+    await setScreenStreamPreference(userId, { resolution });
+  };
+
+  const setUserScreenStream = (userId: string, stream: MediaStream) => {
+    userScreenStreams.value.set(userId, stream);
+    userScreenStreams.value = new Map(userScreenStreams.value);
+
+    const track = stream.getVideoTracks()[0] || null;
+    console.info('[WebRTC][screen] User screen stream updated', {
+      userId,
+      streamId: stream.id,
+      trackId: track?.id || null,
+      trackReadyState: track?.readyState || null,
+      trackMuted: track?.muted ?? null
+    });
+  };
+
+  const deleteUserScreenStream = (userId: string) => {
+    if (!userScreenStreams.value.has(userId)) return;
+    userScreenStreams.value.delete(userId);
+    userScreenStreams.value = new Map(userScreenStreams.value);
+  };
+
+  const cleanupScreenShareProducer = (notifyServer: boolean = true) => {
+    const currentScreenProducerId = screenProducer.value?.id as string | undefined;
+    const currentScreenAudioProducerId = screenAudioProducer.value?.id as string | undefined;
+    if (screenProducer.value) {
+      try {
+        screenProducer.value.close();
+      } catch (_e) {
+        // no-op
+      }
+      screenProducer.value = null;
+    }
+
+    if (screenAudioProducer.value) {
+      try {
+        screenAudioProducer.value.close();
+      } catch (_e) {
+        // no-op
+      }
+      screenAudioProducer.value = null;
+    }
+
+    if (notifyServer && activeVoiceChannelId.value) {
+      if (currentScreenProducerId) {
+        console.info('[WebRTC][screen] Requesting server-side producer close', {
+          channelId: activeVoiceChannelId.value,
+          producerId: currentScreenProducerId
+        });
+        chatStore.send('close_producer', {
+          channel_id: activeVoiceChannelId.value,
+          producer_id: currentScreenProducerId
+        });
+      }
+
+      if (currentScreenAudioProducerId) {
+        console.info('[WebRTC][screen] Requesting server-side producer close', {
+          channelId: activeVoiceChannelId.value,
+          producerId: currentScreenAudioProducerId
+        });
+        chatStore.send('close_producer', {
+          channel_id: activeVoiceChannelId.value,
+          producer_id: currentScreenAudioProducerId
+        });
+      }
+    }
+
+    if (screenShareStream.value) {
+      screenShareStream.value.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (_e) {
+          // no-op
+        }
+      });
+      screenShareStream.value = null;
+    }
+
+    const localUserId = chatStore.currentUser?.id;
+    if (localUserId && userScreenStreams.value.has(localUserId)) {
+      deleteUserScreenStream(localUserId);
+    }
+  };
+
+  const removeUserScreenByProducer = (producerId: string) => {
+    const source = producerToSource.get(producerId);
+    if (source !== 'screen') return;
+
+    const userId = producerToUser.get(producerId);
+    if (!userId) return;
+
+    let hasAnotherScreenProducer = false;
+    for (const [otherProducerId, otherUserId] of producerToUser.entries()) {
+      if (otherProducerId !== producerId && otherUserId === userId && producerToSource.get(otherProducerId) === 'screen') {
+        hasAnotherScreenProducer = true;
+        break;
+      }
+    }
+
+    if (!hasAnotherScreenProducer) {
+      const existing = userScreenStreams.value.get(userId);
+      if (existing) {
+        existing.getTracks().forEach((track) => {
+          try {
+            track.stop();
+          } catch (_e) {
+            // no-op
+          }
+        });
+      }
+      deleteUserScreenStream(userId);
+    }
+  };
+
+  const stopScreenShare = () => {
+    screenShareError.value = null;
+    cleanupScreenShareProducer(true);
+  };
+
+  const waitForSendTransport = async (timeoutMs: number = 4000) => {
+    if (sendTransport.value) return sendTransport.value;
+
+    const startedAt = Date.now();
+    while (!sendTransport.value && activeVoiceChannelId.value && Date.now() - startedAt < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return sendTransport.value;
+  };
+
+  const startScreenShare = async () => {
+    if (!activeVoiceChannelId.value) {
+      screenShareError.value = 'Join a voice channel before sharing your screen.';
+      return;
+    }
+    if (screenProducer.value) return;
+
+    screenShareError.value = null;
+    console.info('[WebRTC][screen] Share requested', {
+      channelId: activeVoiceChannelId.value,
+      hasSendTransport: Boolean(sendTransport.value)
+    });
+
+    const readySendTransport = await waitForSendTransport();
+    if (!readySendTransport) {
+      screenShareError.value = 'Screen share is not ready yet. Please try again in a moment.';
+      console.warn('[WebRTC][screen] Share failed: send transport not ready');
+      return;
+    }
+
+    const canProduceVideo = Boolean(device.value?.canProduce('video'));
+    console.info('[WebRTC][screen] Capability check', {
+      hasDevice: Boolean(device.value),
+      canProduceVideo,
+      routerVideoCodecs: (device.value?.rtpCapabilities?.codecs || []).filter((codec: any) => codec.kind === 'video').map((codec: any) => codec.mimeType)
+    });
+
+    if (!canProduceVideo) {
+      screenShareError.value = 'Failed to start screen share. Please try again.';
+      console.error('[WebRTC][screen] Aborting: device cannot produce video');
+      return;
+    }
+
+    try {
+      let displayStream: MediaStream;
+      try {
+        displayStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            suppressLocalAudioPlayback: false
+          } as MediaTrackConstraints
+        });
+      } catch (displayAudioError) {
+        console.warn('[WebRTC][screen] getDisplayMedia with audio constraints failed, retrying with audio=true', displayAudioError);
+        displayStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true
+        });
+      }
+
+      console.info('[WebRTC][screen] getDisplayMedia resolved', {
+        streamId: displayStream.id,
+        trackCount: displayStream.getTracks().length
+      });
+
+      const videoTrack = displayStream.getVideoTracks()[0];
+      if (!videoTrack) {
+        displayStream.getTracks().forEach((track) => track.stop());
+        screenShareError.value = 'No screen video track was provided by the browser.';
+        console.warn('[WebRTC][screen] Share failed: missing video track after picker confirm');
+        return;
+      }
+
+      console.info('[WebRTC][screen] Producing screen track', {
+        trackId: videoTrack.id,
+        readyState: videoTrack.readyState
+      });
+
+      const localUserId = chatStore.currentUser?.id;
+      if (localUserId) {
+        const preferredScreenPreference = getScreenStreamPreference(localUserId);
+        await applyScreenTrackPreference(videoTrack, preferredScreenPreference);
+      }
+
+      screenShareStream.value = displayStream;
+      videoTrack.onended = () => {
+        stopScreenShare();
+      };
+
+      const audioTrack = displayStream.getAudioTracks()[0] || null;
+      if (audioTrack) {
+        audioTrack.onended = () => {
+          if (!screenAudioProducer.value) return;
+          const currentScreenAudioProducer = screenAudioProducer.value;
+          screenAudioProducer.value = null;
+          try {
+            currentScreenAudioProducer.close();
+          } catch (_e) {
+            // no-op
+          }
+
+          if (activeVoiceChannelId.value) {
+            chatStore.send('close_producer', {
+              channel_id: activeVoiceChannelId.value,
+              producer_id: currentScreenAudioProducer.id
+            });
+          }
+        };
+      }
+
+      screenProducer.value = await readySendTransport.produce({
+        track: videoTrack,
+        encodings: [
+          {
+            maxBitrate: ((videoTrack.getSettings().width || 1920) * (videoTrack.getSettings().height || 1080) * (videoTrack.getSettings().frameRate || 30) >= 3840 * 2160 * 60)
+              ? 35_000_000
+              : ((videoTrack.getSettings().width || 1920) * (videoTrack.getSettings().height || 1080) * (videoTrack.getSettings().frameRate || 30) >= 1920 * 1080 * 30)
+                ? 20_000_000
+                : 8_000_000
+          }
+        ],
+        appData: { source: 'screen' as MediaSourceType }
+      });
+
+      if (audioTrack && device.value?.canProduce('audio')) {
+        screenAudioProducer.value = await readySendTransport.produce({
+          track: audioTrack,
+          appData: { source: 'screen' as MediaSourceType }
+        });
+
+        screenAudioProducer.value.on('transportclose', () => {
+          screenAudioProducer.value = null;
+        });
+      }
+
+      console.info('[WebRTC][screen] Produce resolved', {
+        producerId: screenProducer.value?.id
+      });
+
+      
+      if (localUserId) {
+        setUserScreenStream(localUserId, displayStream);
+      }
+
+      screenProducer.value.on('transportclose', () => {
+        cleanupScreenShareProducer(false);
+      });
+    } catch (error) {
+      screenShareError.value = 'Failed to start screen share. Please try again.';
+      console.error('[WebRTC][screen] Failed to start screen share:', error);
+      cleanupScreenShareProducer();
+    }
+  };
 
   const speakingUserIds = ref<Set<string>>(new Set());
   const speakingDetectors = new Map<string, {
@@ -383,6 +964,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     
     chatStore.send('leave_voice_channel', { channel_id: activeVoiceChannelId.value });
     
+    cleanupScreenShareProducer();
+
     if (localStream.value) {
       localStream.value.getTracks().forEach(track => track.stop());
       localStream.value = null;
@@ -418,7 +1001,19 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     audioElements.clear();
     
     producerToUser.clear();
+    producerToSource.clear();
     consumerToProducer.clear();
+    userScreenStreams.value.forEach((stream) => {
+      stream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (_e) {
+          // no-op
+        }
+      });
+    });
+    userScreenStreams.value.clear();
+    userScreenStreams.value = new Map(userScreenStreams.value);
     
     remoteStreams.value.clear();
     voiceParticipants.value = [];
@@ -505,7 +1100,10 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           for (const [prodId, userId] of producerToUser.entries()) {
             if (userId === payload.user_id) {
               producersToRemove.add(prodId);
+              screenShareNotificationProducerIds.delete(prodId);
+              removeUserScreenByProducer(prodId);
               producerToUser.delete(prodId);
+              producerToSource.delete(prodId);
             }
           }
           
@@ -584,25 +1182,74 @@ export const useWebRtcStore = defineStore('webrtc', () => {
             callback();
           });
           
-          sendTransport.value.on('produce', async ({ kind, rtpParameters }: any, callback: any, _errback: any) => {
+          sendTransport.value.on('produce', async ({ kind, rtpParameters, appData }: any, callback: any, errback: any) => {
+            const inferredSource: MediaSourceType = kind === 'audio' ? 'mic' : 'camera';
+            const appDataSource = appData?.source;
+            const source: MediaSourceType =
+              appDataSource === 'mic' || appDataSource === 'screen' || appDataSource === 'camera'
+                ? appDataSource
+                : inferredSource;
+            const requestId = typeof crypto?.randomUUID === 'function'
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+            let settled = false;
+            let producedTimeout: number | null = null;
+            const cleanupProducedWait = () => {
+              if (producedTimeout !== null) {
+                window.clearTimeout(producedTimeout);
+                producedTimeout = null;
+              }
+              chatStore.removeMessageListener(onProduced);
+            };
+
+            const onProduced = (msg: any) => {
+              if (
+                msg.type === 'produced'
+                && msg.payload.channel_id === payload.channel_id
+                && msg.payload.request_id === requestId
+              ) {
+                settled = true;
+                cleanupProducedWait();
+                console.info('[WebRTC][produce] ACK received', {
+                  source,
+                  requestId,
+                  producerId: msg.payload.id
+                });
+                callback({ id: msg.payload.id });
+              }
+            };
+
+            chatStore.addMessageListener(onProduced);
+
+            producedTimeout = window.setTimeout(() => {
+              if (settled) return;
+              cleanupProducedWait();
+              if (source === 'screen') {
+                screenShareError.value = 'Screen share did not start (produce acknowledgement timeout). Please retry.';
+              }
+              console.warn('[WebRTC][produce] ACK timeout', {
+                source,
+                requestId,
+                channelId: payload.channel_id
+              });
+              errback(new Error(`Produce ACK timeout for source: ${source}`));
+            }, 5000);
+
+            console.info('[WebRTC][produce] Sending produce request', {
+              source,
+              requestId,
+              channelId: payload.channel_id
+            });
+
             chatStore.send('produce', {
               channel_id: payload.channel_id,
               transport_id: sendTransport.value!.id,
               kind,
-              rtpParameters
+              rtpParameters,
+              source,
+              request_id: requestId
             });
-            
-            // We need the producer ID from the server
-            // We'll handle this in the 'produced' event
-            // But mediasoup-client expects the ID in the callback
-            // We'll use a temporary listener
-            const onProduced = (msg: any) => {
-              if (msg.type === 'produced' && msg.payload.channel_id === payload.channel_id) {
-                chatStore.removeMessageListener(onProduced);
-                callback({ id: msg.payload.id });
-              }
-            };
-            chatStore.addMessageListener(onProduced);
           });
           
           // Start producing audio
@@ -687,8 +1334,9 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         
       case 'new_producer':
         if (payload.channel_id !== activeVoiceChannelId.value || !device.value || !recvTransport.value) return;
-        
-        producerToUser.set(payload.producer_id, payload.user_id);
+
+          producerToUser.set(payload.producer_id, payload.user_id);
+          producerToSource.set(payload.producer_id, (payload.source as MediaSourceType | undefined) || (payload.kind === 'audio' ? 'mic' : 'camera'));
         
         chatStore.send('consume', {
           channel_id: payload.channel_id,
@@ -713,25 +1361,71 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           consumerToProducer.set(consumer.id, payload.producer_id);
 
           const remoteUserId = producerToUser.get(payload.producer_id);
+          const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind === 'audio' ? 'mic' : 'camera') as MediaSourceType);
+
+          if (remoteSource === 'screen' && remoteUserId) {
+            for (const [existingConsumerId, existingProducerId] of consumerToProducer.entries()) {
+              if (existingConsumerId === consumer.id) continue;
+              if (existingProducerId !== payload.producer_id) continue;
+              closeConsumer(existingConsumerId, 'duplicate screen consumer for same producer');
+            }
+          }
           
           consumer.on('producerclose', () => {
-            consumers.value.delete(consumer.id);
-            remoteStreams.value.delete(consumer.id);
+            closeConsumer(consumer.id, 'producerclose event');
+            removeUserScreenByProducer(payload.producer_id);
+            producerToUser.delete(payload.producer_id);
+            producerToSource.delete(payload.producer_id);
             remoteStreams.value = new Map(remoteStreams.value);
-            removeSpeakingDetector(consumer.id);
-            const audio = audioElements.get(consumer.id);
-            if (audio) {
-              audio.pause();
-              audio.srcObject = null;
-              audioElements.delete(consumer.id);
-            }
           });
           
           const stream = new MediaStream();
           stream.addTrack(consumer.track);
 
+          if (remoteSource === 'screen' && payload.kind === 'video') {
+            consumer.track.onended = () => {
+              console.warn('[WebRTC][screen] Remote screen track ended', {
+                consumerId: consumer.id,
+                producerId: payload.producer_id,
+                remoteUserId
+              });
+
+              closeConsumer(consumer.id, 'remote screen track ended');
+              if (remoteUserId) {
+                deleteUserScreenStream(remoteUserId);
+              }
+              remoteStreams.value = new Map(remoteStreams.value);
+            };
+
+            consumer.track.onmute = () => {
+              console.warn('[WebRTC][screen] Remote screen track muted', {
+                consumerId: consumer.id,
+                producerId: payload.producer_id,
+                remoteUserId,
+                readyState: consumer.track.readyState
+              });
+            };
+
+            consumer.track.onunmute = () => {
+              console.info('[WebRTC][screen] Remote screen track unmuted', {
+                consumerId: consumer.id,
+                producerId: payload.producer_id,
+                remoteUserId,
+                readyState: consumer.track.readyState
+              });
+            };
+          }
+
           if (remoteUserId) {
-            addSpeakingDetector(consumer.id, remoteUserId, stream);
+            if (remoteSource === 'screen' && payload.kind === 'video') {
+              if (!screenShareNotificationProducerIds.has(payload.producer_id)) {
+                screenShareNotificationProducerIds.add(payload.producer_id);
+                playScreenShareNotificationSound();
+              }
+              setUserScreenStream(remoteUserId, stream);
+            } else if (payload.kind === 'audio') {
+              addSpeakingDetector(consumer.id, remoteUserId, stream);
+            }
           }
           
           // Store the stream with the producer ID or user ID
@@ -739,14 +1433,26 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           remoteStreams.value.set(consumer.id, stream);
           
           // Play audio
-          const audio = new Audio();
-          audio.srcObject = stream;
-          audio.autoplay = true;
-          if (isDeafened.value) {
-            audio.muted = true;
+          if (payload.kind === 'audio') {
+            const audio = new Audio();
+            audio.srcObject = stream;
+            audio.autoplay = true;
+            if (isDeafened.value) {
+              audio.muted = true;
+            }
+            if (remoteSource === 'screen' && remoteUserId) {
+              if (!screenAudioConsumersByUser.has(remoteUserId)) {
+                screenAudioConsumersByUser.set(remoteUserId, new Set());
+              }
+              screenAudioConsumersByUser.get(remoteUserId)!.add(consumer.id);
+            }
+            audio.play().catch(e => console.error('Audio play failed:', e));
+            audioElements.set(consumer.id, audio);
+
+            if (remoteSource === 'screen' && remoteUserId) {
+              applyScreenStreamAudioState(remoteUserId);
+            }
           }
-          audio.play().catch(e => console.error('Audio play failed:', e));
-          audioElements.set(consumer.id, audio);
           
           // Trigger reactivity
           remoteStreams.value = new Map(remoteStreams.value);
@@ -759,6 +1465,47 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           console.error('Failed to consume:', error);
         }
         break;
+
+      case 'producer_closed': {
+        if (payload.channel_id !== activeVoiceChannelId.value) return;
+
+        const producerId = payload.producer_id as string;
+        const source = producerToSource.get(producerId)
+          || (payload.source as MediaSourceType | undefined)
+          || null;
+
+        console.info('[WebRTC][consume] Producer closed notification', {
+          channelId: payload.channel_id,
+          producerId,
+          source,
+          userId: payload.user_id
+        });
+
+        const consumerIdsToClose: string[] = [];
+        for (const [consumerId, mappedProducerId] of consumerToProducer.entries()) {
+          if (mappedProducerId === producerId) {
+            consumerIdsToClose.push(consumerId);
+          }
+        }
+
+        for (const consumerId of consumerIdsToClose) {
+          closeConsumer(consumerId, `producer_closed notification (${producerId})`);
+        }
+
+        screenShareNotificationProducerIds.delete(producerId);
+
+        if (source === 'screen') {
+          if (!producerToSource.has(producerId) && payload.user_id) {
+            deleteUserScreenStream(payload.user_id as string);
+          }
+          removeUserScreenByProducer(producerId);
+        }
+
+        producerToUser.delete(producerId);
+        producerToSource.delete(producerId);
+        remoteStreams.value = new Map(remoteStreams.value);
+        break;
+      }
     }
   };
 
@@ -783,16 +1530,34 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     speakingUserIds,
     localStream,
     remoteStreams,
+    userScreenStreams,
+    screenShareStream,
+    screenShareError,
+    screenProducer,
     ping,
     bandwidth,
     pingHistory,
     connectionQuality,
     isMuted,
     isDeafened,
+    screenStreamMuteState,
+    screenStreamPreferenceState,
+    screenStreamVolumeState,
     joinVoiceChannel,
     leaveVoiceChannel,
     isUserSpeaking,
+    isScreenStreamMuted,
+    getScreenStreamVolume,
+    setScreenStreamVolume,
+    setScreenStreamMuted,
+    getScreenStreamPreference,
+    getScreenStreamFps,
+    getScreenStreamResolution,
+    setScreenStreamFps,
+    setScreenStreamResolution,
     toggleMute,
-    toggleDeafen
+    toggleDeafen,
+    startScreenShare,
+    stopScreenShare
   };
 });

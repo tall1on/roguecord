@@ -16,11 +16,94 @@ import {
   getUsers,
   getServer,
   createServer,
-  updateServerSettings
+  updateServerSettings,
+  updateUserLastIp,
+  getMatchingActiveBan,
+  deleteMessagesByUser,
+  createModerationAction,
+  createBanRule,
+  getPendingModerationActions,
+  markModerationActionEnforced,
+  MessageDeleteMode,
+  getChannelUnreadStatesForUser,
+  markChannelReadUpToMessage,
+  createFolderChannelFile,
+  getFolderChannelFiles,
+  getFolderChannelFileById,
+  deleteFolderChannelFileById
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
 import { adminKey } from '../admin';
+import fs from 'node:fs';
+import path from 'node:path';
+import { dataDir } from '../db';
+
+const filesRootDir = path.join(dataDir, 'files');
+const MAX_FOLDER_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
+  'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx',
+  'html', 'htm', 'php', 'phtml',
+  'exe', 'dll', 'so', 'com', 'scr', 'msi',
+  'py', 'pyw', 'python',
+  'sh', 'bash', 'zsh',
+  'bat', 'cmd',
+  'ps1', 'psm1',
+  'vbs', 'vbe', 'wsf', 'wsh',
+  'jar', 'appimage'
+]);
+
+const ensureFilesRootDir = () => {
+  if (!fs.existsSync(filesRootDir)) {
+    fs.mkdirSync(filesRootDir, { recursive: true });
+  }
+};
+
+const sanitizeFileName = (name: string) => {
+  const base = path.basename(name || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
+  return base || 'file';
+};
+
+const getNormalizedFileExtension = (name: string) => {
+  const extension = path.extname(name || '');
+  return extension.replace('.', '').trim().toLowerCase();
+};
+
+const getSafeChannelFilesDir = (channelId: string) => {
+  ensureFilesRootDir();
+  const safeChannelId = (channelId || '').replace(/[^a-zA-Z0-9-]/g, '');
+  const dir = path.resolve(filesRootDir, safeChannelId);
+  const root = path.resolve(filesRootDir);
+  if (!dir.startsWith(root)) {
+    throw new Error('Unsafe channel path');
+  }
+  return dir;
+};
+
+const ensureChannelFilesDir = (channelId: string) => {
+  const dir = getSafeChannelFilesDir(channelId);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+};
+
+const resolveSafeStoredFilePath = (channelId: string, storageName: string) => {
+  const channelDir = getSafeChannelFilesDir(channelId);
+  const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
+  if (!safeStorageName) {
+    throw new Error('Invalid storage name');
+  }
+  const fullPath = path.resolve(channelDir, safeStorageName);
+  if (!fullPath.startsWith(channelDir)) {
+    throw new Error('Unsafe file path');
+  }
+  return fullPath;
+};
+
+const hasFolderManagementAccess = (role: string | null | undefined) => {
+  return role === 'admin' || role === 'owner';
+};
 
 export const handleMessage = async (client: ClientConnection, messageStr: string) => {
   try {
@@ -47,8 +130,23 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'get_messages':
         await handleGetMessages(client, payload);
         break;
+      case 'mark_channel_read':
+        await handleMarkChannelRead(client, payload);
+        break;
       case 'send_message':
         await handleSendMessage(client, payload);
+        break;
+      case 'folder_list_files':
+        await handleFolderListFiles(client, payload);
+        break;
+      case 'folder_upload_file':
+        await handleFolderUploadFile(client, payload);
+        break;
+      case 'folder_download_file':
+        await handleFolderDownloadFile(client, payload);
+        break;
+      case 'folder_delete_file':
+        await handleFolderDeleteFile(client, payload);
         break;
       case 'join_voice_channel':
         await handleJoinVoiceChannel(client, payload);
@@ -61,6 +159,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'produce':
         await handleProduce(client, payload);
+        break;
+      case 'close_producer':
+        await handleCloseProducer(client, payload);
         break;
       case 'consume':
         await handleConsume(client, payload);
@@ -92,6 +193,12 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'JOIN_SERVER':
         await handleJoinServer(client, payload);
         break;
+      case 'kick_member':
+        await handleKickMember(client, payload);
+        break;
+      case 'ban_member':
+        await handleBanMember(client, payload);
+        break;
       case 'ping':
         client.ws.send(JSON.stringify({ type: 'pong', payload: {} }));
         break;
@@ -107,6 +214,25 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
 const handleAuthRequest = async (client: ClientConnection, payload: { username: string, publicKey: string }) => {
   const { username, publicKey } = payload;
   if (!username || !publicKey) return;
+
+  const normalizedIp = normalizeIp(client.ipAddress);
+  const activeBan = await getMatchingActiveBan({
+    targetPublicKey: publicKey,
+    targetIp: normalizedIp
+  });
+
+  if (activeBan) {
+    client.ws.send(JSON.stringify({
+      type: 'auth:banned',
+      payload: {
+        reason: activeBan.reason || 'You are banned from this server.',
+        blacklistIdentity: activeBan.blacklist_identity === 1,
+        blacklistIp: activeBan.blacklist_ip === 1,
+        targetIp: normalizedIp || null
+      }
+    }));
+    return;
+  }
 
   let user = await getUserByPublicKey(publicKey);
   let isNewUser = false;
@@ -149,24 +275,74 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
     if (isValid) {
       const user = await getUserByPublicKey(client.pendingPublicKey);
       if (user) {
+        const normalizedIp = normalizeIp(client.ipAddress);
+        await updateUserLastIp(user.id, normalizedIp || null);
+
+        const activeBan = await getMatchingActiveBan({
+          targetUserId: user.id,
+          targetPublicKey: user.public_key,
+          targetIp: normalizedIp
+        });
+
+        if (activeBan) {
+          client.ws.send(JSON.stringify({
+            type: 'auth:banned',
+            payload: {
+              reason: activeBan.reason || 'You are banned from this server.',
+              blacklistIdentity: activeBan.blacklist_identity === 1,
+              blacklistIp: activeBan.blacklist_ip === 1,
+              targetIp: normalizedIp || null
+            }
+          }));
+          return;
+        }
+
         connectionManager.setUserId(client, user.id);
         client.challenge = undefined;
         client.pendingPublicKey = undefined;
 
+        const pendingActions = await getPendingModerationActions(user.id);
+        if (pendingActions.length > 0) {
+          for (const action of pendingActions) {
+            await markModerationActionEnforced(action.id);
+            client.ws.send(JSON.stringify({
+              type: 'moderation_action_enforced',
+              payload: {
+                actionType: action.action_type,
+                reason: action.reason,
+                deleteMode: action.delete_mode,
+                deleteHours: action.delete_hours,
+                blacklistIdentity: action.blacklist_identity === 1,
+                blacklistIp: action.blacklist_ip === 1,
+                targetIp: action.target_ip
+              }
+            }));
+          }
+
+          // Offline moderation is enforced immediately on next connect.
+          client.ws.close(4003, 'Moderation action enforced');
+          return;
+        }
+
         const server = await getServer();
+        const userWithUpdatedIp = await getUserById(user.id);
         client.ws.send(JSON.stringify({
           type: 'authenticated',
-          payload: { user, server }
+          payload: { user: userWithUpdatedIp || user, server }
         }));
 
         // Send full member list to the newly authenticated user
         const allUsers = await getUsers();
         const onlineUserIds = connectionManager.getOnlineUserIds();
+        const memberIps = Object.fromEntries(
+          allUsers.map((member) => [member.id, member.last_ip || connectionManager.getUserIp(member.id) || null])
+        );
         client.ws.send(JSON.stringify({
           type: 'member_list',
           payload: {
             members: allUsers,
-            onlineUserIds
+            onlineUserIds,
+            memberIps
           }
         }));
 
@@ -211,6 +387,7 @@ const handleGetChannels = async (client: ClientConnection) => {
 
   const categories = await getCategories();
   const channels = await getChannels();
+  const unreadStates = await getChannelUnreadStatesForUser(client.userId);
 
   // Create default category and channel if none exist
   if (categories.length === 0 && channels.length === 0) {
@@ -228,7 +405,7 @@ const handleGetChannels = async (client: ClientConnection) => {
 
   client.ws.send(JSON.stringify({
     type: 'channels_list',
-    payload: { categories, channels }
+    payload: { categories, channels, unreadStates }
   }));
 
   const voiceParticipants: Record<string, any[]> = {};
@@ -249,9 +426,36 @@ const handleGetChannels = async (client: ClientConnection) => {
   }));
 };
 
+const handleMarkChannelRead = async (
+  client: ClientConnection,
+  payload: { channel_id?: string; last_read_message_id?: string; last_read_message_created_at?: string }
+) => {
+  if (!client.userId) return;
+
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  const messageId = typeof payload?.last_read_message_id === 'string' ? payload.last_read_message_id : '';
+  const messageCreatedAt = typeof payload?.last_read_message_created_at === 'string' ? payload.last_read_message_created_at : '';
+
+  if (!channelId || !messageId || !messageCreatedAt) {
+    return;
+  }
+
+  const channel = await getChannelById(channelId);
+  if (!channel || (channel.type !== 'text' && channel.type !== 'rss')) {
+    return;
+  }
+
+  await markChannelReadUpToMessage({
+    userId: client.userId,
+    channelId,
+    messageId,
+    messageCreatedAt
+  });
+};
+
 const handleCreateChannel = async (
   client: ClientConnection,
-  payload: { category_id: string | null, name: string, type: 'text' | 'voice' | 'rss', feed_url?: string }
+  payload: { category_id: string | null, name: string, type: 'text' | 'voice' | 'rss' | 'folder', feed_url?: string }
 ) => {
   if (!client.userId) return;
   const { category_id, name, type } = payload;
@@ -262,7 +466,7 @@ const handleCreateChannel = async (
     return;
   }
 
-  if (type !== 'text' && type !== 'voice' && type !== 'rss') {
+  if (type !== 'text' && type !== 'voice' && type !== 'rss' && type !== 'folder') {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid channel type' } }));
     return;
   }
@@ -342,6 +546,17 @@ const handleDeleteChannel = async (client: ClientConnection, payload: { channel_
       }
     }
 
+    if (channel.type === 'folder') {
+      try {
+        const channelDir = getSafeChannelFilesDir(channel_id);
+        if (fs.existsSync(channelDir)) {
+          fs.rmSync(channelDir, { recursive: true, force: true });
+        }
+      } catch (cleanupError) {
+        console.warn('[WS DEBUG] Failed to cleanup folder channel files directory:', cleanupError);
+      }
+    }
+
     connectionManager.broadcastToAuthenticated({
       type: 'channel_deleted',
       payload: { channel_id }
@@ -352,17 +567,44 @@ const handleDeleteChannel = async (client: ClientConnection, payload: { channel_
   }
 };
 
-const handleGetMessages = async (client: ClientConnection, payload: { channel_id: string }) => {
+const MESSAGE_PAGE_SIZE = 25;
+
+const handleGetMessages = async (
+  client: ClientConnection,
+  payload: { channel_id: string; before_created_at?: string; before_id?: string; limit?: number }
+) => {
   if (!client.userId) return;
   const { channel_id } = payload;
   if (!channel_id) return;
 
+  const beforeCreatedAt = typeof payload.before_created_at === 'string' ? payload.before_created_at : undefined;
+  const beforeId = typeof payload.before_id === 'string' ? payload.before_id : undefined;
+
+  const before = beforeCreatedAt && beforeId
+    ? {
+        createdAt: beforeCreatedAt,
+        id: beforeId
+      }
+    : undefined;
+  const isOlderPageRequest = Boolean(before);
+
   // Ideally verify user has access to this channel's server
-  const messages = await getChannelMessages(channel_id);
+  const page = await getChannelMessages(channel_id, MESSAGE_PAGE_SIZE, before);
+  const oldestMessage = page.messages[0];
 
   client.ws.send(JSON.stringify({
     type: 'messages_list',
-    payload: { channel_id, messages }
+    payload: {
+      channel_id,
+      messages: page.messages,
+      has_more: page.hasMore,
+      page_size: MESSAGE_PAGE_SIZE,
+      is_older_page: isOlderPageRequest,
+      request_before_created_at: beforeCreatedAt || null,
+      request_before_id: beforeId || null,
+      before_created_at: oldestMessage?.created_at || null,
+      before_id: oldestMessage?.id || null
+    }
   }));
 };
 
@@ -390,6 +632,13 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
   }
 
   const message = await createMessage(channel_id, client.userId, content);
+
+  await markChannelReadUpToMessage({
+    userId: client.userId,
+    channelId: channel_id,
+    messageId: message.id,
+    messageCreatedAt: message.created_at
+  });
   
   const messageWithUser = {
     ...message,
@@ -402,6 +651,240 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     type: 'new_message',
     payload: { message: messageWithUser }
   });
+};
+
+const handleFolderListFiles = async (client: ClientConnection, payload: { channel_id?: string }) => {
+  if (!client.userId) return;
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  if (!channelId) return;
+
+  const channel = await getChannelById(channelId);
+  if (!channel || channel.type !== 'folder') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Folder channel not found' } }));
+    return;
+  }
+
+  const files = await getFolderChannelFiles(channelId);
+  client.ws.send(JSON.stringify({
+    type: 'folder_files_list',
+    payload: { channel_id: channelId, files }
+  }));
+};
+
+const handleFolderUploadFile = async (
+  client: ClientConnection,
+  payload: { channel_id?: string; file_name?: string; mime_type?: string; data_base64?: string }
+) => {
+  if (!client.userId) return;
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  const originalName = sanitizeFileName(typeof payload?.file_name === 'string' ? payload.file_name : '');
+  const mimeType = typeof payload?.mime_type === 'string' && payload.mime_type.trim() ? payload.mime_type.trim() : null;
+  const dataBase64 = typeof payload?.data_base64 === 'string' ? payload.data_base64 : '';
+
+  if (!channelId || !dataBase64) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid upload payload' } }));
+    return;
+  }
+
+  const channel = await getChannelById(channelId);
+  if (!channel || channel.type !== 'folder') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Folder channel not found' } }));
+    return;
+  }
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can upload files' } }));
+    return;
+  }
+
+  let fileBuffer: Buffer;
+  try {
+    fileBuffer = Buffer.from(dataBase64, 'base64');
+  } catch {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid file payload encoding' } }));
+    return;
+  }
+
+  if (!fileBuffer.length) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Uploaded file is empty' } }));
+    return;
+  }
+  if (fileBuffer.length > MAX_FOLDER_FILE_SIZE_BYTES) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Uploaded file exceeds size limit (25 MB)' } }));
+    return;
+  }
+
+  const extension = getNormalizedFileExtension(originalName);
+  if (extension && BLOCKED_FOLDER_UPLOAD_EXTENSIONS.has(extension)) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: {
+        message: `Upload blocked: .${extension} files are not allowed in folder channels.`
+      }
+    }));
+    return;
+  }
+
+  const ext = path.extname(originalName).slice(0, 20);
+  const storageName = `${crypto.randomUUID()}${ext}`;
+  const filePath = resolveSafeStoredFilePath(channelId, storageName);
+
+  try {
+    ensureChannelFilesDir(channelId);
+    fs.writeFileSync(filePath, fileBuffer);
+    const created = await createFolderChannelFile({
+      channelId,
+      originalName,
+      storageName,
+      mimeType,
+      sizeBytes: fileBuffer.length,
+      uploaderUserId: client.userId
+    });
+
+    const payloadFile = {
+      ...created,
+      uploader_username: user.username
+    };
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'folder_file_uploaded',
+      payload: {
+        channel_id: channelId,
+        file: payloadFile
+      }
+    });
+
+    client.ws.send(JSON.stringify({
+      type: 'folder_upload_success',
+      payload: { channel_id: channelId, file_id: created.id }
+    }));
+  } catch (error) {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch {
+      // no-op
+    }
+    console.error('[WS DEBUG] Failed to upload folder file:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to upload file' } }));
+  }
+};
+
+const handleFolderDownloadFile = async (
+  client: ClientConnection,
+  payload: { channel_id?: string; file_id?: string }
+) => {
+  if (!client.userId) return;
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  const fileId = typeof payload?.file_id === 'string' ? payload.file_id : '';
+  if (!channelId || !fileId) return;
+
+  const channel = await getChannelById(channelId);
+  if (!channel || channel.type !== 'folder') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Folder channel not found' } }));
+    return;
+  }
+
+  const file = await getFolderChannelFileById(fileId);
+  if (!file || file.channel_id !== channelId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'File not found' } }));
+    return;
+  }
+
+  try {
+    const fullPath = resolveSafeStoredFilePath(channelId, file.storage_name);
+    if (!fs.existsSync(fullPath)) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Stored file is missing' } }));
+      return;
+    }
+
+    const dataBase64 = fs.readFileSync(fullPath).toString('base64');
+    client.ws.send(JSON.stringify({
+      type: 'folder_file_download',
+      payload: {
+        channel_id: channelId,
+        file: {
+          id: file.id,
+          original_name: file.original_name,
+          mime_type: file.mime_type,
+          size_bytes: file.size_bytes
+        },
+        data_base64: dataBase64
+      }
+    }));
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to read folder file:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to download file' } }));
+  }
+};
+
+const handleFolderDeleteFile = async (
+  client: ClientConnection,
+  payload: { channel_id?: string; file_id?: string }
+) => {
+  if (!client.userId) return;
+
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  const fileId = typeof payload?.file_id === 'string' ? payload.file_id : '';
+  if (!channelId || !fileId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid delete payload' } }));
+    return;
+  }
+
+  const channel = await getChannelById(channelId);
+  if (!channel || channel.type !== 'folder') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Folder channel not found' } }));
+    return;
+  }
+
+  const user = await getUserById(client.userId);
+  if (!user || !hasFolderManagementAccess(user.role)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions to delete files' } }));
+    return;
+  }
+
+  const file = await getFolderChannelFileById(fileId);
+  if (!file || file.channel_id !== channelId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'File not found' } }));
+    return;
+  }
+
+  try {
+    const fullPath = resolveSafeStoredFilePath(channelId, file.storage_name);
+    if (fs.existsSync(fullPath)) {
+      fs.unlinkSync(fullPath);
+    }
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to delete stored folder file:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to delete file' } }));
+    return;
+  }
+
+  try {
+    await deleteFolderChannelFileById(file.id);
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to delete folder file metadata:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to delete file' } }));
+    return;
+  }
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'folder_file_deleted',
+    payload: {
+      channel_id: channelId,
+      file_id: file.id
+    }
+  });
+
+  client.ws.send(JSON.stringify({
+    type: 'folder_delete_success',
+    payload: {
+      channel_id: channelId,
+      file_id: file.id
+    }
+  }));
 };
 
 export const handleClientDisconnect = (client: ClientConnection) => {
@@ -509,9 +992,9 @@ const handleConnectWebRtcTransport = async (client: ClientConnection, payload: {
   }));
 };
 
-const handleProduce = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, kind: any, rtpParameters: any }) => {
+const handleProduce = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, kind: any, rtpParameters: any, source?: 'mic' | 'screen' | 'camera', request_id?: string }) => {
   if (!client.userId) return;
-  const { channel_id, transport_id, kind, rtpParameters } = payload;
+  const { channel_id, transport_id, kind, rtpParameters, source = 'mic', request_id } = payload;
   
   const room = rooms.get(channel_id);
   if (!room) return;
@@ -520,16 +1003,31 @@ const handleProduce = async (client: ClientConnection, payload: { channel_id: st
   const transport = peer.transports.get(transport_id);
   if (!transport) return;
 
-  const producer = await transport.produce({ kind, rtpParameters });
+  const producer = await transport.produce({
+    kind,
+    rtpParameters,
+    appData: {
+      source,
+      userId: client.userId
+    }
+  });
   peer.producers.set(producer.id, producer);
 
-  if (peer.isMuted || peer.isDeafened) {
+  // Voice mute/deafen flags should only gate microphone producers.
+  // Screen-share audio must continue to flow so viewers can hear shared system audio,
+  // and screen/camera video must not be paused by voice-state flags.
+  const normalizedSource: 'mic' | 'screen' | 'camera' =
+    source === 'mic' || source === 'screen' || source === 'camera'
+      ? source
+      : (kind === 'audio' ? 'mic' : 'camera');
+
+  if (normalizedSource === 'mic' && (peer.isMuted || peer.isDeafened)) {
     await producer.pause();
   }
 
   client.ws.send(JSON.stringify({
     type: 'produced',
-    payload: { channel_id, id: producer.id }
+    payload: { channel_id, id: producer.id, source, request_id: request_id || null }
   }));
 
   // Broadcast new producer to others
@@ -540,11 +1038,54 @@ const handleProduce = async (client: ClientConnection, payload: { channel_id: st
         payload: {
           channel_id,
           producer_id: producer.id,
-          user_id: client.userId
+          user_id: client.userId,
+          kind: producer.kind,
+          source
         }
       });
     }
   }
+};
+
+const handleCloseProducer = async (client: ClientConnection, payload: { channel_id: string, producer_id: string }) => {
+  if (!client.userId) return;
+  const { channel_id, producer_id } = payload;
+  if (!channel_id || !producer_id) return;
+
+  const room = rooms.get(channel_id);
+  if (!room) return;
+
+  const peer = room.peers.get(client.userId);
+  if (!peer) return;
+
+  const producer = peer.producers.get(producer_id);
+  if (!producer) return;
+
+  const producerSource = (producer.appData as { source?: unknown } | undefined)?.source;
+  const source: 'mic' | 'screen' | 'camera' =
+    producerSource === 'mic' || producerSource === 'screen' || producerSource === 'camera'
+      ? producerSource
+      : (producer.kind === 'audio' ? 'mic' : 'camera');
+
+  console.log('[WS DEBUG] Closing producer by client request', {
+    userId: client.userId,
+    channel_id,
+    producer_id,
+    source
+  });
+
+  producer.close();
+  peer.producers.delete(producer_id);
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'producer_closed',
+    payload: {
+      channel_id,
+      producer_id,
+      user_id: client.userId,
+      source
+    }
+  });
 };
 
 const handleConsume = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, producer_id: string, rtpCapabilities: any }) => {
@@ -563,11 +1104,21 @@ const handleConsume = async (client: ClientConnection, payload: { channel_id: st
     return;
   }
 
+  const producer = Array.from(room.peers.values())
+    .map((roomPeer) => roomPeer.producers.get(producer_id))
+    .find((roomProducer): roomProducer is NonNullable<typeof roomProducer> => roomProducer !== undefined);
+
   const consumer = await transport.consume({
     producerId: producer_id,
     rtpCapabilities,
     paused: true,
   });
+
+  const producerSource = (producer?.appData as { source?: unknown } | undefined)?.source;
+  const source: 'mic' | 'screen' | 'camera' =
+    producerSource === 'mic' || producerSource === 'screen' || producerSource === 'camera'
+      ? producerSource
+      : (consumer.kind === 'audio' ? 'mic' : 'camera');
 
   peer.consumers.set(consumer.id, consumer);
 
@@ -578,6 +1129,7 @@ const handleConsume = async (client: ClientConnection, payload: { channel_id: st
       producer_id,
       id: consumer.id,
       kind: consumer.kind,
+      source,
       rtpParameters: consumer.rtpParameters,
       type: consumer.type,
       producerPaused: consumer.producerPaused
@@ -640,7 +1192,9 @@ const handleGetProducers = async (client: ClientConnection, payload: { channel_i
           payload: {
             channel_id,
             producer_id: producerId,
-            user_id: peerId
+            user_id: peerId,
+            kind: producer.kind,
+            source: (producer.appData?.source as 'mic' | 'screen' | 'camera' | undefined) || (producer.kind === 'audio' ? 'mic' : 'camera')
           }
         }));
       }
@@ -719,11 +1273,31 @@ const handleVoiceStateUpdate = async (client: ClientConnection, payload: { chann
     peer.isDeafened = isDeafened;
 
     for (const producer of peer.producers.values()) {
+      const producerSource = (producer.appData as { source?: unknown } | undefined)?.source;
+      const source: 'mic' | 'screen' | 'camera' =
+        producerSource === 'mic' || producerSource === 'screen' || producerSource === 'camera'
+          ? producerSource
+          : (producer.kind === 'audio' ? 'mic' : 'camera');
+
+      // Mute/deafen state must only gate microphone producers.
+      // Pausing screen/camera producers causes remote video frame freeze/black screen.
+      if (source !== 'mic') {
+        continue;
+      }
+
       if (isMuted || isDeafened) {
         await producer.pause();
       } else {
         await producer.resume();
       }
+
+      console.log('[WS DEBUG] Updated producer pause state from voice flags', {
+        userId: client.userId,
+        channel_id,
+        producerId: producer.id,
+        source,
+        paused: isMuted || isDeafened
+      });
     }
   }
 
@@ -806,6 +1380,20 @@ const handleJoinServer = async (client: ClientConnection, payload: { serverId: s
   
   const user = await getUserById(client.userId);
   if (!user) return;
+
+  const activeBan = await getMatchingActiveBan({
+    targetUserId: user.id,
+    targetPublicKey: user.public_key,
+    targetIp: normalizeIp(client.ipAddress)
+  });
+
+  if (activeBan) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message: activeBan.reason || 'You are banned from this server.' }
+    }));
+    return;
+  }
   
   if (server.welcomeChannelId) {
     const welcomeContent = `Just joined the server!`;
@@ -821,6 +1409,292 @@ const handleJoinServer = async (client: ClientConnection, payload: { serverId: s
   client.ws.send(JSON.stringify({
     type: 'SERVER_JOINED',
     payload: { serverId }
+  }));
+};
+
+const parseDeleteMode = (input: unknown): MessageDeleteMode => {
+  if (typeof input !== 'string') return 'none';
+  const normalized = input.trim().toLowerCase();
+  if (normalized === 'all') return 'all';
+  if (normalized === 'hours' || normalized === 'hour' || normalized === 'last_hour' || normalized === 'lasthour' || normalized === '1h') {
+    return 'hours';
+  }
+  return 'none';
+};
+
+const extractDeleteOptions = (payload: {
+  deleteMode?: unknown;
+  delete_mode?: unknown;
+  deleteHours?: unknown;
+  delete_hours?: unknown;
+  deleteLastHour?: unknown;
+  lastHour?: unknown;
+}) => {
+  const rawDeleteMode = payload?.deleteMode ?? payload?.delete_mode;
+  const inferredHoursMode = payload?.deleteLastHour === true || payload?.lastHour === true;
+  const deleteMode = inferredHoursMode ? 'hours' : parseDeleteMode(rawDeleteMode);
+
+  const rawDeleteHours = payload?.deleteHours ?? payload?.delete_hours;
+  const parsedHours =
+    typeof rawDeleteHours === 'number'
+      ? rawDeleteHours
+      : typeof rawDeleteHours === 'string'
+        ? Number(rawDeleteHours)
+        : undefined;
+
+  const deleteHours =
+    deleteMode === 'hours'
+      ? Math.max(1, Math.floor(Number.isFinite(parsedHours as number) ? (parsedHours as number) : 1))
+      : undefined;
+
+  return { deleteMode, deleteHours } as const;
+};
+
+const normalizeIp = (value?: string): string | null => {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('::ffff:')) {
+    return trimmed.slice('::ffff:'.length);
+  }
+  return trimmed;
+};
+
+const canModerate = (role: string): boolean => {
+  return role === 'admin' || role === 'owner' || role === 'mod' || role === 'moderator';
+};
+
+const handleKickMember = async (
+  client: ClientConnection,
+  payload: {
+    targetUserId: string;
+    reason?: string;
+    deleteMode?: MessageDeleteMode;
+    delete_mode?: MessageDeleteMode;
+    deleteHours?: number;
+    delete_hours?: number;
+    deleteLastHour?: boolean;
+    lastHour?: boolean;
+  }
+) => {
+  if (!client.userId) return;
+  const moderator = await getUserById(client.userId);
+  if (!moderator || !canModerate(moderator.role)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions' } }));
+    return;
+  }
+
+  const targetUserId = payload?.targetUserId;
+  if (!targetUserId || targetUserId === moderator.id) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid target user' } }));
+    return;
+  }
+
+  const targetUser = await getUserById(targetUserId);
+  if (!targetUser) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Target user not found' } }));
+    return;
+  }
+
+  const { deleteMode, deleteHours } = extractDeleteOptions(payload || {});
+  console.debug('[WS DEBUG] kick_member delete payload received', {
+    moderatorUserId: moderator.id,
+    targetUserId,
+    rawDeleteMode: payload?.deleteMode ?? payload?.delete_mode,
+    rawDeleteHours: payload?.deleteHours ?? payload?.delete_hours,
+    resolvedDeleteMode: deleteMode,
+    resolvedDeleteHours: deleteHours ?? null
+  });
+  const reason = (payload?.reason || '').trim() || 'You were kicked from this server.';
+  const targetIp = normalizeIp(connectionManager.getUserIp(targetUser.id) || targetUser.last_ip || undefined);
+
+  if (deleteMode !== 'none') {
+    await deleteMessagesByUser(targetUser.id, deleteMode, deleteHours);
+  }
+
+  const isOnlineNow = connectionManager.isUserOnline(targetUser.id);
+  await createModerationAction({
+    targetUserId: targetUser.id,
+    moderatorUserId: moderator.id,
+    actionType: 'kick',
+    reason,
+    deleteMode,
+    deleteHours,
+    targetIp,
+    enforced: isOnlineNow
+  });
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'member_removed',
+    payload: {
+      actionType: 'kick',
+      userId: targetUser.id,
+      reason,
+      deleteMode,
+      deleteHours: deleteHours || null,
+      targetIp
+    }
+  });
+
+  if (isOnlineNow) {
+    connectionManager.sendToUser(targetUser.id, {
+      type: 'moderation_action_enforced',
+      payload: {
+        actionType: 'kick',
+        reason,
+        deleteMode,
+        deleteHours: deleteHours || null,
+        blacklistIdentity: false,
+        blacklistIp: false,
+        targetIp
+      }
+    });
+    connectionManager.closeUserConnections(targetUser.id);
+  }
+
+  client.ws.send(JSON.stringify({
+    type: 'moderation_action_applied',
+    payload: {
+      actionType: 'kick',
+      targetUserId: targetUser.id,
+      enforcedImmediately: isOnlineNow,
+      reason,
+      deleteMode,
+      deleteHours: deleteHours || null,
+      targetIp
+    }
+  }));
+};
+
+const handleBanMember = async (
+  client: ClientConnection,
+  payload: {
+    targetUserId: string;
+    reason?: string;
+    deleteMode?: MessageDeleteMode;
+    delete_mode?: MessageDeleteMode;
+    deleteHours?: number;
+    delete_hours?: number;
+    deleteLastHour?: boolean;
+    lastHour?: boolean;
+    blacklistIdentity?: boolean;
+    blacklistIp?: boolean;
+  }
+) => {
+  if (!client.userId) return;
+  const moderator = await getUserById(client.userId);
+  if (!moderator || !canModerate(moderator.role)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions' } }));
+    return;
+  }
+
+  const targetUserId = payload?.targetUserId;
+  if (!targetUserId || targetUserId === moderator.id) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid target user' } }));
+    return;
+  }
+
+  const targetUser = await getUserById(targetUserId);
+  if (!targetUser) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Target user not found' } }));
+    return;
+  }
+
+  const { deleteMode, deleteHours } = extractDeleteOptions(payload || {});
+  console.debug('[WS DEBUG] ban_member delete payload received', {
+    moderatorUserId: moderator.id,
+    targetUserId,
+    rawDeleteMode: payload?.deleteMode ?? payload?.delete_mode,
+    rawDeleteHours: payload?.deleteHours ?? payload?.delete_hours,
+    resolvedDeleteMode: deleteMode,
+    resolvedDeleteHours: deleteHours ?? null
+  });
+  const reason = (payload?.reason || '').trim() || 'You were banned from this server.';
+  const blacklistIdentity = payload?.blacklistIdentity !== false;
+  const blacklistIp = payload?.blacklistIp === true;
+  const targetIp = normalizeIp(connectionManager.getUserIp(targetUser.id) || targetUser.last_ip || undefined);
+
+  if (!blacklistIdentity && !blacklistIp) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'At least one blacklist dimension is required' } }));
+    return;
+  }
+
+  if (blacklistIp && !targetIp) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Cannot apply IP blacklist without a known target IP' } }));
+    return;
+  }
+
+  if (deleteMode !== 'none') {
+    await deleteMessagesByUser(targetUser.id, deleteMode, deleteHours);
+  }
+
+  await createBanRule({
+    targetUserId: targetUser.id,
+    targetPublicKey: targetUser.public_key,
+    targetIp,
+    blacklistIdentity,
+    blacklistIp,
+    reason,
+    moderatorUserId: moderator.id
+  });
+
+  const isOnlineNow = connectionManager.isUserOnline(targetUser.id);
+  await createModerationAction({
+    targetUserId: targetUser.id,
+    moderatorUserId: moderator.id,
+    actionType: 'ban',
+    reason,
+    deleteMode,
+    deleteHours,
+    blacklistIdentity,
+    blacklistIp,
+    targetIp,
+    enforced: isOnlineNow
+  });
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'member_removed',
+    payload: {
+      actionType: 'ban',
+      userId: targetUser.id,
+      reason,
+      deleteMode,
+      deleteHours: deleteHours || null,
+      blacklistIdentity,
+      blacklistIp,
+      targetIp
+    }
+  });
+
+  if (isOnlineNow) {
+    connectionManager.sendToUser(targetUser.id, {
+      type: 'moderation_action_enforced',
+      payload: {
+        actionType: 'ban',
+        reason,
+        deleteMode,
+        deleteHours: deleteHours || null,
+        blacklistIdentity,
+        blacklistIp,
+        targetIp
+      }
+    });
+    connectionManager.closeUserConnections(targetUser.id);
+  }
+
+  client.ws.send(JSON.stringify({
+    type: 'moderation_action_applied',
+    payload: {
+      actionType: 'ban',
+      targetUserId: targetUser.id,
+      enforcedImmediately: isOnlineNow,
+      reason,
+      deleteMode,
+      deleteHours: deleteHours || null,
+      blacklistIdentity,
+      blacklistIp,
+      targetIp
+    }
   }));
 };
 

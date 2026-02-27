@@ -19,9 +19,22 @@ export interface Channel {
   id: string;
   category_id: string | null;
   name: string;
-  type: 'text' | 'voice' | 'rss';
+  type: 'text' | 'voice' | 'rss' | 'folder';
   position: number;
   feed_url?: string | null;
+}
+
+export interface FolderChannelFile {
+  id: string;
+  channel_id: string;
+  original_name: string;
+  storage_name?: string;
+  mime_type: string | null;
+  size_bytes: number;
+  uploader_user_id: string;
+  uploader_username?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Message {
@@ -31,6 +44,23 @@ export interface Message {
   content: string;
   created_at: string;
   user?: User;
+}
+
+interface ChannelUnreadState {
+  channel_id: string;
+  unread: boolean | number;
+  last_read_message_id?: string | null;
+  last_read_message_created_at?: string | null;
+  latest_message_id?: string | null;
+  latest_message_created_at?: string | null;
+}
+
+interface ChannelMessagePageState {
+  hasMore: boolean;
+  isLoading: boolean;
+  oldestMessageCreatedAt: string | null;
+  oldestMessageId: string | null;
+  initialized: boolean;
 }
 
 export interface SavedConnection {
@@ -49,8 +79,16 @@ export interface Server {
 }
 
 export interface ActiveMainPanel {
-  type: 'text' | 'voice';
+  type: 'text' | 'voice' | 'folder';
   channelId: string | null;
+}
+
+export type ModerationDeleteMode = 'none' | 'hours' | 'all';
+
+export interface ModerationNotice {
+  title: string;
+  message: string;
+  action: 'kick' | 'ban';
 }
 
 const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
@@ -119,6 +157,26 @@ const signChallenge = async (privateKey: CryptoKey, challenge: string) => {
   return arrayBufferToHex(signature);
 };
 
+const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
+  'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx',
+  'html', 'htm', 'php', 'phtml',
+  'exe', 'dll', 'so', 'com', 'scr', 'msi',
+  'py', 'pyw', 'python',
+  'sh', 'bash', 'zsh',
+  'bat', 'cmd',
+  'ps1', 'psm1',
+  'vbs', 'vbe', 'wsf', 'wsh',
+  'jar', 'appimage'
+]);
+
+const getBlockedFolderUploadExtension = (fileName: string) => {
+  const extension = fileName.split('.').pop()?.trim().toLowerCase() || '';
+  if (!extension) {
+    return null;
+  }
+  return BLOCKED_FOLDER_UPLOAD_EXTENSIONS.has(extension) ? extension : null;
+};
+
 export const useChatStore = defineStore('chat', () => {
   const ws = ref<WebSocket | null>(null);
   const isConnected = ref(false);
@@ -137,10 +195,15 @@ export const useChatStore = defineStore('chat', () => {
   const localUsername = ref<string | null>(localStorage.getItem('username'));
   const users = ref<User[]>([]);
   const onlineUserIds = ref<Set<string>>(new Set());
+  const memberIps = ref<Record<string, string>>({});
+  const moderationNotice = ref<ModerationNotice | null>(null);
   
   const categories = ref<Category[]>([]);
   const channels = ref<Channel[]>([]);
   const messages = ref<Record<string, Message[]>>({}); // channel_id -> Message[]
+  const folderFiles = ref<Record<string, FolderChannelFile[]>>({});
+  const messagePageState = ref<Record<string, ChannelMessagePageState>>({});
+  const unreadChannelIds = ref<Set<string>>(new Set());
   
   const activeChannelId = ref<string | null>(null);
   const activeMainPanel = ref<ActiveMainPanel>({ type: 'text', channelId: null });
@@ -150,6 +213,7 @@ export const useChatStore = defineStore('chat', () => {
   let reconnectTimer: number | null = null;
   let reconnectAttempts = 0;
   let isIntentionalDisconnect = false;
+  const lastMarkedReadMessageByChannel = ref<Record<string, string>>({});
 
   const saveLocalUsername = (username: string) => {
     localUsername.value = username;
@@ -459,6 +523,10 @@ export const useChatStore = defineStore('chat', () => {
     activeChannelId.value = null;
     activeMainPanel.value = { type: 'text', channelId: null };
     messages.value = {};
+    folderFiles.value = {};
+    messagePageState.value = {};
+    unreadChannelIds.value = new Set();
+    lastMarkedReadMessageByChannel.value = {};
     users.value = [];
     onlineUserIds.value.clear();
     currentUser.value = null;
@@ -479,12 +547,147 @@ export const useChatStore = defineStore('chat', () => {
     }
   };
 
+  const removeCurrentServerAndFallback = () => {
+    const removedConnectionId = activeConnectionId.value;
+    if (!removedConnectionId) {
+      disconnect();
+      return;
+    }
+
+    const currentConnection = savedConnections.value.find((c) => c.id === removedConnectionId);
+    savedConnections.value = savedConnections.value.filter((c) => c.id !== removedConnectionId);
+    localStorage.setItem('savedConnections', JSON.stringify(savedConnections.value));
+
+    const lastUsedServer = localStorage.getItem('lastUsedServer');
+    if (currentConnection && lastUsedServer === currentConnection.address) {
+      const fallbackConnection = savedConnections.value[0];
+      if (fallbackConnection) {
+        localStorage.setItem('lastUsedServer', fallbackConnection.address);
+      } else {
+        localStorage.removeItem('lastUsedServer');
+      }
+    }
+
+    const fallbackConnection = savedConnections.value[0];
+    disconnect();
+
+    if (fallbackConnection) {
+      connect(fallbackConnection.address);
+    }
+  };
+
   const addMessageListener = (listener: (message: any) => void) => {
     messageListeners.value.push(listener);
   };
 
+  const createDefaultMessagePageState = (): ChannelMessagePageState => ({
+    hasMore: false,
+    isLoading: false,
+    oldestMessageCreatedAt: null,
+    oldestMessageId: null,
+    initialized: false
+  });
+
+  const ensureMessagePageState = (channelId: string): ChannelMessagePageState => {
+    if (!messagePageState.value[channelId]) {
+      messagePageState.value[channelId] = createDefaultMessagePageState();
+    }
+    return messagePageState.value[channelId]!;
+  };
+
+  const isUnreadEligibleChannel = (channel: Channel | undefined) => {
+    return channel?.type === 'text' || channel?.type === 'rss';
+  };
+
+  const markChannelUnread = (channelId: string) => {
+    const channel = channels.value.find((c) => c.id === channelId);
+    if (!isUnreadEligibleChannel(channel)) {
+      return;
+    }
+
+    if (activeMainPanel.value.type === 'text' && activeMainPanel.value.channelId === channelId) {
+      return;
+    }
+
+    const next = new Set(unreadChannelIds.value);
+    next.add(channelId);
+    unreadChannelIds.value = next;
+  };
+
+  const clearChannelUnread = (channelId: string) => {
+    if (!unreadChannelIds.value.has(channelId)) {
+      return;
+    }
+
+    const next = new Set(unreadChannelIds.value);
+    next.delete(channelId);
+    unreadChannelIds.value = next;
+  };
+
+  const markChannelReadOnServer = (channelId: string, message: Message | null | undefined) => {
+    if (!message?.id || !message?.created_at) {
+      return;
+    }
+
+    if (lastMarkedReadMessageByChannel.value[channelId] === message.id) {
+      return;
+    }
+
+    lastMarkedReadMessageByChannel.value = {
+      ...lastMarkedReadMessageByChannel.value,
+      [channelId]: message.id
+    };
+
+    send('mark_channel_read', {
+      channel_id: channelId,
+      last_read_message_id: message.id,
+      last_read_message_created_at: message.created_at
+    });
+  };
+
+  const markActiveChannelReadFromMessages = (channelId: string) => {
+    if (activeMainPanel.value.type !== 'text' || activeMainPanel.value.channelId !== channelId) {
+      return;
+    }
+
+    const channelMessages = messages.value[channelId] || [];
+    const lastMessage = channelMessages.length > 0 ? channelMessages[channelMessages.length - 1] : null;
+    clearChannelUnread(channelId);
+    markChannelReadOnServer(channelId, lastMessage);
+  };
+
+  const applyUnreadStatesFromServer = (incomingStates: ChannelUnreadState[] | undefined) => {
+    if (!incomingStates) return;
+
+    const unreadIds = incomingStates
+      .filter((state) => state && (state.unread === true || state.unread === 1))
+      .map((state) => state.channel_id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+
+    unreadChannelIds.value = new Set(unreadIds);
+  };
+
+  const pruneUnreadChannels = (availableChannels: Channel[]) => {
+    const allowedIds = new Set(
+      availableChannels
+        .filter((c) => c.type === 'text' || c.type === 'rss')
+        .map((c) => c.id)
+    );
+
+    unreadChannelIds.value = new Set(
+      Array.from(unreadChannelIds.value).filter((id) => allowedIds.has(id))
+    );
+  };
+
   const removeMessageListener = (listener: (message: any) => void) => {
     messageListeners.value = messageListeners.value.filter(l => l !== listener);
+  };
+
+  const playNewMessageNotificationSound = () => {
+    const audio = new Audio('/wav/new_notification.mp3');
+    void audio.play().catch((error) => {
+      console.debug('[Chat][sound] new message notification playback blocked/failed', error);
+    });
   };
 
   const handleMessage = async (message: any) => {
@@ -525,7 +728,48 @@ export const useChatStore = defineStore('chat', () => {
       case 'member_list':
         users.value = payload.members;
         onlineUserIds.value = new Set(payload.onlineUserIds);
+        memberIps.value = payload.memberIps || {};
         break;
+
+      case 'member_removed': {
+        const removedUserId = (payload.userId || payload.targetUserId) as string | undefined;
+        if (!removedUserId) break;
+        users.value = users.value.filter((u) => u.id !== removedUserId);
+        onlineUserIds.value.delete(removedUserId);
+        if (memberIps.value[removedUserId]) {
+          const nextIps = { ...memberIps.value };
+          delete nextIps[removedUserId];
+          memberIps.value = nextIps;
+        }
+        break;
+      }
+
+      case 'moderation_action_enforced': {
+        const incomingAction = payload.actionType || payload.action;
+        const action = incomingAction === 'ban' ? 'ban' : 'kick';
+        const reasonText = payload.reason ? ` Reason: ${payload.reason}` : '';
+        moderationNotice.value = {
+          action,
+          title: action === 'ban' ? 'You were banned' : 'You were kicked',
+          message:
+            action === 'ban'
+              ? `A moderator banned you from this server.${reasonText}`
+              : `A moderator kicked you from this server.${reasonText}`
+        };
+        removeCurrentServerAndFallback();
+        break;
+      }
+
+      case 'auth:banned': {
+        const reasonText = payload?.reason ? ` Reason: ${payload.reason}` : '';
+        moderationNotice.value = {
+          action: 'ban',
+          title: 'Access denied (banned)',
+          message: `You are banned from this server.${reasonText}`
+        };
+        removeCurrentServerAndFallback();
+        break;
+      }
         
       case 'user_online':
         onlineUserIds.value.add(payload.user.id);
@@ -554,6 +798,8 @@ export const useChatStore = defineStore('chat', () => {
       case 'channels_list':
         categories.value = payload.categories;
         channels.value = payload.channels;
+        applyUnreadStatesFromServer(payload.unreadStates as ChannelUnreadState[] | undefined);
+        pruneUnreadChannels(payload.channels || []);
         
         if (!activeChannelId.value) {
           setFallbackActiveTextChannel(payload.channels || []);
@@ -579,25 +825,127 @@ export const useChatStore = defineStore('chat', () => {
         const deletedChannel = channels.value.find((c: Channel) => c.id === deletedChannelId);
         channels.value = channels.value.filter((c: Channel) => c.id !== deletedChannelId);
         delete messages.value[deletedChannelId];
+        delete folderFiles.value[deletedChannelId];
+        delete messagePageState.value[deletedChannelId];
+        clearChannelUnread(deletedChannelId);
 
         if ((deletedChannel?.type === 'text' || deletedChannel?.type === 'rss') && activeChannelId.value === deletedChannelId) {
+          setFallbackActiveTextChannel(channels.value);
+        } else if (deletedChannel?.type === 'folder' && activeMainPanel.value.type === 'folder' && activeMainPanel.value.channelId === deletedChannelId) {
           setFallbackActiveTextChannel(channels.value);
         } else if (deletedChannel?.type === 'voice' && activeMainPanel.value.type === 'voice' && activeMainPanel.value.channelId === deletedChannelId) {
           setFallbackActiveTextChannel(channels.value);
         }
         break;
       }
-        
-      case 'messages_list':
-        messages.value[payload.channel_id] = payload.messages;
+
+      case 'folder_files_list': {
+        const channelId = payload.channel_id as string;
+        if (!channelId) break;
+        folderFiles.value[channelId] = Array.isArray(payload.files) ? payload.files : [];
         break;
+      }
+
+      case 'folder_file_uploaded': {
+        const channelId = payload.channel_id as string;
+        const file = payload.file as FolderChannelFile | undefined;
+        if (!channelId || !file?.id) break;
+        const existing = folderFiles.value[channelId] || [];
+        if (existing.some((f) => f.id === file.id)) {
+          break;
+        }
+        folderFiles.value[channelId] = [file, ...existing];
+        break;
+      }
+
+      case 'folder_file_deleted': {
+        const channelId = payload.channel_id as string;
+        const fileId = payload.file_id as string;
+        if (!channelId || !fileId) break;
+
+        const existing = folderFiles.value[channelId] || [];
+        folderFiles.value[channelId] = existing.filter((file) => file.id !== fileId);
+        break;
+      }
+
+      case 'folder_file_download': {
+        const file = payload.file as { original_name?: string; mime_type?: string | null } | undefined;
+        const dataBase64 = payload.data_base64 as string | undefined;
+        if (!file?.original_name || !dataBase64) break;
+
+        const binary = atob(dataBase64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+
+        const blob = new Blob([bytes], { type: file.mime_type || 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = file.original_name;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+        break;
+      }
+        
+      case 'messages_list': {
+        const channelId = payload.channel_id as string;
+        const pageState = ensureMessagePageState(channelId);
+        const incomingMessages = (payload.messages || []) as Message[];
+        const isOlderPage = payload.is_older_page === true;
+
+        if (isOlderPage) {
+          const existingMessages = messages.value[channelId] || [];
+          const seen = new Set<string>();
+          const merged: Message[] = [];
+
+          for (const message of [...incomingMessages, ...existingMessages]) {
+            if (!message?.id || seen.has(message.id)) {
+              continue;
+            }
+            seen.add(message.id);
+            merged.push(message);
+          }
+
+          messages.value[channelId] = merged;
+        } else {
+          messages.value[channelId] = incomingMessages;
+        }
+
+        pageState.hasMore = payload.has_more === true;
+        pageState.oldestMessageCreatedAt = typeof payload.before_created_at === 'string' ? payload.before_created_at : null;
+        pageState.oldestMessageId = typeof payload.before_id === 'string' ? payload.before_id : null;
+        pageState.initialized = true;
+        pageState.isLoading = false;
+        markActiveChannelReadFromMessages(channelId);
+        break;
+      }
         
       case 'new_message':
         const msg = payload.message;
+        const pageState = ensureMessagePageState(msg.channel_id);
+        const alreadyPresent = Boolean(messages.value[msg.channel_id]?.some((existing) => existing.id === msg.id));
         if (!messages.value[msg.channel_id]) {
           messages.value[msg.channel_id] = [];
         }
-        messages.value[msg.channel_id]?.push(msg);
+        if (!alreadyPresent) {
+          messages.value[msg.channel_id]?.push(msg);
+          if (msg.user_id !== currentUser.value?.id) {
+            playNewMessageNotificationSound();
+          }
+        }
+        if (!pageState.initialized) {
+          pageState.initialized = true;
+        }
+        if (activeMainPanel.value.type === 'text' && activeMainPanel.value.channelId === msg.channel_id) {
+          markChannelReadOnServer(msg.channel_id, msg);
+          clearChannelUnread(msg.channel_id);
+        } else {
+          markChannelUnread(msg.channel_id);
+        }
         break;
         
       case 'error':
@@ -637,6 +985,7 @@ export const useChatStore = defineStore('chat', () => {
     if (firstTextChannel) {
       activeChannelId.value = firstTextChannel.id;
       activeMainPanel.value = { type: 'text', channelId: firstTextChannel.id };
+      clearChannelUnread(firstTextChannel.id);
       getMessages(firstTextChannel.id);
     } else {
       activeChannelId.value = null;
@@ -644,7 +993,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   };
 
-  const createChannel = (category_id: string | null, name: string, type: 'text' | 'voice' | 'rss', feed_url?: string) => {
+  const createChannel = (category_id: string | null, name: string, type: 'text' | 'voice' | 'rss' | 'folder', feed_url?: string) => {
     if (!name.trim()) {
       lastError.value = 'Channel name is required';
       return;
@@ -685,7 +1034,38 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const getMessages = (channel_id: string) => {
+    const pageState = ensureMessagePageState(channel_id);
+    pageState.isLoading = true;
     send('get_messages', { channel_id });
+  };
+
+  const loadOlderMessages = (channel_id: string) => {
+    const pageState = ensureMessagePageState(channel_id);
+    if (pageState.isLoading || !pageState.initialized || !pageState.hasMore) {
+      return false;
+    }
+
+    if (!pageState.oldestMessageCreatedAt || !pageState.oldestMessageId) {
+      pageState.hasMore = false;
+      return false;
+    }
+
+    pageState.isLoading = true;
+    send('get_messages', {
+      channel_id,
+      before_created_at: pageState.oldestMessageCreatedAt,
+      before_id: pageState.oldestMessageId
+    });
+    return true;
+  };
+
+  const isLoadingMessagesForChannel = (channel_id: string) => {
+    return ensureMessagePageState(channel_id).isLoading;
+  };
+
+  const hasOlderMessagesForChannel = (channel_id: string) => {
+    const state = ensureMessagePageState(channel_id);
+    return state.initialized && state.hasMore;
   };
 
   const submitAdminKey = (key: string) => {
@@ -696,10 +1076,149 @@ export const useChatStore = defineStore('chat', () => {
     send('send_message', { channel_id, content });
   };
 
+  const kickMember = (targetUserId: string, options: { reason?: string; deleteMode?: ModerationDeleteMode; deleteHours?: number }) => {
+    const reason = (options.reason || '').trim();
+    const deleteMode = options.deleteMode || 'none';
+    const payload: {
+      targetUserId: string;
+      reason?: string;
+      deleteMode?: ModerationDeleteMode;
+      deleteHours?: number;
+    } = {
+      targetUserId,
+      deleteMode
+    };
+
+    if (reason) {
+      payload.reason = reason;
+    }
+    if (deleteMode === 'hours' && typeof options.deleteHours === 'number' && options.deleteHours > 0) {
+      payload.deleteHours = options.deleteHours;
+    }
+
+    users.value = users.value.filter((u) => u.id !== targetUserId);
+    onlineUserIds.value.delete(targetUserId);
+    console.debug('[WS DEBUG] Sending kick_member', {
+      targetUserId: payload.targetUserId,
+      deleteMode: payload.deleteMode,
+      deleteHours: payload.deleteHours ?? null,
+      hasReason: Boolean(payload.reason)
+    });
+    send('kick_member', payload);
+  };
+
+  const banMember = (
+    targetUserId: string,
+    options: {
+      reason?: string;
+      deleteMode?: ModerationDeleteMode;
+      deleteHours?: number;
+      blacklistIdentity?: boolean;
+      blacklistIp?: boolean;
+    }
+  ) => {
+    const reason = (options.reason || '').trim();
+    const deleteMode = options.deleteMode || 'none';
+    const payload: {
+      targetUserId: string;
+      reason?: string;
+      deleteMode?: ModerationDeleteMode;
+      deleteHours?: number;
+      blacklistIdentity?: boolean;
+      blacklistIp?: boolean;
+    } = {
+      targetUserId,
+      deleteMode
+    };
+
+    if (reason) {
+      payload.reason = reason;
+    }
+    if (deleteMode === 'hours' && typeof options.deleteHours === 'number' && options.deleteHours > 0) {
+      payload.deleteHours = options.deleteHours;
+    }
+    if (options.blacklistIdentity) {
+      payload.blacklistIdentity = true;
+    }
+    if (options.blacklistIp) {
+      payload.blacklistIp = true;
+    }
+
+    users.value = users.value.filter((u) => u.id !== targetUserId);
+    onlineUserIds.value.delete(targetUserId);
+    console.debug('[WS DEBUG] Sending ban_member', {
+      targetUserId: payload.targetUserId,
+      deleteMode: payload.deleteMode,
+      deleteHours: payload.deleteHours ?? null,
+      blacklistIdentity: payload.blacklistIdentity === true,
+      blacklistIp: payload.blacklistIp === true,
+      hasReason: Boolean(payload.reason)
+    });
+    send('ban_member', payload);
+  };
+
+  const clearModerationNotice = () => {
+    moderationNotice.value = null;
+  };
+
   const setActiveChannel = (channel_id: string) => {
     activeChannelId.value = channel_id;
+    const channel = channels.value.find((c) => c.id === channel_id);
+    if (channel?.type === 'folder') {
+      activeMainPanel.value = { type: 'folder', channelId: channel_id };
+      requestFolderFiles(channel_id);
+      return;
+    }
+
     activeMainPanel.value = { type: 'text', channelId: channel_id };
+    clearChannelUnread(channel_id);
     getMessages(channel_id);
+  };
+
+  const requestFolderFiles = (channel_id: string) => {
+    send('folder_list_files', { channel_id });
+  };
+
+  const uploadFolderFile = async (channel_id: string, file: File) => {
+    const blockedExtension = getBlockedFolderUploadExtension(file.name);
+    if (blockedExtension) {
+      throw new Error(`Upload blocked: .${blockedExtension} files are not allowed in folder channels.`);
+    }
+
+    const dataBase64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = typeof reader.result === 'string' ? reader.result : '';
+        const base64 = result.includes(',') ? result.split(',')[1] : result;
+        if (!base64) {
+          reject(new Error('Failed to read file'));
+          return;
+        }
+        resolve(base64);
+      };
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    });
+
+    send('folder_upload_file', {
+      channel_id,
+      file_name: file.name,
+      mime_type: file.type || 'application/octet-stream',
+      data_base64: dataBase64
+    });
+  };
+
+  const downloadFolderFile = (channel_id: string, file_id: string) => {
+    send('folder_download_file', { channel_id, file_id });
+  };
+
+  const deleteFolderFile = (channel_id: string, file_id: string) => {
+    if (!channel_id || !file_id) {
+      lastError.value = 'Channel ID and file ID are required';
+      return;
+    }
+
+    send('folder_delete_file', { channel_id, file_id });
   };
 
   const setActiveVoicePanel = (channel_id: string) => {
@@ -715,7 +1234,7 @@ export const useChatStore = defineStore('chat', () => {
   });
 
   const activeChannelMessages = computed(() => {
-    if (!activeChannelId.value) return [];
+    if (activeMainPanel.value.type !== 'text' || !activeChannelId.value) return [];
     return messages.value[activeChannelId.value] || [];
   });
 
@@ -730,9 +1249,13 @@ export const useChatStore = defineStore('chat', () => {
     localUsername,
     users,
     onlineUserIds,
+    memberIps,
+    moderationNotice,
     categories,
     channels,
     messages,
+    folderFiles,
+    unreadChannelIds,
     activeChannelId,
     activeMainPanel,
     activeServerChannels,
@@ -750,9 +1273,19 @@ export const useChatStore = defineStore('chat', () => {
     updateServerSettings,
     clearError,
     sendMessage,
+    loadOlderMessages,
+    isLoadingMessagesForChannel,
+    hasOlderMessagesForChannel,
+    kickMember,
+    banMember,
+    clearModerationNotice,
     submitAdminKey,
     setActiveChannel,
     setActiveVoicePanel,
+    requestFolderFiles,
+    uploadFolderFile,
+    downloadFolderFile,
+    deleteFolderFile,
     send,
     ws,
     addMessageListener,
