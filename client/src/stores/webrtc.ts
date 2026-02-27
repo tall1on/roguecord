@@ -3,6 +3,8 @@ import { ref, shallowRef, watch } from 'vue';
 import { Device } from 'mediasoup-client';
 import { useChatStore } from './chat';
 
+type MediaSourceType = 'mic' | 'screen' | 'camera';
+
 export const useWebRtcStore = defineStore('webrtc', () => {
   const chatStore = useChatStore();
   
@@ -10,6 +12,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const sendTransport = shallowRef<any | null>(null);
   const recvTransport = shallowRef<any | null>(null);
   const producer = shallowRef<any | null>(null);
+  const screenProducer = shallowRef<any | null>(null);
+  const screenShareStream = shallowRef<MediaStream | null>(null);
   const consumers = shallowRef<Map<string, any>>(new Map());
   
   const activeVoiceChannelId = ref<string | null>(null);
@@ -22,7 +26,101 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const audioElements = new Map<string, HTMLAudioElement>();
   
   const producerToUser = new Map<string, string>();
+  const producerToSource = new Map<string, MediaSourceType>();
   const consumerToProducer = new Map<string, string>();
+  const userScreenStreams = shallowRef<Map<string, MediaStream>>(new Map());
+
+  const cleanupScreenShareProducer = () => {
+    if (screenProducer.value) {
+      try {
+        screenProducer.value.close();
+      } catch (_e) {
+        // no-op
+      }
+      screenProducer.value = null;
+    }
+
+    if (screenShareStream.value) {
+      screenShareStream.value.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (_e) {
+          // no-op
+        }
+      });
+      screenShareStream.value = null;
+    }
+  };
+
+  const removeUserScreenByProducer = (producerId: string) => {
+    const source = producerToSource.get(producerId);
+    if (source !== 'screen') return;
+
+    const userId = producerToUser.get(producerId);
+    if (!userId) return;
+
+    let hasAnotherScreenProducer = false;
+    for (const [otherProducerId, otherUserId] of producerToUser.entries()) {
+      if (otherProducerId !== producerId && otherUserId === userId && producerToSource.get(otherProducerId) === 'screen') {
+        hasAnotherScreenProducer = true;
+        break;
+      }
+    }
+
+    if (!hasAnotherScreenProducer) {
+      const existing = userScreenStreams.value.get(userId);
+      if (existing) {
+        existing.getTracks().forEach((track) => {
+          try {
+            track.stop();
+          } catch (_e) {
+            // no-op
+          }
+        });
+      }
+      userScreenStreams.value.delete(userId);
+      userScreenStreams.value = new Map(userScreenStreams.value);
+    }
+  };
+
+  const stopScreenShare = () => {
+    cleanupScreenShareProducer();
+  };
+
+  const startScreenShare = async () => {
+    if (!activeVoiceChannelId.value || !sendTransport.value) return;
+    if (screenProducer.value) return;
+
+    try {
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false
+      });
+
+      const videoTrack = displayStream.getVideoTracks()[0];
+      if (!videoTrack) {
+        displayStream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+
+      screenShareStream.value = displayStream;
+      videoTrack.onended = () => {
+        stopScreenShare();
+      };
+
+      screenProducer.value = await sendTransport.value.produce({
+        track: videoTrack,
+        appData: { source: 'screen' as MediaSourceType }
+      });
+
+      screenProducer.value.on('transportclose', () => {
+        cleanupScreenShareProducer();
+      });
+    } catch (error) {
+      console.error('Failed to start screen share:', error);
+      cleanupScreenShareProducer();
+    }
+  };
 
   const speakingUserIds = ref<Set<string>>(new Set());
   const speakingDetectors = new Map<string, {
@@ -383,6 +481,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     
     chatStore.send('leave_voice_channel', { channel_id: activeVoiceChannelId.value });
     
+    cleanupScreenShareProducer();
+
     if (localStream.value) {
       localStream.value.getTracks().forEach(track => track.stop());
       localStream.value = null;
@@ -418,7 +518,19 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     audioElements.clear();
     
     producerToUser.clear();
+    producerToSource.clear();
     consumerToProducer.clear();
+    userScreenStreams.value.forEach((stream) => {
+      stream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (_e) {
+          // no-op
+        }
+      });
+    });
+    userScreenStreams.value.clear();
+    userScreenStreams.value = new Map(userScreenStreams.value);
     
     remoteStreams.value.clear();
     voiceParticipants.value = [];
@@ -505,7 +617,9 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           for (const [prodId, userId] of producerToUser.entries()) {
             if (userId === payload.user_id) {
               producersToRemove.add(prodId);
+              removeUserScreenByProducer(prodId);
               producerToUser.delete(prodId);
+              producerToSource.delete(prodId);
             }
           }
           
@@ -585,11 +699,13 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           });
           
           sendTransport.value.on('produce', async ({ kind, rtpParameters }: any, callback: any, _errback: any) => {
+            const inferredSource: MediaSourceType = kind === 'audio' ? 'mic' : 'camera';
             chatStore.send('produce', {
               channel_id: payload.channel_id,
               transport_id: sendTransport.value!.id,
               kind,
-              rtpParameters
+              rtpParameters,
+              source: inferredSource
             });
             
             // We need the producer ID from the server
@@ -688,7 +804,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       case 'new_producer':
         if (payload.channel_id !== activeVoiceChannelId.value || !device.value || !recvTransport.value) return;
         
-        producerToUser.set(payload.producer_id, payload.user_id);
+          producerToUser.set(payload.producer_id, payload.user_id);
+          producerToSource.set(payload.producer_id, (payload.source as MediaSourceType | undefined) || (payload.kind === 'audio' ? 'mic' : 'camera'));
         
         chatStore.send('consume', {
           channel_id: payload.channel_id,
@@ -713,12 +830,16 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           consumerToProducer.set(consumer.id, payload.producer_id);
 
           const remoteUserId = producerToUser.get(payload.producer_id);
+          const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind === 'audio' ? 'mic' : 'camera') as MediaSourceType);
           
           consumer.on('producerclose', () => {
             consumers.value.delete(consumer.id);
             remoteStreams.value.delete(consumer.id);
             remoteStreams.value = new Map(remoteStreams.value);
             removeSpeakingDetector(consumer.id);
+            removeUserScreenByProducer(payload.producer_id);
+            producerToUser.delete(payload.producer_id);
+            producerToSource.delete(payload.producer_id);
             const audio = audioElements.get(consumer.id);
             if (audio) {
               audio.pause();
@@ -731,7 +852,12 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           stream.addTrack(consumer.track);
 
           if (remoteUserId) {
-            addSpeakingDetector(consumer.id, remoteUserId, stream);
+            if (remoteSource === 'screen') {
+              userScreenStreams.value.set(remoteUserId, stream);
+              userScreenStreams.value = new Map(userScreenStreams.value);
+            } else if (payload.kind === 'audio') {
+              addSpeakingDetector(consumer.id, remoteUserId, stream);
+            }
           }
           
           // Store the stream with the producer ID or user ID
@@ -739,14 +865,16 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           remoteStreams.value.set(consumer.id, stream);
           
           // Play audio
-          const audio = new Audio();
-          audio.srcObject = stream;
-          audio.autoplay = true;
-          if (isDeafened.value) {
-            audio.muted = true;
+          if (payload.kind === 'audio') {
+            const audio = new Audio();
+            audio.srcObject = stream;
+            audio.autoplay = true;
+            if (isDeafened.value) {
+              audio.muted = true;
+            }
+            audio.play().catch(e => console.error('Audio play failed:', e));
+            audioElements.set(consumer.id, audio);
           }
-          audio.play().catch(e => console.error('Audio play failed:', e));
-          audioElements.set(consumer.id, audio);
           
           // Trigger reactivity
           remoteStreams.value = new Map(remoteStreams.value);
@@ -783,6 +911,9 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     speakingUserIds,
     localStream,
     remoteStreams,
+    userScreenStreams,
+    screenShareStream,
+    screenProducer,
     ping,
     bandwidth,
     pingHistory,
@@ -793,6 +924,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     leaveVoiceChannel,
     isUserSpeaking,
     toggleMute,
-    toggleDeafen
+    toggleDeafen,
+    startScreenShare,
+    stopScreenShare
   };
 });
