@@ -73,6 +73,7 @@ export interface User {
   username: string;
   public_key: string;
   avatar_url: string | null;
+  last_ip: string | null;
   role: string;
   created_at: string;
 }
@@ -133,6 +134,10 @@ export const getOrCreateRssBotUser = async (): Promise<User> => {
 
 export const updateUserRole = async (id: string, role: string): Promise<void> => {
   await dbRun('UPDATE users SET role = ? WHERE id = ?', [role, id]);
+};
+
+export const updateUserLastIp = async (id: string, ipAddress: string | null): Promise<void> => {
+  await dbRun('UPDATE users SET last_ip = ? WHERE id = ?', [ipAddress, id]);
 };
 
 // --- Categories ---
@@ -210,10 +215,199 @@ export interface MessageWithUser extends Message {
   user: User;
 }
 
+export type ModerationActionType = 'kick' | 'ban';
+export type MessageDeleteMode = 'none' | 'hours' | 'all';
+
+export interface ModerationAction {
+  id: string;
+  target_user_id: string;
+  moderator_user_id: string;
+  action_type: ModerationActionType;
+  reason: string | null;
+  delete_mode: MessageDeleteMode;
+  delete_hours: number | null;
+  blacklist_identity: number;
+  blacklist_ip: number;
+  target_ip: string | null;
+  enforced: number;
+  created_at: string;
+  enforced_at: string | null;
+}
+
+export interface BanRule {
+  id: string;
+  target_user_id: string | null;
+  target_public_key: string | null;
+  target_ip: string | null;
+  blacklist_identity: number;
+  blacklist_ip: number;
+  reason: string | null;
+  moderator_user_id: string;
+  active: number;
+  created_at: string;
+  revoked_at: string | null;
+}
+
 export const createMessage = async (channel_id: string, user_id: string, content: string): Promise<Message> => {
   const id = crypto.randomUUID();
   await dbRun('INSERT INTO messages (id, channel_id, user_id, content) VALUES (?, ?, ?, ?)', [id, channel_id, user_id, content]);
   return (await dbGet<Message>('SELECT * FROM messages WHERE id = ?', [id]))!;
+};
+
+export const deleteMessagesByUser = async (userId: string, mode: MessageDeleteMode, hours?: number): Promise<void> => {
+  if (mode === 'all') {
+    await dbRun('DELETE FROM messages WHERE user_id = ?', [userId]);
+    return;
+  }
+
+  if (mode === 'hours') {
+    const normalizedHours = Math.max(1, Math.floor(hours || 0));
+    await dbRun(
+      "DELETE FROM messages WHERE user_id = ? AND created_at >= datetime('now', ?)",
+      [userId, `-${normalizedHours} hours`]
+    );
+  }
+};
+
+export const createModerationAction = async (input: {
+  targetUserId: string;
+  moderatorUserId: string;
+  actionType: ModerationActionType;
+  reason?: string | null;
+  deleteMode: MessageDeleteMode;
+  deleteHours?: number | null;
+  blacklistIdentity?: boolean;
+  blacklistIp?: boolean;
+  targetIp?: string | null;
+  enforced?: boolean;
+}): Promise<ModerationAction> => {
+  const id = crypto.randomUUID();
+  const enforcedValue = input.enforced ? 1 : 0;
+  await dbRun(
+    `
+      INSERT INTO moderation_actions (
+        id,
+        target_user_id,
+        moderator_user_id,
+        action_type,
+        reason,
+        delete_mode,
+        delete_hours,
+        blacklist_identity,
+        blacklist_ip,
+        target_ip,
+        enforced,
+        enforced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END)
+    `,
+    [
+      id,
+      input.targetUserId,
+      input.moderatorUserId,
+      input.actionType,
+      input.reason || null,
+      input.deleteMode,
+      input.deleteMode === 'hours' ? Math.max(1, Math.floor(input.deleteHours || 1)) : null,
+      input.blacklistIdentity ? 1 : 0,
+      input.blacklistIp ? 1 : 0,
+      input.targetIp || null,
+      enforcedValue,
+      enforcedValue
+    ]
+  );
+
+  return (await dbGet<ModerationAction>('SELECT * FROM moderation_actions WHERE id = ?', [id]))!;
+};
+
+export const markModerationActionEnforced = async (actionId: string): Promise<void> => {
+  await dbRun('UPDATE moderation_actions SET enforced = 1, enforced_at = CURRENT_TIMESTAMP WHERE id = ?', [actionId]);
+};
+
+export const getPendingModerationActions = async (userId: string): Promise<ModerationAction[]> => {
+  return dbAll<ModerationAction>(
+    'SELECT * FROM moderation_actions WHERE target_user_id = ? AND enforced = 0 ORDER BY created_at ASC',
+    [userId]
+  );
+};
+
+export const createBanRule = async (input: {
+  targetUserId?: string | null;
+  targetPublicKey?: string | null;
+  targetIp?: string | null;
+  blacklistIdentity: boolean;
+  blacklistIp: boolean;
+  reason?: string | null;
+  moderatorUserId: string;
+}): Promise<BanRule> => {
+  const id = crypto.randomUUID();
+  await dbRun(
+    `
+      INSERT INTO ban_rules (
+        id,
+        target_user_id,
+        target_public_key,
+        target_ip,
+        blacklist_identity,
+        blacklist_ip,
+        reason,
+        moderator_user_id,
+        active
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+    `,
+    [
+      id,
+      input.targetUserId || null,
+      input.targetPublicKey || null,
+      input.targetIp || null,
+      input.blacklistIdentity ? 1 : 0,
+      input.blacklistIp ? 1 : 0,
+      input.reason || null,
+      input.moderatorUserId
+    ]
+  );
+
+  return (await dbGet<BanRule>('SELECT * FROM ban_rules WHERE id = ?', [id]))!;
+};
+
+export const getMatchingActiveBan = async (input: {
+  targetUserId?: string | null;
+  targetPublicKey?: string | null;
+  targetIp?: string | null;
+}): Promise<BanRule | undefined> => {
+  const effectiveUserId = input.targetUserId || null;
+  const effectivePublicKey = input.targetPublicKey || null;
+  const effectiveIp = input.targetIp || null;
+
+  return dbGet<BanRule>(
+    `
+      SELECT *
+      FROM ban_rules
+      WHERE active = 1
+        AND (
+          (
+            blacklist_identity = 1
+            AND (
+              (? IS NOT NULL AND target_user_id = ?)
+              OR (? IS NOT NULL AND target_public_key = ?)
+            )
+          )
+          OR (
+            blacklist_ip = 1
+            AND (? IS NOT NULL AND target_ip = ?)
+          )
+        )
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [
+      effectiveUserId,
+      effectiveUserId,
+      effectivePublicKey,
+      effectivePublicKey,
+      effectiveIp,
+      effectiveIp
+    ]
+  );
 };
 
 export const getChannelMessages = async (channel_id: string, limit: number = 50): Promise<MessageWithUser[]> => {
@@ -234,11 +428,15 @@ export const getChannelMessages = async (channel_id: string, limit: number = 50)
   return messagesWithUsers.reverse(); // Return in chronological order
 };
 
-export const reserveRssItem = async (channelId: string, itemKey: string): Promise<boolean> => {
+export const reserveRssItem = async (
+  channelId: string,
+  itemKey: string,
+  contentFingerprint: string | null = null
+): Promise<boolean> => {
   return new Promise((resolve, reject) => {
     db.run(
-      'INSERT OR IGNORE INTO rss_channel_items (channel_id, item_key, message_id) VALUES (?, ?, NULL)',
-      [channelId, itemKey],
+      'INSERT OR IGNORE INTO rss_channel_items (channel_id, item_key, content_fingerprint, message_id) VALUES (?, ?, ?, NULL)',
+      [channelId, itemKey, contentFingerprint],
       function (err) {
         if (err) {
           reject(err);

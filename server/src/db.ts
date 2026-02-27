@@ -59,10 +59,18 @@ function initializeDatabase() {
         username TEXT NOT NULL,
         public_key TEXT UNIQUE NOT NULL,
         avatar_url TEXT,
+        last_ip TEXT,
         role TEXT DEFAULT 'user',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
-    `);
+    `, (err) => {
+      if (err) {
+        console.error('Error creating users table:', err.message);
+        return;
+      }
+
+      db.run('ALTER TABLE users ADD COLUMN last_ip TEXT', () => {});
+    });
 
     // Categories Table
     db.run(`
@@ -105,6 +113,7 @@ function initializeDatabase() {
       CREATE TABLE IF NOT EXISTS rss_channel_items (
         channel_id TEXT NOT NULL,
         item_key TEXT NOT NULL,
+        content_fingerprint TEXT,
         message_id TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (channel_id, item_key),
@@ -114,7 +123,14 @@ function initializeDatabase() {
     `, (err) => {
       if (err) {
         console.error('Error creating rss_channel_items table:', err.message);
+        return;
       }
+
+      migrateRssChannelItemsForContentDedupe((migrationErr) => {
+        if (migrationErr) {
+          console.error('Error migrating rss_channel_items table for content dedupe:', migrationErr.message);
+        }
+      });
     });
 
     // Messages Table
@@ -129,6 +145,68 @@ function initializeDatabase() {
         FOREIGN KEY (user_id) REFERENCES users(id)
       )
     `);
+
+    // Moderation actions table (supports offline enforcement + audit trail)
+    db.run(`
+      CREATE TABLE IF NOT EXISTS moderation_actions (
+        id TEXT PRIMARY KEY,
+        target_user_id TEXT NOT NULL,
+        moderator_user_id TEXT NOT NULL,
+        action_type TEXT NOT NULL CHECK(action_type IN ('kick', 'ban')),
+        reason TEXT,
+        delete_mode TEXT NOT NULL DEFAULT 'none' CHECK(delete_mode IN ('none', 'hours', 'all')),
+        delete_hours INTEGER,
+        blacklist_identity INTEGER NOT NULL DEFAULT 0,
+        blacklist_ip INTEGER NOT NULL DEFAULT 0,
+        target_ip TEXT,
+        enforced INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        enforced_at DATETIME,
+        FOREIGN KEY (target_user_id) REFERENCES users(id),
+        FOREIGN KEY (moderator_user_id) REFERENCES users(id)
+      )
+    `, (err) => {
+      if (err) {
+        console.error('Error creating moderation_actions table:', err.message);
+        return;
+      }
+
+      migrateModerationActionsTable((migrationErr) => {
+        if (migrationErr) {
+          console.error('Error migrating moderation_actions table:', migrationErr.message);
+        }
+      });
+    });
+
+    // Ban rules table (persistent enforcement by identity and/or IP)
+    db.run(`
+      CREATE TABLE IF NOT EXISTS ban_rules (
+        id TEXT PRIMARY KEY,
+        target_user_id TEXT,
+        target_public_key TEXT,
+        target_ip TEXT,
+        blacklist_identity INTEGER NOT NULL DEFAULT 1,
+        blacklist_ip INTEGER NOT NULL DEFAULT 0,
+        reason TEXT,
+        moderator_user_id TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        revoked_at DATETIME,
+        FOREIGN KEY (target_user_id) REFERENCES users(id),
+        FOREIGN KEY (moderator_user_id) REFERENCES users(id)
+      )
+    `, (err) => {
+      if (err) {
+        console.error('Error creating ban_rules table:', err.message);
+        return;
+      }
+
+      migrateBanRulesTable((migrationErr) => {
+        if (migrationErr) {
+          console.error('Error migrating ban_rules table:', migrationErr.message);
+        }
+      });
+    });
 
     // Ensure default server exists
     db.get('SELECT count(*) as count FROM servers', (err, row: any) => {
@@ -256,5 +334,144 @@ function migrateChannelsTableForRss(done: (error?: Error) => void) {
         );
       }
     );
+  });
+}
+
+function migrateRssChannelItemsForContentDedupe(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(rss_channel_items)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasContentFingerprint = columns.some((column) => column.name === 'content_fingerprint');
+
+    const ensureUniqueIndex = () => {
+      db.run(
+        `
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_channel_items_channel_content_fingerprint
+        ON rss_channel_items(channel_id, content_fingerprint)
+        WHERE content_fingerprint IS NOT NULL
+        `,
+        (indexErr) => {
+          if (indexErr) {
+            done(indexErr);
+            return;
+          }
+
+          done();
+        }
+      );
+    };
+
+    if (hasContentFingerprint) {
+      ensureUniqueIndex();
+      return;
+    }
+
+    db.run('ALTER TABLE rss_channel_items ADD COLUMN content_fingerprint TEXT', (alterErr) => {
+      if (alterErr) {
+        done(alterErr);
+        return;
+      }
+
+      ensureUniqueIndex();
+    });
+  });
+}
+
+function migrateModerationActionsTable(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(moderation_actions)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasDeleteMode = columns.some((column) => column.name === 'delete_mode');
+    const hasDeleteHours = columns.some((column) => column.name === 'delete_hours');
+    const hasBlacklistIdentity = columns.some((column) => column.name === 'blacklist_identity');
+    const hasBlacklistIp = columns.some((column) => column.name === 'blacklist_ip');
+    const hasTargetIp = columns.some((column) => column.name === 'target_ip');
+    const hasEnforced = columns.some((column) => column.name === 'enforced');
+    const hasEnforcedAt = columns.some((column) => column.name === 'enforced_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasDeleteMode) pendingAlterStatements.push("ALTER TABLE moderation_actions ADD COLUMN delete_mode TEXT NOT NULL DEFAULT 'none'");
+    if (!hasDeleteHours) pendingAlterStatements.push('ALTER TABLE moderation_actions ADD COLUMN delete_hours INTEGER');
+    if (!hasBlacklistIdentity) pendingAlterStatements.push('ALTER TABLE moderation_actions ADD COLUMN blacklist_identity INTEGER NOT NULL DEFAULT 0');
+    if (!hasBlacklistIp) pendingAlterStatements.push('ALTER TABLE moderation_actions ADD COLUMN blacklist_ip INTEGER NOT NULL DEFAULT 0');
+    if (!hasTargetIp) pendingAlterStatements.push('ALTER TABLE moderation_actions ADD COLUMN target_ip TEXT');
+    if (!hasEnforced) pendingAlterStatements.push('ALTER TABLE moderation_actions ADD COLUMN enforced INTEGER NOT NULL DEFAULT 0');
+    if (!hasEnforcedAt) pendingAlterStatements.push('ALTER TABLE moderation_actions ADD COLUMN enforced_at DATETIME');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        db.run('CREATE INDEX IF NOT EXISTS idx_moderation_actions_target_enforced ON moderation_actions(target_user_id, enforced)', (indexErr) => {
+          if (indexErr) {
+            done(indexErr);
+            return;
+          }
+          done();
+        });
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function migrateBanRulesTable(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(ban_rules)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasTargetUserId = columns.some((column) => column.name === 'target_user_id');
+    const hasTargetPublicKey = columns.some((column) => column.name === 'target_public_key');
+    const hasTargetIp = columns.some((column) => column.name === 'target_ip');
+    const hasBlacklistIdentity = columns.some((column) => column.name === 'blacklist_identity');
+    const hasBlacklistIp = columns.some((column) => column.name === 'blacklist_ip');
+    const hasActive = columns.some((column) => column.name === 'active');
+    const hasRevokedAt = columns.some((column) => column.name === 'revoked_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasTargetUserId) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN target_user_id TEXT');
+    if (!hasTargetPublicKey) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN target_public_key TEXT');
+    if (!hasTargetIp) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN target_ip TEXT');
+    if (!hasBlacklistIdentity) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN blacklist_identity INTEGER NOT NULL DEFAULT 1');
+    if (!hasBlacklistIp) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN blacklist_ip INTEGER NOT NULL DEFAULT 0');
+    if (!hasActive) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+    if (!hasRevokedAt) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN revoked_at DATETIME');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_ban_rules_identity ON ban_rules(target_user_id, target_public_key, active)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_ban_rules_ip ON ban_rules(target_ip, active)');
+        });
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
   });
 }

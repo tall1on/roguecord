@@ -45,7 +45,7 @@ async function startServer() {
     wss.on('connection', (ws, req) => {
         console.log(`[WS DEBUG] New WebSocket connection from ${req.socket.remoteAddress}`);
 
-        const client = connectionManager.addClient(ws);
+        const client = connectionManager.addClient(ws, req.socket.remoteAddress || undefined);
 
         ws.on('pong', () => {
             client.isAlive = true;

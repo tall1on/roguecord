@@ -53,6 +53,14 @@ export interface ActiveMainPanel {
   channelId: string | null;
 }
 
+export type ModerationDeleteMode = 'none' | 'hours' | 'all';
+
+export interface ModerationNotice {
+  title: string;
+  message: string;
+  action: 'kick' | 'ban';
+}
+
 const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
   let binary = '';
   const bytes = new Uint8Array(buffer);
@@ -137,6 +145,8 @@ export const useChatStore = defineStore('chat', () => {
   const localUsername = ref<string | null>(localStorage.getItem('username'));
   const users = ref<User[]>([]);
   const onlineUserIds = ref<Set<string>>(new Set());
+  const memberIps = ref<Record<string, string>>({});
+  const moderationNotice = ref<ModerationNotice | null>(null);
   
   const categories = ref<Category[]>([]);
   const channels = ref<Channel[]>([]);
@@ -567,7 +577,48 @@ export const useChatStore = defineStore('chat', () => {
       case 'member_list':
         users.value = payload.members;
         onlineUserIds.value = new Set(payload.onlineUserIds);
+        memberIps.value = payload.memberIps || {};
         break;
+
+      case 'member_removed': {
+        const removedUserId = (payload.userId || payload.targetUserId) as string | undefined;
+        if (!removedUserId) break;
+        users.value = users.value.filter((u) => u.id !== removedUserId);
+        onlineUserIds.value.delete(removedUserId);
+        if (memberIps.value[removedUserId]) {
+          const nextIps = { ...memberIps.value };
+          delete nextIps[removedUserId];
+          memberIps.value = nextIps;
+        }
+        break;
+      }
+
+      case 'moderation_action_enforced': {
+        const incomingAction = payload.actionType || payload.action;
+        const action = incomingAction === 'ban' ? 'ban' : 'kick';
+        const reasonText = payload.reason ? ` Reason: ${payload.reason}` : '';
+        moderationNotice.value = {
+          action,
+          title: action === 'ban' ? 'You were banned' : 'You were kicked',
+          message:
+            action === 'ban'
+              ? `A moderator banned you from this server.${reasonText}`
+              : `A moderator kicked you from this server.${reasonText}`
+        };
+        disconnect();
+        break;
+      }
+
+      case 'auth:banned': {
+        const reasonText = payload?.reason ? ` Reason: ${payload.reason}` : '';
+        moderationNotice.value = {
+          action: 'ban',
+          title: 'Access denied (banned)',
+          message: `You are banned from this server.${reasonText}`
+        };
+        disconnect();
+        break;
+      }
         
       case 'user_online':
         onlineUserIds.value.add(payload.user.id);
@@ -742,6 +793,77 @@ export const useChatStore = defineStore('chat', () => {
     send('send_message', { channel_id, content });
   };
 
+  const kickMember = (targetUserId: string, options: { reason?: string; deleteMode?: ModerationDeleteMode; deleteHours?: number }) => {
+    const reason = (options.reason || '').trim();
+    const deleteMode = options.deleteMode || 'none';
+    const payload: {
+      targetUserId: string;
+      reason?: string;
+      deleteMode?: ModerationDeleteMode;
+      deleteHours?: number;
+    } = {
+      targetUserId,
+      deleteMode
+    };
+
+    if (reason) {
+      payload.reason = reason;
+    }
+    if (deleteMode === 'hours' && typeof options.deleteHours === 'number' && options.deleteHours > 0) {
+      payload.deleteHours = options.deleteHours;
+    }
+
+    users.value = users.value.filter((u) => u.id !== targetUserId);
+    onlineUserIds.value.delete(targetUserId);
+    send('kick_member', payload);
+  };
+
+  const banMember = (
+    targetUserId: string,
+    options: {
+      reason?: string;
+      deleteMode?: ModerationDeleteMode;
+      deleteHours?: number;
+      blacklistIdentity?: boolean;
+      blacklistIp?: boolean;
+    }
+  ) => {
+    const reason = (options.reason || '').trim();
+    const deleteMode = options.deleteMode || 'none';
+    const payload: {
+      targetUserId: string;
+      reason?: string;
+      deleteMode?: ModerationDeleteMode;
+      deleteHours?: number;
+      blacklistIdentity?: boolean;
+      blacklistIp?: boolean;
+    } = {
+      targetUserId,
+      deleteMode
+    };
+
+    if (reason) {
+      payload.reason = reason;
+    }
+    if (deleteMode === 'hours' && typeof options.deleteHours === 'number' && options.deleteHours > 0) {
+      payload.deleteHours = options.deleteHours;
+    }
+    if (options.blacklistIdentity) {
+      payload.blacklistIdentity = true;
+    }
+    if (options.blacklistIp) {
+      payload.blacklistIp = true;
+    }
+
+    users.value = users.value.filter((u) => u.id !== targetUserId);
+    onlineUserIds.value.delete(targetUserId);
+    send('ban_member', payload);
+  };
+
+  const clearModerationNotice = () => {
+    moderationNotice.value = null;
+  };
+
   const setActiveChannel = (channel_id: string) => {
     activeChannelId.value = channel_id;
     activeMainPanel.value = { type: 'text', channelId: channel_id };
@@ -777,6 +899,8 @@ export const useChatStore = defineStore('chat', () => {
     localUsername,
     users,
     onlineUserIds,
+    memberIps,
+    moderationNotice,
     categories,
     channels,
     messages,
@@ -798,6 +922,9 @@ export const useChatStore = defineStore('chat', () => {
     updateServerSettings,
     clearError,
     sendMessage,
+    kickMember,
+    banMember,
+    clearModerationNotice,
     submitAdminKey,
     setActiveChannel,
     setActiveVoicePanel,
