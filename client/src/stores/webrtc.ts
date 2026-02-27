@@ -50,6 +50,12 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       });
       screenShareStream.value = null;
     }
+
+    const localUserId = chatStore.currentUser?.id;
+    if (localUserId && userScreenStreams.value.has(localUserId)) {
+      userScreenStreams.value.delete(localUserId);
+      userScreenStreams.value = new Map(userScreenStreams.value);
+    }
   };
 
   const removeUserScreenByProducer = (producerId: string) => {
@@ -112,6 +118,12 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         track: videoTrack,
         appData: { source: 'screen' as MediaSourceType }
       });
+
+      const localUserId = chatStore.currentUser?.id;
+      if (localUserId) {
+        userScreenStreams.value.set(localUserId, displayStream);
+        userScreenStreams.value = new Map(userScreenStreams.value);
+      }
 
       screenProducer.value.on('transportclose', () => {
         cleanupScreenShareProducer();
@@ -698,14 +710,19 @@ export const useWebRtcStore = defineStore('webrtc', () => {
             callback();
           });
           
-          sendTransport.value.on('produce', async ({ kind, rtpParameters }: any, callback: any, _errback: any) => {
+          sendTransport.value.on('produce', async ({ kind, rtpParameters, appData }: any, callback: any, _errback: any) => {
             const inferredSource: MediaSourceType = kind === 'audio' ? 'mic' : 'camera';
+            const appDataSource = appData?.source;
+            const source: MediaSourceType =
+              appDataSource === 'mic' || appDataSource === 'screen' || appDataSource === 'camera'
+                ? appDataSource
+                : inferredSource;
             chatStore.send('produce', {
               channel_id: payload.channel_id,
               transport_id: sendTransport.value!.id,
               kind,
               rtpParameters,
-              source: inferredSource
+              source
             });
             
             // We need the producer ID from the server
@@ -803,7 +820,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         
       case 'new_producer':
         if (payload.channel_id !== activeVoiceChannelId.value || !device.value || !recvTransport.value) return;
-        
+
           producerToUser.set(payload.producer_id, payload.user_id);
           producerToSource.set(payload.producer_id, (payload.source as MediaSourceType | undefined) || (payload.kind === 'audio' ? 'mic' : 'camera'));
         
