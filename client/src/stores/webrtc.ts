@@ -496,6 +496,15 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
       screenProducer.value = await readySendTransport.produce({
         track: videoTrack,
+        encodings: [
+          {
+            maxBitrate: ((videoTrack.getSettings().width || 1920) * (videoTrack.getSettings().height || 1080) * (videoTrack.getSettings().frameRate || 30) >= 3840 * 2160 * 60)
+              ? 35_000_000
+              : ((videoTrack.getSettings().width || 1920) * (videoTrack.getSettings().height || 1080) * (videoTrack.getSettings().frameRate || 30) >= 1920 * 1080 * 30)
+                ? 20_000_000
+                : 8_000_000
+          }
+        ],
         appData: { source: 'screen' as MediaSourceType }
       });
 

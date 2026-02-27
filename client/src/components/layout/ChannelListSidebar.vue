@@ -24,6 +24,15 @@ const emit = defineEmits<{
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
 
+const formattedBandwidth = computed(() => {
+  const bandwidthKbps = webrtcStore.bandwidth
+  if (bandwidthKbps > 1000) {
+    return `${(bandwidthKbps / 1000).toFixed(2)} Mbps`
+  }
+
+  return `${bandwidthKbps} kbps`
+})
+
 const showVoiceStats = ref(false)
 const voiceStatsContainerRef = ref<HTMLElement | null>(null)
 
@@ -388,7 +397,7 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
           <div>
             <div class="text-xs text-gray-400 mb-1 flex justify-between">
               <span>Bandwidth</span>
-              <span>{{ webrtcStore.bandwidth }} kbps</span>
+              <span>{{ formattedBandwidth }}</span>
             </div>
           </div>
         </div>
