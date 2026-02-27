@@ -225,6 +225,23 @@ export interface MessagePage {
   hasMore: boolean;
 }
 
+export interface ChannelReadState {
+  user_id: string;
+  channel_id: string;
+  last_read_message_id: string | null;
+  last_read_message_created_at: string | null;
+  updated_at: string;
+}
+
+export interface ChannelUnreadState {
+  channel_id: string;
+  unread: boolean;
+  last_read_message_id: string | null;
+  last_read_message_created_at: string | null;
+  latest_message_id: string | null;
+  latest_message_created_at: string | null;
+}
+
 export type ModerationActionType = 'kick' | 'ban';
 export type MessageDeleteMode = 'none' | 'hours' | 'all';
 
@@ -262,6 +279,145 @@ export const createMessage = async (channel_id: string, user_id: string, content
   const id = crypto.randomUUID();
   await dbRun('INSERT INTO messages (id, channel_id, user_id, content) VALUES (?, ?, ?, ?)', [id, channel_id, user_id, content]);
   return (await dbGet<Message>('SELECT * FROM messages WHERE id = ?', [id]))!;
+};
+
+export const ensureChannelReadState = async (userId: string, channelId: string): Promise<void> => {
+  await dbRun(
+    `
+      INSERT OR IGNORE INTO channel_read_states (
+        user_id,
+        channel_id,
+        last_read_message_id,
+        last_read_message_created_at,
+        updated_at
+      ) VALUES (
+        ?,
+        ?,
+        (
+          SELECT id
+          FROM messages
+          WHERE channel_id = ?
+          ORDER BY created_at DESC, id DESC
+          LIMIT 1
+        ),
+        (
+          SELECT created_at
+          FROM messages
+          WHERE channel_id = ?
+          ORDER BY created_at DESC, id DESC
+          LIMIT 1
+        ),
+        CURRENT_TIMESTAMP
+      )
+    `,
+    [userId, channelId, channelId, channelId]
+  );
+};
+
+export const ensureChannelReadStatesForUser = async (userId: string): Promise<void> => {
+  await dbRun(
+    `
+      INSERT OR IGNORE INTO channel_read_states (
+        user_id,
+        channel_id,
+        last_read_message_id,
+        last_read_message_created_at,
+        updated_at
+      )
+      SELECT
+        ?,
+        c.id,
+        (
+          SELECT m.id
+          FROM messages m
+          WHERE m.channel_id = c.id
+          ORDER BY m.created_at DESC, m.id DESC
+          LIMIT 1
+        ),
+        (
+          SELECT m.created_at
+          FROM messages m
+          WHERE m.channel_id = c.id
+          ORDER BY m.created_at DESC, m.id DESC
+          LIMIT 1
+        ),
+        CURRENT_TIMESTAMP
+      FROM channels c
+    `,
+    [userId]
+  );
+};
+
+export const markChannelReadUpToMessage = async (input: {
+  userId: string;
+  channelId: string;
+  messageId: string;
+  messageCreatedAt: string;
+}): Promise<void> => {
+  await ensureChannelReadState(input.userId, input.channelId);
+  await dbRun(
+    `
+      UPDATE channel_read_states
+      SET
+        last_read_message_id = ?,
+        last_read_message_created_at = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ?
+        AND channel_id = ?
+        AND (
+          last_read_message_created_at IS NULL
+          OR last_read_message_created_at < ?
+          OR (last_read_message_created_at = ? AND (last_read_message_id IS NULL OR last_read_message_id < ?))
+        )
+    `,
+    [
+      input.messageId,
+      input.messageCreatedAt,
+      input.userId,
+      input.channelId,
+      input.messageCreatedAt,
+      input.messageCreatedAt,
+      input.messageId
+    ]
+  );
+};
+
+export const getChannelUnreadStatesForUser = async (userId: string): Promise<ChannelUnreadState[]> => {
+  await ensureChannelReadStatesForUser(userId);
+
+  return dbAll<ChannelUnreadState>(
+    `
+      SELECT
+        c.id AS channel_id,
+        CASE
+          WHEN latest_message.id IS NULL THEN 0
+          WHEN crs.last_read_message_created_at IS NULL THEN 1
+          WHEN latest_message.created_at > crs.last_read_message_created_at THEN 1
+          WHEN latest_message.created_at = crs.last_read_message_created_at
+            AND latest_message.id > COALESCE(crs.last_read_message_id, '') THEN 1
+          ELSE 0
+        END AS unread,
+        crs.last_read_message_id,
+        crs.last_read_message_created_at,
+        latest_message.id AS latest_message_id,
+        latest_message.created_at AS latest_message_created_at
+      FROM channels c
+      LEFT JOIN channel_read_states crs
+        ON crs.user_id = ?
+        AND crs.channel_id = c.id
+      LEFT JOIN messages latest_message
+        ON latest_message.id = (
+          SELECT m.id
+          FROM messages m
+          WHERE m.channel_id = c.id
+          ORDER BY m.created_at DESC, m.id DESC
+          LIMIT 1
+        )
+      WHERE c.type IN ('text', 'rss')
+      ORDER BY c.position ASC
+    `,
+    [userId]
+  );
 };
 
 export const deleteMessagesByUser = async (userId: string, mode: MessageDeleteMode, hours?: number): Promise<void> => {

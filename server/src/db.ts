@@ -146,6 +146,71 @@ function initializeDatabase() {
       )
     `);
 
+    // Per-user channel read state (used for persistent unread indicators)
+    db.run(`
+      CREATE TABLE IF NOT EXISTS channel_read_states (
+        user_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        last_read_message_id TEXT,
+        last_read_message_created_at DATETIME,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, channel_id),
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (channel_id) REFERENCES channels(id),
+        FOREIGN KEY (last_read_message_id) REFERENCES messages(id)
+      )
+    `, (err) => {
+      if (err) {
+        console.error('Error creating channel_read_states table:', err.message);
+        return;
+      }
+
+      migrateChannelReadStatesTable((migrationErr) => {
+        if (migrationErr) {
+          console.error('Error migrating channel_read_states table:', migrationErr.message);
+          return;
+        }
+
+        // Backfill existing user/channel pairs so legacy installs do not mark all history as unread.
+        db.run(
+          `
+            INSERT OR IGNORE INTO channel_read_states (
+              user_id,
+              channel_id,
+              last_read_message_id,
+              last_read_message_created_at,
+              updated_at
+            )
+            SELECT
+              u.id,
+              c.id,
+              (
+                SELECT m.id
+                FROM messages m
+                WHERE m.channel_id = c.id
+                ORDER BY m.created_at DESC, m.id DESC
+                LIMIT 1
+              ),
+              (
+                SELECT m.created_at
+                FROM messages m
+                WHERE m.channel_id = c.id
+                ORDER BY m.created_at DESC, m.id DESC
+                LIMIT 1
+              ),
+              CURRENT_TIMESTAMP
+            FROM users u
+            CROSS JOIN channels c
+          `,
+          (seedErr) => {
+            if (seedErr) {
+              console.error('Error seeding channel_read_states baseline:', seedErr.message);
+            }
+          }
+        );
+      });
+    });
+
     // Moderation actions table (supports offline enforcement + audit trail)
     db.run(`
       CREATE TABLE IF NOT EXISTS moderation_actions (
@@ -458,6 +523,45 @@ function migrateBanRulesTable(done: (error?: Error) => void) {
         db.serialize(() => {
           db.run('CREATE INDEX IF NOT EXISTS idx_ban_rules_identity ON ban_rules(target_user_id, target_public_key, active)');
           db.run('CREATE INDEX IF NOT EXISTS idx_ban_rules_ip ON ban_rules(target_ip, active)');
+        });
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function migrateChannelReadStatesTable(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(channel_read_states)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasLastReadMessageId = columns.some((column) => column.name === 'last_read_message_id');
+    const hasLastReadMessageCreatedAt = columns.some((column) => column.name === 'last_read_message_created_at');
+    const hasUpdatedAt = columns.some((column) => column.name === 'updated_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasLastReadMessageId) pendingAlterStatements.push('ALTER TABLE channel_read_states ADD COLUMN last_read_message_id TEXT');
+    if (!hasLastReadMessageCreatedAt) pendingAlterStatements.push('ALTER TABLE channel_read_states ADD COLUMN last_read_message_created_at DATETIME');
+    if (!hasUpdatedAt) pendingAlterStatements.push('ALTER TABLE channel_read_states ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_channel_read_states_user ON channel_read_states(user_id)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_channel_read_states_channel ON channel_read_states(channel_id)');
         });
         done();
         return;

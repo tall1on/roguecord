@@ -54,6 +54,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const producerToUser = new Map<string, string>();
   const producerToSource = new Map<string, MediaSourceType>();
   const consumerToProducer = new Map<string, string>();
+  const screenShareNotificationProducerIds = new Set<string>();
   const userScreenStreams = shallowRef<Map<string, MediaStream>>(new Map());
   const screenStreamMuteState = ref<Map<string, boolean>>(new Map());
   const screenStreamPreferenceState = ref<Map<string, ScreenStreamPreference>>(new Map());
@@ -101,6 +102,13 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     console.info('[WebRTC][consume] Consumer closed locally', {
       consumerId,
       reason
+    });
+  };
+
+  const playScreenShareNotificationSound = () => {
+    const audio = new Audio('/wav/screenshare.mp3');
+    void audio.play().catch((error) => {
+      console.debug('[WebRTC][sound] screenshare notification playback blocked/failed', error);
     });
   };
 
@@ -1092,6 +1100,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           for (const [prodId, userId] of producerToUser.entries()) {
             if (userId === payload.user_id) {
               producersToRemove.add(prodId);
+              screenShareNotificationProducerIds.delete(prodId);
               removeUserScreenByProducer(prodId);
               producerToUser.delete(prodId);
               producerToSource.delete(prodId);
@@ -1409,6 +1418,10 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
           if (remoteUserId) {
             if (remoteSource === 'screen' && payload.kind === 'video') {
+              if (!screenShareNotificationProducerIds.has(payload.producer_id)) {
+                screenShareNotificationProducerIds.add(payload.producer_id);
+                playScreenShareNotificationSound();
+              }
               setUserScreenStream(remoteUserId, stream);
             } else if (payload.kind === 'audio') {
               addSpeakingDetector(consumer.id, remoteUserId, stream);
@@ -1478,6 +1491,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         for (const consumerId of consumerIdsToClose) {
           closeConsumer(consumerId, `producer_closed notification (${producerId})`);
         }
+
+        screenShareNotificationProducerIds.delete(producerId);
 
         if (source === 'screen') {
           if (!producerToSource.has(producerId) && payload.user_id) {
