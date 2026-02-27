@@ -12,9 +12,21 @@ type ScreenStreamPreference = {
   resolution: ScreenStreamResolution;
 };
 
+type ScreenStreamVolumePreference = {
+  volume: number;
+  muted: boolean;
+  lastNonZeroVolume: number;
+};
+
 const DEFAULT_SCREEN_STREAM_PREFERENCE: ScreenStreamPreference = {
   fps: 30,
   resolution: 'source'
+};
+
+const DEFAULT_SCREEN_STREAM_VOLUME_PREFERENCE: ScreenStreamVolumePreference = {
+  volume: 1,
+  muted: false,
+  lastNonZeroVolume: 1
 };
 
 export const useWebRtcStore = defineStore('webrtc', () => {
@@ -44,6 +56,52 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const userScreenStreams = shallowRef<Map<string, MediaStream>>(new Map());
   const screenStreamMuteState = ref<Map<string, boolean>>(new Map());
   const screenStreamPreferenceState = ref<Map<string, ScreenStreamPreference>>(new Map());
+  const screenStreamVolumeState = ref<Map<string, number>>(new Map());
+  const screenStreamLastNonZeroVolumeState = ref<Map<string, number>>(new Map());
+  const screenAudioConsumersByUser = new Map<string, Set<string>>();
+
+  const closeConsumer = (consumerId: string, reason: string) => {
+    const producerId = consumerToProducer.get(consumerId);
+    const source = producerId ? producerToSource.get(producerId) : null;
+    const userId = producerId ? producerToUser.get(producerId) : null;
+
+    const consumer = consumers.value.get(consumerId);
+    if (consumer) {
+      try {
+        consumer.close();
+      } catch (_e) {
+        // no-op
+      }
+      consumers.value.delete(consumerId);
+    }
+
+    removeSpeakingDetector(consumerId);
+    remoteStreams.value.delete(consumerId);
+
+    const audio = audioElements.get(consumerId);
+    if (audio) {
+      audio.pause();
+      audio.srcObject = null;
+      audioElements.delete(consumerId);
+    }
+
+    if (source === 'screen' && userId) {
+      const consumerIds = screenAudioConsumersByUser.get(userId);
+      if (consumerIds) {
+        consumerIds.delete(consumerId);
+        if (consumerIds.size === 0) {
+          screenAudioConsumersByUser.delete(userId);
+        }
+      }
+    }
+
+    consumerToProducer.delete(consumerId);
+
+    console.info('[WebRTC][consume] Consumer closed locally', {
+      consumerId,
+      reason
+    });
+  };
 
   const getScreenStreamPreference = (userId: string): ScreenStreamPreference => {
     return screenStreamPreferenceState.value.get(userId) || DEFAULT_SCREEN_STREAM_PREFERENCE;
@@ -61,13 +119,85 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     return screenStreamMuteState.value.get(userId) === true;
   };
 
+  const getScreenStreamVolume = (userId: string) => {
+    return screenStreamVolumeState.value.get(userId) ?? DEFAULT_SCREEN_STREAM_VOLUME_PREFERENCE.volume;
+  };
+
+  const getScreenStreamLastNonZeroVolume = (userId: string) => {
+    return screenStreamLastNonZeroVolumeState.value.get(userId) ?? DEFAULT_SCREEN_STREAM_VOLUME_PREFERENCE.lastNonZeroVolume;
+  };
+
+  const clampScreenStreamVolume = (volume: number) => {
+    if (!Number.isFinite(volume)) return DEFAULT_SCREEN_STREAM_VOLUME_PREFERENCE.volume;
+    return Math.min(1, Math.max(0, volume));
+  };
+
+  const applyScreenStreamAudioState = (userId: string) => {
+    const volume = getScreenStreamVolume(userId);
+    const muted = isScreenStreamMuted(userId) || volume <= 0;
+
+    const consumerIds = screenAudioConsumersByUser.get(userId);
+    if (!consumerIds) {
+      return;
+    }
+
+    for (const consumerId of consumerIds) {
+      const audio = audioElements.get(consumerId);
+      if (!audio) continue;
+      audio.volume = volume;
+      audio.muted = muted;
+    }
+  };
+
+  const setScreenStreamVolume = (userId: string, volume: number) => {
+    const clampedVolume = clampScreenStreamVolume(volume);
+
+    if (clampedVolume >= 1) {
+      screenStreamVolumeState.value.delete(userId);
+    } else {
+      screenStreamVolumeState.value.set(userId, clampedVolume);
+    }
+    screenStreamVolumeState.value = new Map(screenStreamVolumeState.value);
+
+    if (clampedVolume > 0) {
+      screenStreamLastNonZeroVolumeState.value.set(userId, clampedVolume);
+      screenStreamLastNonZeroVolumeState.value = new Map(screenStreamLastNonZeroVolumeState.value);
+      if (isScreenStreamMuted(userId)) {
+        screenStreamMuteState.value.delete(userId);
+        screenStreamMuteState.value = new Map(screenStreamMuteState.value);
+      }
+    } else {
+      if (!isScreenStreamMuted(userId)) {
+        screenStreamMuteState.value.set(userId, true);
+        screenStreamMuteState.value = new Map(screenStreamMuteState.value);
+      }
+    }
+
+    applyScreenStreamAudioState(userId);
+  };
+
   const setScreenStreamMuted = (userId: string, isMuted: boolean) => {
     if (isMuted) {
       screenStreamMuteState.value.set(userId, true);
+      const currentVolume = getScreenStreamVolume(userId);
+      if (currentVolume > 0) {
+        screenStreamLastNonZeroVolumeState.value.set(userId, currentVolume);
+        screenStreamLastNonZeroVolumeState.value = new Map(screenStreamLastNonZeroVolumeState.value);
+      }
     } else {
       screenStreamMuteState.value.delete(userId);
+      if (getScreenStreamVolume(userId) <= 0) {
+        const restoredVolume = getScreenStreamLastNonZeroVolume(userId);
+        if (restoredVolume >= 1) {
+          screenStreamVolumeState.value.delete(userId);
+        } else {
+          screenStreamVolumeState.value.set(userId, restoredVolume);
+        }
+        screenStreamVolumeState.value = new Map(screenStreamVolumeState.value);
+      }
     }
     screenStreamMuteState.value = new Map(screenStreamMuteState.value);
+    applyScreenStreamAudioState(userId);
   };
 
   const getResolutionTarget = (resolution: ScreenStreamResolution, sourceAspectRatio: number) => {
@@ -192,10 +322,17 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   };
 
   const setUserScreenStream = (userId: string, stream: MediaStream) => {
-    const existing = userScreenStreams.value.get(userId);
-    if (existing === stream) return;
     userScreenStreams.value.set(userId, stream);
     userScreenStreams.value = new Map(userScreenStreams.value);
+
+    const track = stream.getVideoTracks()[0] || null;
+    console.info('[WebRTC][screen] User screen stream updated', {
+      userId,
+      streamId: stream.id,
+      trackId: track?.id || null,
+      trackReadyState: track?.readyState || null,
+      trackMuted: track?.muted ?? null
+    });
   };
 
   const deleteUserScreenStream = (userId: string) => {
@@ -1137,25 +1274,59 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
           const remoteUserId = producerToUser.get(payload.producer_id);
           const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind === 'audio' ? 'mic' : 'camera') as MediaSourceType);
+
+          if (remoteSource === 'screen' && remoteUserId) {
+            for (const [existingConsumerId, existingProducerId] of consumerToProducer.entries()) {
+              if (existingConsumerId === consumer.id) continue;
+              if (existingProducerId !== payload.producer_id) continue;
+              closeConsumer(existingConsumerId, 'duplicate screen consumer for same producer');
+            }
+          }
           
           consumer.on('producerclose', () => {
-            consumers.value.delete(consumer.id);
-            remoteStreams.value.delete(consumer.id);
-            remoteStreams.value = new Map(remoteStreams.value);
-            removeSpeakingDetector(consumer.id);
+            closeConsumer(consumer.id, 'producerclose event');
             removeUserScreenByProducer(payload.producer_id);
             producerToUser.delete(payload.producer_id);
             producerToSource.delete(payload.producer_id);
-            const audio = audioElements.get(consumer.id);
-            if (audio) {
-              audio.pause();
-              audio.srcObject = null;
-              audioElements.delete(consumer.id);
-            }
+            remoteStreams.value = new Map(remoteStreams.value);
           });
           
           const stream = new MediaStream();
           stream.addTrack(consumer.track);
+
+          if (remoteSource === 'screen') {
+            consumer.track.onended = () => {
+              console.warn('[WebRTC][screen] Remote screen track ended', {
+                consumerId: consumer.id,
+                producerId: payload.producer_id,
+                remoteUserId
+              });
+
+              closeConsumer(consumer.id, 'remote screen track ended');
+              if (remoteUserId) {
+                deleteUserScreenStream(remoteUserId);
+              }
+              remoteStreams.value = new Map(remoteStreams.value);
+            };
+
+            consumer.track.onmute = () => {
+              console.warn('[WebRTC][screen] Remote screen track muted', {
+                consumerId: consumer.id,
+                producerId: payload.producer_id,
+                remoteUserId,
+                readyState: consumer.track.readyState
+              });
+            };
+
+            consumer.track.onunmute = () => {
+              console.info('[WebRTC][screen] Remote screen track unmuted', {
+                consumerId: consumer.id,
+                producerId: payload.producer_id,
+                remoteUserId,
+                readyState: consumer.track.readyState
+              });
+            };
+          }
 
           if (remoteUserId) {
             if (remoteSource === 'screen') {
@@ -1177,11 +1348,18 @@ export const useWebRtcStore = defineStore('webrtc', () => {
             if (isDeafened.value) {
               audio.muted = true;
             }
-            if (remoteSource === 'screen' && remoteUserId && isScreenStreamMuted(remoteUserId)) {
-              audio.muted = true;
+            if (remoteSource === 'screen' && remoteUserId) {
+              if (!screenAudioConsumersByUser.has(remoteUserId)) {
+                screenAudioConsumersByUser.set(remoteUserId, new Set());
+              }
+              screenAudioConsumersByUser.get(remoteUserId)!.add(consumer.id);
             }
             audio.play().catch(e => console.error('Audio play failed:', e));
             audioElements.set(consumer.id, audio);
+
+            if (remoteSource === 'screen' && remoteUserId) {
+              applyScreenStreamAudioState(remoteUserId);
+            }
           }
           
           // Trigger reactivity
@@ -1219,27 +1397,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         }
 
         for (const consumerId of consumerIdsToClose) {
-          const consumer = consumers.value.get(consumerId);
-          if (consumer) {
-            try {
-              consumer.close();
-            } catch (_e) {
-              // no-op
-            }
-            consumers.value.delete(consumerId);
-          }
-
-          removeSpeakingDetector(consumerId);
-          remoteStreams.value.delete(consumerId);
-
-          const audio = audioElements.get(consumerId);
-          if (audio) {
-            audio.pause();
-            audio.srcObject = null;
-            audioElements.delete(consumerId);
-          }
-
-          consumerToProducer.delete(consumerId);
+          closeConsumer(consumerId, `producer_closed notification (${producerId})`);
         }
 
         if (source === 'screen') {
@@ -1290,10 +1448,13 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     isDeafened,
     screenStreamMuteState,
     screenStreamPreferenceState,
+    screenStreamVolumeState,
     joinVoiceChannel,
     leaveVoiceChannel,
     isUserSpeaking,
     isScreenStreamMuted,
+    getScreenStreamVolume,
+    setScreenStreamVolume,
     setScreenStreamMuted,
     getScreenStreamPreference,
     getScreenStreamFps,

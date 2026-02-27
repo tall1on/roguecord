@@ -143,10 +143,11 @@ const closeScreenContextMenu = () => {
   screenContextMenu.value.visible = false
 }
 
-const syncScreenVideoMutedState = (userId: string) => {
+const syncScreenVideoAudioState = (userId: string) => {
   const video = screenVideoElements.get(userId)
   if (!video) return
   video.muted = webrtcStore.isScreenStreamMuted(userId)
+  video.volume = webrtcStore.getScreenStreamVolume(userId)
 }
 
 const openScreenContextMenu = (event: MouseEvent, userId: string) => {
@@ -185,8 +186,36 @@ const onToggleLocalScreenMute = () => {
   const userId = screenContextMenu.value.userId
   if (!userId) return
   webrtcStore.setScreenStreamMuted(userId, !webrtcStore.isScreenStreamMuted(userId))
-  syncScreenVideoMutedState(userId)
+  syncScreenVideoAudioState(userId)
   closeScreenContextMenu()
+}
+
+const getScreenVolumePercent = (userId: string) => Math.round(webrtcStore.getScreenStreamVolume(userId) * 100)
+
+const onScreenVolumeInput = (userId: string, event: Event) => {
+  event.stopPropagation()
+  const input = event.target as HTMLInputElement | null
+  if (!input) return
+
+  const nextValue = Number(input.value)
+  if (!Number.isFinite(nextValue)) return
+  webrtcStore.setScreenStreamVolume(userId, nextValue / 100)
+  syncScreenVideoAudioState(userId)
+}
+
+const onToggleScreenVolumeMute = (userId: string, event: MouseEvent) => {
+  event.stopPropagation()
+  webrtcStore.setScreenStreamMuted(userId, !webrtcStore.isScreenStreamMuted(userId))
+  syncScreenVideoAudioState(userId)
+}
+
+const getScreenVolumeIcon = (userId: string) => {
+  if (webrtcStore.isScreenStreamMuted(userId)) return '🔇'
+
+  const volume = webrtcStore.getScreenStreamVolume(userId)
+  if (volume <= 0) return '🔇'
+  if (volume < 0.5) return '🔉'
+  return '🔊'
 }
 
 const onGlobalPointerDown = (event: MouseEvent) => {
@@ -218,7 +247,7 @@ const setScreenVideoRef = (userId: string, video: HTMLVideoElement | null) => {
   }
 
   screenVideoElements.set(userId, video)
-  syncScreenVideoMutedState(userId)
+  syncScreenVideoAudioState(userId)
   const nextStream = getUserScreenStream(userId)
   if (video.srcObject !== nextStream) {
     video.srcObject = nextStream
@@ -263,11 +292,56 @@ const enterScreenFullscreen = async (userId: string) => {
   const video = screenVideoElements.get(userId)
   if (!video) return
 
+  const requestFullscreen =
+    video.requestFullscreen
+      ? () => video.requestFullscreen()
+      : (video as HTMLVideoElement & { webkitRequestFullscreen?: () => Promise<void> }).webkitRequestFullscreen
+        ? () => (video as HTMLVideoElement & { webkitRequestFullscreen: () => Promise<void> }).webkitRequestFullscreen()
+        : null
+
+  if (!requestFullscreen) return
+
   try {
-    await video.requestFullscreen()
+    await requestFullscreen()
   } catch (_e) {
     // no-op
   }
+}
+
+const exitScreenFullscreen = async () => {
+  const exitFullscreen =
+    document.exitFullscreen
+      ? () => document.exitFullscreen()
+      : (document as Document & { webkitExitFullscreen?: () => Promise<void> }).webkitExitFullscreen
+        ? () => (document as Document & { webkitExitFullscreen: () => Promise<void> }).webkitExitFullscreen()
+        : null
+
+  if (!exitFullscreen) return
+
+  try {
+    await exitFullscreen()
+  } catch (_e) {
+    // no-op
+  }
+}
+
+const getFullscreenElement = () => {
+  return document.fullscreenElement ||
+    (document as Document & { webkitFullscreenElement?: Element | null }).webkitFullscreenElement ||
+    null
+}
+
+const onScreenVideoClick = async (userId: string) => {
+  const video = screenVideoElements.get(userId)
+  if (!video) return
+
+  const fullscreenElement = getFullscreenElement()
+  if (fullscreenElement === video) {
+    await exitScreenFullscreen()
+    return
+  }
+
+  await enterScreenFullscreen(userId)
 }
 
 watch(
@@ -311,7 +385,7 @@ watch(
       }
 
       if (!isActiveShare) {
-        void document.exitFullscreen().catch(() => {})
+        void exitScreenFullscreen()
       }
     }
   },
@@ -322,8 +396,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('mousedown', onGlobalPointerDown)
   window.removeEventListener('contextmenu', onGlobalContextMenu)
   window.removeEventListener('keydown', onGlobalKeyDown)
-  if (document.fullscreenElement) {
-    void document.exitFullscreen().catch(() => {})
+  if (getFullscreenElement()) {
+    void exitScreenFullscreen()
   }
 })
 
@@ -602,19 +676,53 @@ watch(
           <div
             v-for="user in activeVoiceParticipants"
             :key="user.id"
-            class="rounded-xl bg-[#2b2d31] border border-[#3f4147] flex items-center justify-center"
+            class="rounded-xl bg-[#2b2d31] border border-[#3f4147] flex items-center justify-center overflow-hidden"
             :class="voiceTileClass"
           >
-            <video
-              v-show="getUserScreenStream(user.id)"
-              :ref="(el) => setScreenVideoTemplateRef(user.id, el)"
-              :muted="webrtcStore.isScreenStreamMuted(user.id)"
-              autoplay
-              playsinline
-              class="w-full h-full object-contain rounded-xl bg-black cursor-pointer"
-              @click="enterScreenFullscreen(user.id)"
-              @contextmenu.prevent.stop="openScreenContextMenu($event, user.id)"
-            />
+            <div v-show="getUserScreenStream(user.id)" class="group relative w-full h-full bg-black rounded-xl">
+              <video
+                :ref="(el) => setScreenVideoTemplateRef(user.id, el)"
+                :muted="webrtcStore.isScreenStreamMuted(user.id)"
+                :volume.prop="webrtcStore.getScreenStreamVolume(user.id)"
+                :controls="false"
+                autoplay
+                playsinline
+                class="w-full h-full object-contain rounded-xl bg-black cursor-pointer"
+                @click="onScreenVideoClick(user.id)"
+                @contextmenu.prevent.stop="openScreenContextMenu($event, user.id)"
+              />
+
+              <div
+                class="absolute bottom-2 left-2 right-2 flex items-center gap-2 rounded-md border border-[#1f2124] bg-[#1f2124]/90 px-2 py-1.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                @click.stop
+                @contextmenu.stop
+              >
+                <button
+                  type="button"
+                  class="w-7 h-7 rounded bg-[#2b2d31] hover:bg-[#3a3d44] text-sm flex items-center justify-center text-gray-200"
+                  :aria-label="webrtcStore.isScreenStreamMuted(user.id) ? 'Unmute stream volume' : 'Mute stream volume'"
+                  @click="onToggleScreenVolumeMute(user.id, $event)"
+                >
+                  {{ getScreenVolumeIcon(user.id) }}
+                </button>
+
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  :value="getScreenVolumePercent(user.id)"
+                  class="flex-1 h-1 accent-indigo-400 cursor-pointer"
+                  aria-label="Stream volume"
+                  @input="onScreenVolumeInput(user.id, $event)"
+                  @click.stop
+                />
+
+                <span class="w-9 text-right text-[11px] text-gray-300 tabular-nums">
+                  {{ getScreenVolumePercent(user.id) }}%
+                </span>
+              </div>
+            </div>
             <div v-show="!getUserScreenStream(user.id)" class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
               <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
               <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
