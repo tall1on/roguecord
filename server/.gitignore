@@ -1,3 +1,5 @@
 /node_modules/
 /data/*.db
 /.env
+tsc_output.txt
+/dist

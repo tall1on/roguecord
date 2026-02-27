@@ -3,6 +3,7 @@ import { WebSocket } from 'ws';
 export interface ClientConnection {
   ws: WebSocket;
   userId?: string;
+  ipAddress?: string;
   challenge?: string;
   pendingPublicKey?: string;
   isNewUser?: boolean;
@@ -12,8 +13,8 @@ export interface ClientConnection {
 class ConnectionManager {
   private clients: Set<ClientConnection> = new Set();
 
-  addClient(ws: WebSocket): ClientConnection {
-    const client: ClientConnection = { ws, isAlive: true };
+  addClient(ws: WebSocket, ipAddress?: string): ClientConnection {
+    const client: ClientConnection = { ws, isAlive: true, ipAddress };
     this.clients.add(client);
     console.log(`[WS DEBUG] Client added. Total clients: ${this.clients.size}`);
     return client;
@@ -75,6 +76,23 @@ class ConnectionManager {
     for (const client of this.clients) {
       if (client.userId === userId && client.ws.readyState === WebSocket.OPEN) {
         client.ws.send(data);
+      }
+    }
+  }
+
+  getUserIp(userId: string): string | undefined {
+    for (const client of this.clients) {
+      if (client.userId === userId && client.ipAddress) {
+        return client.ipAddress;
+      }
+    }
+    return undefined;
+  }
+
+  closeUserConnections(userId: string): void {
+    for (const client of this.clients) {
+      if (client.userId === userId && client.ws.readyState === WebSocket.OPEN) {
+        client.ws.close(4003, 'Moderation action enforced');
       }
     }
   }

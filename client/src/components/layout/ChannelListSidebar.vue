@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss } from 'lucide-vue-next'
+import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp, Folder } from 'lucide-vue-next'
 import { useChatStore, type Channel, type User } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 
@@ -18,11 +18,20 @@ const emit = defineEmits<{
   (e: 'open-invite'): void
   (e: 'remove-server'): void
   (e: 'open-admin'): void
-  (e: 'open-create-channel', payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' }): void
+  (e: 'open-create-channel', payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' | 'folder' }): void
 }>()
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
+
+const formattedBandwidth = computed(() => {
+  const bandwidthKbps = webrtcStore.bandwidth
+  if (bandwidthKbps > 1000) {
+    return `${(bandwidthKbps / 1000).toFixed(2)} Mbps`
+  }
+
+  return `${bandwidthKbps} kbps`
+})
 
 const showVoiceStats = ref(false)
 const voiceStatsContainerRef = ref<HTMLElement | null>(null)
@@ -78,6 +87,10 @@ const isChannelActive = (channel: Channel) => {
     return chatStore.activeMainPanel.type === 'text' && chatStore.activeMainPanel.channelId === channel.id
   }
 
+  if (channel.type === 'folder') {
+    return chatStore.activeMainPanel.type === 'folder' && chatStore.activeMainPanel.channelId === channel.id
+  }
+
   if (channel.type === 'voice') {
     return chatStore.activeMainPanel.type === 'voice' && chatStore.activeMainPanel.channelId === channel.id
   }
@@ -85,8 +98,16 @@ const isChannelActive = (channel: Channel) => {
   return false
 }
 
+const isChannelUnread = (channel: Channel) => {
+  if (channel.type !== 'text' && channel.type !== 'rss') {
+    return false
+  }
+
+  return chatStore.unreadChannelIds.has(channel.id)
+}
+
 const handleChannelClick = (channel: Channel) => {
-  if (channel.type === 'text' || channel.type === 'rss') {
+  if (channel.type === 'text' || channel.type === 'rss' || channel.type === 'folder') {
     chatStore.setActiveChannel(channel.id)
   } else if (channel.type === 'voice') {
     chatStore.setActiveVoicePanel(channel.id)
@@ -127,7 +148,7 @@ const deleteChannelFromContextMenu = () => {
   chatStore.deleteChannel(channelToDelete.id)
 }
 
-const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss') => {
+const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss' | 'folder') => {
   if (!props.isAdmin) return
 
   contextMenuVisible.value = false
@@ -136,6 +157,7 @@ const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss') => {
 }
 
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
+const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.has(userId)
 </script>
 
 <template>
@@ -180,13 +202,15 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
               :key="channel.id"
             >
               <div
-                class="flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
-                :class="isChannelActive(channel) ? 'bg-[#404249] text-white' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
+                class="relative flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
+                :class="isChannelActive(channel) ? 'bg-[#404249] text-white' : isChannelUnread(channel) ? 'text-white hover:bg-[#35373c]' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
                 @click="handleChannelClick(channel)"
                 @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
               >
-                <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
-                <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
+                <div v-if="isChannelUnread(channel)" class="absolute -left-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white"></div>
+                <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
+                <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
+                <Folder v-else-if="channel.type === 'folder'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
                 <Volume2 v-else class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
                 <span class="truncate font-medium">{{ channel.name }}</span>
               </div>
@@ -200,6 +224,7 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
                   <span class="truncate flex-1">{{ user.username }}</span>
                   <div class="flex items-center gap-1 ml-2">
                     <MicOff v-if="user.isMuted || user.isDeafened" class="w-3.5 h-3.5 text-red-500" />
+                    <MonitorUp v-if="isUserScreenSharing(user.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
                     <div v-if="user.isDeafened" class="relative flex items-center justify-center">
                       <Headphones class="w-3.5 h-3.5 text-red-500" />
                       <div class="absolute w-4 h-[1.5px] bg-red-500 rotate-45 rounded-full"></div>
@@ -224,13 +249,15 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
               :key="channel.id"
             >
               <div
-                class="flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
-                :class="isChannelActive(channel) ? 'bg-[#404249] text-white' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
+                class="relative flex items-center px-2 py-1.5 rounded cursor-pointer group mb-[2px]"
+                :class="isChannelActive(channel) ? 'bg-[#404249] text-white' : isChannelUnread(channel) ? 'text-white hover:bg-[#35373c]' : 'hover:bg-[#35373c] text-gray-400 hover:text-gray-300'"
                 @click="handleChannelClick(channel)"
                 @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
               >
-                <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
-                <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
+                <div v-if="isChannelUnread(channel)" class="absolute -left-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white"></div>
+                <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
+                <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
+                <Folder v-else-if="channel.type === 'folder'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'" />
                 <Volume2 v-else class="w-5 h-5 mr-1.5 text-gray-400 group-hover:text-gray-300" />
                 <span class="truncate font-medium">{{ channel.name }}</span>
               </div>
@@ -244,6 +271,7 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
                   <span class="truncate flex-1">{{ user.username }}</span>
                   <div class="flex items-center gap-1 ml-2">
                     <MicOff v-if="user.isMuted || user.isDeafened" class="w-3.5 h-3.5 text-red-500" />
+                    <MonitorUp v-if="isUserScreenSharing(user.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
                     <div v-if="user.isDeafened" class="relative flex items-center justify-center">
                       <Headphones class="w-3.5 h-3.5 text-red-500" />
                       <div class="absolute w-4 h-[1.5px] bg-red-500 rotate-45 rounded-full"></div>
@@ -291,6 +319,13 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
           <Rss class="w-4 h-4" />
           Create RSS channel
         </button>
+        <button
+          class="w-full px-3 py-2 text-left text-sm text-gray-200 hover:bg-[#2b2d31] flex items-center gap-2"
+          @click="openCreateChannelFromContextMenu('folder')"
+        >
+          <Folder class="w-4 h-4" />
+          Create folder channel
+        </button>
       </div>
     </template>
     <template v-else>
@@ -320,9 +355,25 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
             </div>
           </div>
         </div>
+        <button
+          class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] transition-colors"
+          :class="webrtcStore.screenProducer ? 'text-green-400 hover:text-green-300' : 'text-gray-400 hover:text-gray-300'"
+          :title="webrtcStore.screenProducer ? 'Stop sharing screen' : 'Share screen'"
+          @click.stop="webrtcStore.screenProducer ? webrtcStore.stopScreenShare() : webrtcStore.startScreenShare()"
+        >
+          <MonitorUp class="w-5 h-5" />
+        </button>
         <button class="w-8 h-8 flex items-center justify-center rounded hover:bg-[#3f4147] text-gray-400 hover:text-red-400 transition-colors" title="Disconnect" @click.stop="webrtcStore.leaveVoiceChannel()">
           <PhoneOff class="w-5 h-5" />
         </button>
+      </div>
+
+      <div
+        v-if="webrtcStore.screenShareError"
+        class="px-3 py-1 text-[11px] leading-4 text-amber-300 bg-amber-950/30 border-b border-amber-700/40"
+        role="alert"
+      >
+        {{ webrtcStore.screenShareError }}
       </div>
 
       <div v-if="showVoiceStats" class="absolute bottom-[56px] left-2 w-64 bg-[#1e1f22] rounded-lg shadow-xl border border-[#3f4147] p-4 z-50">
@@ -362,7 +413,7 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
           <div>
             <div class="text-xs text-gray-400 mb-1 flex justify-between">
               <span>Bandwidth</span>
-              <span>{{ webrtcStore.bandwidth }} kbps</span>
+              <span>{{ formattedBandwidth }}</span>
             </div>
           </div>
         </div>
