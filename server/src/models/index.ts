@@ -215,6 +215,16 @@ export interface MessageWithUser extends Message {
   user: User;
 }
 
+export interface MessagePageCursor {
+  createdAt: string;
+  id: string;
+}
+
+export interface MessagePage {
+  messages: MessageWithUser[];
+  hasMore: boolean;
+}
+
 export type ModerationActionType = 'kick' | 'ban';
 export type MessageDeleteMode = 'none' | 'hours' | 'all';
 
@@ -410,22 +420,50 @@ export const getMatchingActiveBan = async (input: {
   );
 };
 
-export const getChannelMessages = async (channel_id: string, limit: number = 50): Promise<MessageWithUser[]> => {
+export const getChannelMessages = async (
+  channel_id: string,
+  limit: number = 25,
+  before?: MessagePageCursor
+): Promise<MessagePage> => {
+  const normalizedLimit = Math.max(1, Math.min(25, Math.floor(limit)));
+
+  const queryParams: Array<string | number> = [channel_id];
+  let whereCursorClause = '';
+  if (before) {
+    whereCursorClause = 'AND (created_at < ? OR (created_at = ? AND id < ?))';
+    queryParams.push(before.createdAt, before.createdAt, before.id);
+  }
+
+  queryParams.push(normalizedLimit + 1);
+
   const messages = await dbAll<Message>(
-    'SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?',
-    [channel_id, limit]
+    `
+      SELECT *
+      FROM messages
+      WHERE channel_id = ?
+      ${whereCursorClause}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `,
+    queryParams
   );
+
+  const hasMore = messages.length > normalizedLimit;
+  const pageMessages = hasMore ? messages.slice(0, normalizedLimit) : messages;
   
   // Fetch users for messages (could be done with a JOIN, but this is fine for now)
   const messagesWithUsers: MessageWithUser[] = [];
-  for (const msg of messages) {
+  for (const msg of pageMessages) {
     const user = await getUserById(msg.user_id);
     if (user) {
       messagesWithUsers.push({ ...msg, user });
     }
   }
-  
-  return messagesWithUsers.reverse(); // Return in chronological order
+
+  return {
+    messages: messagesWithUsers.reverse(), // Return in chronological order
+    hasMore
+  };
 };
 
 export const reserveRssItem = async (

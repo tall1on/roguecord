@@ -435,17 +435,44 @@ const handleDeleteChannel = async (client: ClientConnection, payload: { channel_
   }
 };
 
-const handleGetMessages = async (client: ClientConnection, payload: { channel_id: string }) => {
+const MESSAGE_PAGE_SIZE = 25;
+
+const handleGetMessages = async (
+  client: ClientConnection,
+  payload: { channel_id: string; before_created_at?: string; before_id?: string; limit?: number }
+) => {
   if (!client.userId) return;
   const { channel_id } = payload;
   if (!channel_id) return;
 
+  const beforeCreatedAt = typeof payload.before_created_at === 'string' ? payload.before_created_at : undefined;
+  const beforeId = typeof payload.before_id === 'string' ? payload.before_id : undefined;
+
+  const before = beforeCreatedAt && beforeId
+    ? {
+        createdAt: beforeCreatedAt,
+        id: beforeId
+      }
+    : undefined;
+  const isOlderPageRequest = Boolean(before);
+
   // Ideally verify user has access to this channel's server
-  const messages = await getChannelMessages(channel_id);
+  const page = await getChannelMessages(channel_id, MESSAGE_PAGE_SIZE, before);
+  const oldestMessage = page.messages[0];
 
   client.ws.send(JSON.stringify({
     type: 'messages_list',
-    payload: { channel_id, messages }
+    payload: {
+      channel_id,
+      messages: page.messages,
+      has_more: page.hasMore,
+      page_size: MESSAGE_PAGE_SIZE,
+      is_older_page: isOlderPageRequest,
+      request_before_created_at: beforeCreatedAt || null,
+      request_before_id: beforeId || null,
+      before_created_at: oldestMessage?.created_at || null,
+      before_id: oldestMessage?.id || null
+    }
   }));
 };
 
@@ -922,9 +949,41 @@ const handleJoinServer = async (client: ClientConnection, payload: { serverId: s
 };
 
 const parseDeleteMode = (input: unknown): MessageDeleteMode => {
-  if (input === 'all') return 'all';
-  if (input === 'hours') return 'hours';
+  if (typeof input !== 'string') return 'none';
+  const normalized = input.trim().toLowerCase();
+  if (normalized === 'all') return 'all';
+  if (normalized === 'hours' || normalized === 'hour' || normalized === 'last_hour' || normalized === 'lasthour' || normalized === '1h') {
+    return 'hours';
+  }
   return 'none';
+};
+
+const extractDeleteOptions = (payload: {
+  deleteMode?: unknown;
+  delete_mode?: unknown;
+  deleteHours?: unknown;
+  delete_hours?: unknown;
+  deleteLastHour?: unknown;
+  lastHour?: unknown;
+}) => {
+  const rawDeleteMode = payload?.deleteMode ?? payload?.delete_mode;
+  const inferredHoursMode = payload?.deleteLastHour === true || payload?.lastHour === true;
+  const deleteMode = inferredHoursMode ? 'hours' : parseDeleteMode(rawDeleteMode);
+
+  const rawDeleteHours = payload?.deleteHours ?? payload?.delete_hours;
+  const parsedHours =
+    typeof rawDeleteHours === 'number'
+      ? rawDeleteHours
+      : typeof rawDeleteHours === 'string'
+        ? Number(rawDeleteHours)
+        : undefined;
+
+  const deleteHours =
+    deleteMode === 'hours'
+      ? Math.max(1, Math.floor(Number.isFinite(parsedHours as number) ? (parsedHours as number) : 1))
+      : undefined;
+
+  return { deleteMode, deleteHours } as const;
 };
 
 const normalizeIp = (value?: string): string | null => {
@@ -943,7 +1002,16 @@ const canModerate = (role: string): boolean => {
 
 const handleKickMember = async (
   client: ClientConnection,
-  payload: { targetUserId: string; reason?: string; deleteMode?: MessageDeleteMode; deleteHours?: number }
+  payload: {
+    targetUserId: string;
+    reason?: string;
+    deleteMode?: MessageDeleteMode;
+    delete_mode?: MessageDeleteMode;
+    deleteHours?: number;
+    delete_hours?: number;
+    deleteLastHour?: boolean;
+    lastHour?: boolean;
+  }
 ) => {
   if (!client.userId) return;
   const moderator = await getUserById(client.userId);
@@ -964,8 +1032,15 @@ const handleKickMember = async (
     return;
   }
 
-  const deleteMode = parseDeleteMode(payload?.deleteMode);
-  const deleteHours = deleteMode === 'hours' ? Math.max(1, Math.floor(payload?.deleteHours || 1)) : undefined;
+  const { deleteMode, deleteHours } = extractDeleteOptions(payload || {});
+  console.debug('[WS DEBUG] kick_member delete payload received', {
+    moderatorUserId: moderator.id,
+    targetUserId,
+    rawDeleteMode: payload?.deleteMode ?? payload?.delete_mode,
+    rawDeleteHours: payload?.deleteHours ?? payload?.delete_hours,
+    resolvedDeleteMode: deleteMode,
+    resolvedDeleteHours: deleteHours ?? null
+  });
   const reason = (payload?.reason || '').trim() || 'You were kicked from this server.';
   const targetIp = normalizeIp(connectionManager.getUserIp(targetUser.id) || targetUser.last_ip || undefined);
 
@@ -1033,7 +1108,11 @@ const handleBanMember = async (
     targetUserId: string;
     reason?: string;
     deleteMode?: MessageDeleteMode;
+    delete_mode?: MessageDeleteMode;
     deleteHours?: number;
+    delete_hours?: number;
+    deleteLastHour?: boolean;
+    lastHour?: boolean;
     blacklistIdentity?: boolean;
     blacklistIp?: boolean;
   }
@@ -1057,8 +1136,15 @@ const handleBanMember = async (
     return;
   }
 
-  const deleteMode = parseDeleteMode(payload?.deleteMode);
-  const deleteHours = deleteMode === 'hours' ? Math.max(1, Math.floor(payload?.deleteHours || 1)) : undefined;
+  const { deleteMode, deleteHours } = extractDeleteOptions(payload || {});
+  console.debug('[WS DEBUG] ban_member delete payload received', {
+    moderatorUserId: moderator.id,
+    targetUserId,
+    rawDeleteMode: payload?.deleteMode ?? payload?.delete_mode,
+    rawDeleteHours: payload?.deleteHours ?? payload?.delete_hours,
+    resolvedDeleteMode: deleteMode,
+    resolvedDeleteHours: deleteHours ?? null
+  });
   const reason = (payload?.reason || '').trim() || 'You were banned from this server.';
   const blacklistIdentity = payload?.blacklistIdentity !== false;
   const blacklistIp = payload?.blacklistIp === true;

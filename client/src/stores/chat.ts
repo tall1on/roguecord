@@ -33,6 +33,14 @@ export interface Message {
   user?: User;
 }
 
+interface ChannelMessagePageState {
+  hasMore: boolean;
+  isLoading: boolean;
+  oldestMessageCreatedAt: string | null;
+  oldestMessageId: string | null;
+  initialized: boolean;
+}
+
 export interface SavedConnection {
   id: string;
   name: string;
@@ -151,6 +159,7 @@ export const useChatStore = defineStore('chat', () => {
   const categories = ref<Category[]>([]);
   const channels = ref<Channel[]>([]);
   const messages = ref<Record<string, Message[]>>({}); // channel_id -> Message[]
+  const messagePageState = ref<Record<string, ChannelMessagePageState>>({});
   const unreadChannelIds = ref<Set<string>>(new Set());
   
   const activeChannelId = ref<string | null>(null);
@@ -470,6 +479,7 @@ export const useChatStore = defineStore('chat', () => {
     activeChannelId.value = null;
     activeMainPanel.value = { type: 'text', channelId: null };
     messages.value = {};
+    messagePageState.value = {};
     users.value = [];
     onlineUserIds.value.clear();
     currentUser.value = null;
@@ -521,6 +531,21 @@ export const useChatStore = defineStore('chat', () => {
 
   const addMessageListener = (listener: (message: any) => void) => {
     messageListeners.value.push(listener);
+  };
+
+  const createDefaultMessagePageState = (): ChannelMessagePageState => ({
+    hasMore: false,
+    isLoading: false,
+    oldestMessageCreatedAt: null,
+    oldestMessageId: null,
+    initialized: false
+  });
+
+  const ensureMessagePageState = (channelId: string): ChannelMessagePageState => {
+    if (!messagePageState.value[channelId]) {
+      messagePageState.value[channelId] = createDefaultMessagePageState();
+    }
+    return messagePageState.value[channelId]!;
   };
 
   const isUnreadEligibleChannel = (channel: Channel | undefined) => {
@@ -702,6 +727,7 @@ export const useChatStore = defineStore('chat', () => {
         const deletedChannel = channels.value.find((c: Channel) => c.id === deletedChannelId);
         channels.value = channels.value.filter((c: Channel) => c.id !== deletedChannelId);
         delete messages.value[deletedChannelId];
+        delete messagePageState.value[deletedChannelId];
         clearChannelUnread(deletedChannelId);
 
         if ((deletedChannel?.type === 'text' || deletedChannel?.type === 'rss') && activeChannelId.value === deletedChannelId) {
@@ -712,16 +738,50 @@ export const useChatStore = defineStore('chat', () => {
         break;
       }
         
-      case 'messages_list':
-        messages.value[payload.channel_id] = payload.messages;
+      case 'messages_list': {
+        const channelId = payload.channel_id as string;
+        const pageState = ensureMessagePageState(channelId);
+        const incomingMessages = (payload.messages || []) as Message[];
+        const isOlderPage = payload.is_older_page === true;
+
+        if (isOlderPage) {
+          const existingMessages = messages.value[channelId] || [];
+          const seen = new Set<string>();
+          const merged: Message[] = [];
+
+          for (const message of [...incomingMessages, ...existingMessages]) {
+            if (!message?.id || seen.has(message.id)) {
+              continue;
+            }
+            seen.add(message.id);
+            merged.push(message);
+          }
+
+          messages.value[channelId] = merged;
+        } else {
+          messages.value[channelId] = incomingMessages;
+        }
+
+        pageState.hasMore = payload.has_more === true;
+        pageState.oldestMessageCreatedAt = typeof payload.before_created_at === 'string' ? payload.before_created_at : null;
+        pageState.oldestMessageId = typeof payload.before_id === 'string' ? payload.before_id : null;
+        pageState.initialized = true;
+        pageState.isLoading = false;
         break;
+      }
         
       case 'new_message':
         const msg = payload.message;
+        const pageState = ensureMessagePageState(msg.channel_id);
         if (!messages.value[msg.channel_id]) {
           messages.value[msg.channel_id] = [];
         }
-        messages.value[msg.channel_id]?.push(msg);
+        if (!messages.value[msg.channel_id]?.some((existing) => existing.id === msg.id)) {
+          messages.value[msg.channel_id]?.push(msg);
+        }
+        if (!pageState.initialized) {
+          pageState.initialized = true;
+        }
         markChannelUnread(msg.channel_id);
         break;
         
@@ -811,7 +871,38 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const getMessages = (channel_id: string) => {
+    const pageState = ensureMessagePageState(channel_id);
+    pageState.isLoading = true;
     send('get_messages', { channel_id });
+  };
+
+  const loadOlderMessages = (channel_id: string) => {
+    const pageState = ensureMessagePageState(channel_id);
+    if (pageState.isLoading || !pageState.initialized || !pageState.hasMore) {
+      return false;
+    }
+
+    if (!pageState.oldestMessageCreatedAt || !pageState.oldestMessageId) {
+      pageState.hasMore = false;
+      return false;
+    }
+
+    pageState.isLoading = true;
+    send('get_messages', {
+      channel_id,
+      before_created_at: pageState.oldestMessageCreatedAt,
+      before_id: pageState.oldestMessageId
+    });
+    return true;
+  };
+
+  const isLoadingMessagesForChannel = (channel_id: string) => {
+    return ensureMessagePageState(channel_id).isLoading;
+  };
+
+  const hasOlderMessagesForChannel = (channel_id: string) => {
+    const state = ensureMessagePageState(channel_id);
+    return state.initialized && state.hasMore;
   };
 
   const submitAdminKey = (key: string) => {
@@ -844,6 +935,12 @@ export const useChatStore = defineStore('chat', () => {
 
     users.value = users.value.filter((u) => u.id !== targetUserId);
     onlineUserIds.value.delete(targetUserId);
+    console.debug('[WS DEBUG] Sending kick_member', {
+      targetUserId: payload.targetUserId,
+      deleteMode: payload.deleteMode,
+      deleteHours: payload.deleteHours ?? null,
+      hasReason: Boolean(payload.reason)
+    });
     send('kick_member', payload);
   };
 
@@ -886,6 +983,14 @@ export const useChatStore = defineStore('chat', () => {
 
     users.value = users.value.filter((u) => u.id !== targetUserId);
     onlineUserIds.value.delete(targetUserId);
+    console.debug('[WS DEBUG] Sending ban_member', {
+      targetUserId: payload.targetUserId,
+      deleteMode: payload.deleteMode,
+      deleteHours: payload.deleteHours ?? null,
+      blacklistIdentity: payload.blacklistIdentity === true,
+      blacklistIp: payload.blacklistIp === true,
+      hasReason: Boolean(payload.reason)
+    });
     send('ban_member', payload);
   };
 
@@ -951,6 +1056,9 @@ export const useChatStore = defineStore('chat', () => {
     updateServerSettings,
     clearError,
     sendMessage,
+    loadOlderMessages,
+    isLoadingMessagesForChannel,
+    hasOlderMessagesForChannel,
     kickMember,
     banMember,
     clearModerationNotice,

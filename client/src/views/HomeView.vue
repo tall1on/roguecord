@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import { useChatStore } from '../stores/chat'
+import { useChatStore, type Message } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
 const messageInput = ref('')
 const messagesContainer = ref<HTMLElement | null>(null)
+const preserveScrollOnNextRender = ref(false)
+const previousScrollHeight = ref(0)
+const isFetchingOlderMessages = ref(false)
+
+const TOP_SCROLL_THRESHOLD_PX = 120
+const BOTTOM_SCROLL_THRESHOLD_PX = 120
 
 const activeTextChannel = computed(() => {
   if (chatStore.activeMainPanel.type !== 'text' || !chatStore.activeMainPanel.channelId) return null
@@ -103,14 +109,146 @@ const formatTime = (dateString: string) => {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
-// Auto-scroll to bottom when messages change
-watch(() => chatStore.activeChannelMessages, async () => {
-  if (!activeTextChannel.value) return
-  await nextTick()
-  if (messagesContainer.value) {
-    messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
+const formatDateDivider = (dateString: string) => {
+  const date = new Date(dateString)
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const yesterday = new Date(today)
+  yesterday.setDate(yesterday.getDate() - 1)
+  const target = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+
+  if (target.getTime() === today.getTime()) {
+    return 'Today'
   }
-}, { deep: true })
+
+  if (target.getTime() === yesterday.getTime()) {
+    return 'Yesterday'
+  }
+
+  return date.toLocaleDateString([], {
+    weekday: 'short',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  })
+}
+
+const getMessageDayKey = (dateString: string) => {
+  const date = new Date(dateString)
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
+}
+
+type RenderEntry =
+  | { type: 'divider'; key: string; label: string }
+  | { type: 'message'; key: string; message: Message }
+
+const activeChannelEntries = computed<RenderEntry[]>(() => {
+  const entries: RenderEntry[] = []
+  let previousDayKey: string | null = null
+
+  for (const message of chatStore.activeChannelMessages) {
+    const dayKey = getMessageDayKey(message.created_at)
+    if (dayKey !== previousDayKey) {
+      entries.push({
+        type: 'divider',
+        key: `divider-${dayKey}`,
+        label: formatDateDivider(message.created_at)
+      })
+      previousDayKey = dayKey
+    }
+
+    entries.push({
+      type: 'message',
+      key: message.id,
+      message
+    })
+  }
+
+  return entries
+})
+
+const isNearBottom = (container: HTMLElement, threshold = BOTTOM_SCROLL_THRESHOLD_PX) => {
+  const distance = container.scrollHeight - (container.scrollTop + container.clientHeight)
+  return distance <= threshold
+}
+
+const scrollToBottom = () => {
+  if (!messagesContainer.value) return
+  messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
+}
+
+const onMessagesScroll = async () => {
+  const container = messagesContainer.value
+  const channelId = activeTextChannel.value?.id
+  if (!container || !channelId) return
+
+  if (container.scrollTop > TOP_SCROLL_THRESHOLD_PX) {
+    return
+  }
+
+  if (isFetchingOlderMessages.value || chatStore.isLoadingMessagesForChannel(channelId)) {
+    return
+  }
+
+  if (!chatStore.hasOlderMessagesForChannel(channelId)) {
+    return
+  }
+
+  previousScrollHeight.value = container.scrollHeight
+  preserveScrollOnNextRender.value = true
+  isFetchingOlderMessages.value = true
+  const started = chatStore.loadOlderMessages(channelId)
+  if (!started) {
+    preserveScrollOnNextRender.value = false
+    isFetchingOlderMessages.value = false
+  }
+}
+
+watch(
+  () => activeTextChannel.value?.id,
+  async () => {
+    preserveScrollOnNextRender.value = false
+    isFetchingOlderMessages.value = false
+    await nextTick()
+    scrollToBottom()
+  }
+)
+
+watch(
+  () => chatStore.activeChannelMessages.length,
+  async (newLength, oldLength) => {
+    if (!activeTextChannel.value) return
+    await nextTick()
+    const container = messagesContainer.value
+    if (!container) return
+
+    if (preserveScrollOnNextRender.value) {
+      const heightDelta = container.scrollHeight - previousScrollHeight.value
+      container.scrollTop += heightDelta
+      preserveScrollOnNextRender.value = false
+      isFetchingOlderMessages.value = false
+      return
+    }
+
+    if (newLength <= oldLength) {
+      return
+    }
+
+    if (oldLength === 0 || isNearBottom(container)) {
+      scrollToBottom()
+    }
+  }
+)
+
+watch(
+  () => (activeTextChannel.value ? chatStore.isLoadingMessagesForChannel(activeTextChannel.value.id) : false),
+  (isLoading) => {
+    if (!isLoading && isFetchingOlderMessages.value) {
+      isFetchingOlderMessages.value = false
+      preserveScrollOnNextRender.value = false
+    }
+  }
+)
 </script>
 
 <template>
@@ -125,7 +263,8 @@ watch(() => chatStore.activeChannelMessages, async () => {
       </header>
 
       <!-- Chat Messages Area -->
-      <main ref="messagesContainer" class="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
+      <main ref="messagesContainer" class="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar" @scroll.passive="onMessagesScroll">
+          <div v-if="isFetchingOlderMessages" class="text-center text-xs text-gray-400 py-1">Loading older messages...</div>
           <div v-if="chatStore.activeChannelMessages.length === 0" class="flex flex-col justify-end h-full pb-4">
             <div class="w-16 h-16 rounded-full bg-[#4e5058] flex items-center justify-center mb-4">
               <span class="text-3xl text-white">#</span>
@@ -134,22 +273,29 @@ watch(() => chatStore.activeChannelMessages, async () => {
             <p class="text-gray-400">This is the start of the #{{ activeTextChannel.name }} channel.</p>
           </div>
 
-        <div 
-          v-for="message in chatStore.activeChannelMessages" 
-          :key="message.id"
-          class="flex items-start gap-4 hover:bg-[#2e3035] p-1 -mx-1 rounded transition-colors"
-        >
-          <div class="w-10 h-10 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mt-0.5">
-            {{ message.user?.username.charAt(0).toUpperCase() || '?' }}
+        <template v-for="entry in activeChannelEntries" :key="entry.key">
+          <div v-if="entry.type === 'divider'" class="flex items-center gap-3 py-2">
+            <hr class="flex-1 border-t border-[#3f4147]" />
+            <span class="text-[11px] uppercase tracking-wide text-gray-400">{{ entry.label }}</span>
+            <hr class="flex-1 border-t border-[#3f4147]" />
           </div>
-          <div>
-            <div class="flex items-baseline gap-2">
-              <span class="font-medium hover:underline cursor-pointer" :class="message.user?.role === 'admin' ? 'text-red-500' : 'text-white'">{{ message.user?.username || 'Unknown User' }}</span>
-              <span class="text-xs text-gray-400">{{ formatTime(message.created_at) }}</span>
+
+          <div
+            v-else
+            class="flex items-start gap-4 hover:bg-[#2e3035] p-1 -mx-1 rounded transition-colors"
+          >
+            <div class="w-10 h-10 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mt-0.5">
+              {{ entry.message.user?.username.charAt(0).toUpperCase() || '?' }}
             </div>
-            <p class="text-gray-300 whitespace-pre-wrap break-words">{{ message.content }}</p>
+            <div>
+              <div class="flex items-baseline gap-2">
+                <span class="font-medium hover:underline cursor-pointer" :class="entry.message.user?.role === 'admin' ? 'text-red-500' : 'text-white'">{{ entry.message.user?.username || 'Unknown User' }}</span>
+                <span class="text-xs text-gray-400">{{ formatTime(entry.message.created_at) }}</span>
+              </div>
+              <p class="text-gray-300 whitespace-pre-wrap break-words">{{ entry.message.content }}</p>
+            </div>
           </div>
-        </div>
+        </template>
       </main>
 
       <!-- Chat Input Area -->
