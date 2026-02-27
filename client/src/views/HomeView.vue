@@ -67,6 +67,7 @@ const voiceTileClass = computed(() => {
 
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
 const screenVideoElements = new Map<string, HTMLVideoElement>()
+const screenContainerElements = new Map<string, HTMLElement>()
 
 type ScreenContextMenuState = {
   visible: boolean
@@ -247,6 +248,7 @@ const setScreenVideoRef = (userId: string, video: HTMLVideoElement | null) => {
   }
 
   screenVideoElements.set(userId, video)
+  video.controls = false
   syncScreenVideoAudioState(userId)
   const nextStream = getUserScreenStream(userId)
   if (video.srcObject !== nextStream) {
@@ -288,15 +290,29 @@ const setScreenVideoTemplateRef = (
   }
 }
 
+const setScreenContainerRef = (
+  userId: string,
+  el: Element | ComponentPublicInstance | null
+) => {
+  if (el === null) {
+    screenContainerElements.delete(userId)
+    return
+  }
+
+  if (el instanceof HTMLElement) {
+    screenContainerElements.set(userId, el)
+  }
+}
+
 const enterScreenFullscreen = async (userId: string) => {
-  const video = screenVideoElements.get(userId)
-  if (!video) return
+  const container = screenContainerElements.get(userId)
+  if (!container) return
 
   const requestFullscreen =
-    video.requestFullscreen
-      ? () => video.requestFullscreen()
-      : (video as HTMLVideoElement & { webkitRequestFullscreen?: () => Promise<void> }).webkitRequestFullscreen
-        ? () => (video as HTMLVideoElement & { webkitRequestFullscreen: () => Promise<void> }).webkitRequestFullscreen()
+    container.requestFullscreen
+      ? () => container.requestFullscreen()
+      : (container as HTMLElement & { webkitRequestFullscreen?: () => Promise<void> }).webkitRequestFullscreen
+        ? () => (container as HTMLElement & { webkitRequestFullscreen: () => Promise<void> }).webkitRequestFullscreen()
         : null
 
   if (!requestFullscreen) return
@@ -332,11 +348,11 @@ const getFullscreenElement = () => {
 }
 
 const onScreenVideoClick = async (userId: string) => {
-  const video = screenVideoElements.get(userId)
-  if (!video) return
+  const container = screenContainerElements.get(userId)
+  if (!container) return
 
   const fullscreenElement = getFullscreenElement()
-  if (fullscreenElement === video) {
+  if (fullscreenElement === container) {
     await exitScreenFullscreen()
     return
   }
@@ -374,17 +390,17 @@ watch(
       }
     }
 
-    const fsEl = document.fullscreenElement as HTMLVideoElement | null
+    const fsEl = getFullscreenElement()
     if (fsEl) {
-      let isActiveShare = false
-      for (const stream of streams.values()) {
-        if (fsEl.srcObject === stream) {
-          isActiveShare = true
+      let fullscreenUserId: string | null = null
+      for (const [userId, container] of screenContainerElements.entries()) {
+        if (container === fsEl) {
+          fullscreenUserId = userId
           break
         }
       }
 
-      if (!isActiveShare) {
+      if (fullscreenUserId && !streams.has(fullscreenUserId)) {
         void exitScreenFullscreen()
       }
     }
@@ -679,27 +695,30 @@ watch(
             class="rounded-xl bg-[#2b2d31] border border-[#3f4147] flex items-center justify-center overflow-hidden"
             :class="voiceTileClass"
           >
-            <div v-show="getUserScreenStream(user.id)" class="group relative w-full h-full bg-black rounded-xl">
+            <div
+              v-show="getUserScreenStream(user.id)"
+              :ref="(el) => setScreenContainerRef(user.id, el)"
+              class="screen-stream-wrapper group relative w-full h-full bg-black rounded-xl"
+              @click="onScreenVideoClick(user.id)"
+              @contextmenu.prevent.stop="openScreenContextMenu($event, user.id)"
+            >
               <video
                 :ref="(el) => setScreenVideoTemplateRef(user.id, el)"
                 :muted="webrtcStore.isScreenStreamMuted(user.id)"
                 :volume.prop="webrtcStore.getScreenStreamVolume(user.id)"
-                :controls="false"
                 autoplay
                 playsinline
-                class="w-full h-full object-contain rounded-xl bg-black cursor-pointer"
-                @click="onScreenVideoClick(user.id)"
-                @contextmenu.prevent.stop="openScreenContextMenu($event, user.id)"
+                class="screen-stream-video w-full h-full object-contain rounded-xl bg-black cursor-pointer"
               />
 
               <div
-                class="absolute bottom-2 left-2 right-2 flex items-center gap-2 rounded-md border border-[#1f2124] bg-[#1f2124]/90 px-2 py-1.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                class="screen-stream-overlay absolute bottom-2 left-2 right-2 z-20 flex items-center gap-2 rounded-md border border-[#1f2124] bg-[#1f2124]/90 px-2 py-1.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
                 @click.stop
                 @contextmenu.stop
               >
                 <button
                   type="button"
-                  class="w-7 h-7 rounded bg-[#2b2d31] hover:bg-[#3a3d44] text-sm flex items-center justify-center text-gray-200"
+                  class="screen-stream-control w-7 h-7 rounded bg-[#2b2d31] hover:bg-[#3a3d44] text-sm flex items-center justify-center text-gray-200"
                   :aria-label="webrtcStore.isScreenStreamMuted(user.id) ? 'Unmute stream volume' : 'Mute stream volume'"
                   @click="onToggleScreenVolumeMute(user.id, $event)"
                 >
@@ -712,7 +731,7 @@ watch(
                   max="100"
                   step="1"
                   :value="getScreenVolumePercent(user.id)"
-                  class="flex-1 h-1 accent-indigo-400 cursor-pointer"
+                  class="screen-stream-control flex-1 h-1 accent-indigo-400 cursor-pointer"
                   aria-label="Stream volume"
                   @input="onScreenVolumeInput(user.id, $event)"
                   @click.stop
@@ -800,3 +819,32 @@ watch(
     </template>
   </div>
 </template>
+
+<style scoped>
+.screen-stream-wrapper:fullscreen,
+.screen-stream-wrapper:-webkit-full-screen {
+  width: 100%;
+  height: 100%;
+  background: #000;
+}
+
+.screen-stream-wrapper:fullscreen .screen-stream-video,
+.screen-stream-wrapper:-webkit-full-screen .screen-stream-video {
+  width: 100%;
+  height: 100%;
+}
+
+.screen-stream-overlay {
+  pointer-events: none;
+}
+
+.screen-stream-control,
+.screen-stream-overlay span {
+  pointer-events: auto;
+}
+
+.screen-stream-wrapper:fullscreen .screen-stream-overlay,
+.screen-stream-wrapper:-webkit-full-screen .screen-stream-overlay {
+  opacity: 1;
+}
+</style>
