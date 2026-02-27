@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onBeforeUnmount, type ComponentPublicInstance } from 'vue'
 import { useChatStore, type Message } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 
@@ -70,8 +70,7 @@ const screenVideoElements = new Map<string, HTMLVideoElement>()
 
 const getUserScreenStream = (userId: string) => webrtcStore.userScreenStreams.get(userId) || null
 
-const setScreenVideoRef = (userId: string, el: Element | null) => {
-  const video = el as HTMLVideoElement | null
+const setScreenVideoRef = (userId: string, video: HTMLVideoElement | null) => {
   if (!video) {
     screenVideoElements.delete(userId)
     return
@@ -79,6 +78,20 @@ const setScreenVideoRef = (userId: string, el: Element | null) => {
 
   screenVideoElements.set(userId, video)
   video.srcObject = getUserScreenStream(userId)
+}
+
+const setScreenVideoTemplateRef = (
+  userId: string,
+  el: Element | ComponentPublicInstance | null
+) => {
+  if (el === null) {
+    setScreenVideoRef(userId, null)
+    return
+  }
+
+  if (el instanceof HTMLVideoElement) {
+    setScreenVideoRef(userId, el)
+  }
 }
 
 const enterScreenFullscreen = async (userId: string) => {
@@ -400,7 +413,7 @@ watch(
           >
             <video
               v-if="getUserScreenStream(user.id)"
-              :ref="(el) => setScreenVideoRef(user.id, el)"
+              :ref="(el) => setScreenVideoTemplateRef(user.id, el)"
               autoplay
               playsinline
               class="w-full h-full object-contain rounded-xl bg-black cursor-pointer"
