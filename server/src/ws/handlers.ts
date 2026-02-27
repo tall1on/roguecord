@@ -895,11 +895,31 @@ const handleVoiceStateUpdate = async (client: ClientConnection, payload: { chann
     peer.isDeafened = isDeafened;
 
     for (const producer of peer.producers.values()) {
+      const producerSource = (producer.appData as { source?: unknown } | undefined)?.source;
+      const source: 'mic' | 'screen' | 'camera' =
+        producerSource === 'mic' || producerSource === 'screen' || producerSource === 'camera'
+          ? producerSource
+          : (producer.kind === 'audio' ? 'mic' : 'camera');
+
+      // Mute/deafen state must only gate microphone producers.
+      // Pausing screen/camera producers causes remote video frame freeze/black screen.
+      if (source !== 'mic') {
+        continue;
+      }
+
       if (isMuted || isDeafened) {
         await producer.pause();
       } else {
         await producer.resume();
       }
+
+      console.log('[WS DEBUG] Updated producer pause state from voice flags', {
+        userId: client.userId,
+        channel_id,
+        producerId: producer.id,
+        source,
+        paused: isMuted || isDeafened
+      });
     }
   }
 
