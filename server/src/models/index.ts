@@ -273,6 +273,10 @@ export const getFolderChannelFileById = async (fileId: string): Promise<FolderCh
   return dbGet<FolderChannelFile>('SELECT * FROM folder_channel_files WHERE id = ?', [fileId]);
 };
 
+export const deleteFolderChannelFileById = async (fileId: string): Promise<void> => {
+  await dbRun('DELETE FROM folder_channel_files WHERE id = ?', [fileId]);
+};
+
 // --- Messages ---
 export interface Message {
   id: string;

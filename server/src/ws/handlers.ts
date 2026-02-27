@@ -29,7 +29,8 @@ import {
   markChannelReadUpToMessage,
   createFolderChannelFile,
   getFolderChannelFiles,
-  getFolderChannelFileById
+  getFolderChannelFileById,
+  deleteFolderChannelFileById
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -100,6 +101,10 @@ const resolveSafeStoredFilePath = (channelId: string, storageName: string) => {
   return fullPath;
 };
 
+const hasFolderManagementAccess = (role: string | null | undefined) => {
+  return role === 'admin' || role === 'owner';
+};
+
 export const handleMessage = async (client: ClientConnection, messageStr: string) => {
   try {
     const message = JSON.parse(messageStr);
@@ -139,6 +144,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'folder_download_file':
         await handleFolderDownloadFile(client, payload);
+        break;
+      case 'folder_delete_file':
+        await handleFolderDeleteFile(client, payload);
         break;
       case 'join_voice_channel':
         await handleJoinVoiceChannel(client, payload);
@@ -810,6 +818,73 @@ const handleFolderDownloadFile = async (
     console.error('[WS DEBUG] Failed to read folder file:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to download file' } }));
   }
+};
+
+const handleFolderDeleteFile = async (
+  client: ClientConnection,
+  payload: { channel_id?: string; file_id?: string }
+) => {
+  if (!client.userId) return;
+
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  const fileId = typeof payload?.file_id === 'string' ? payload.file_id : '';
+  if (!channelId || !fileId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid delete payload' } }));
+    return;
+  }
+
+  const channel = await getChannelById(channelId);
+  if (!channel || channel.type !== 'folder') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Folder channel not found' } }));
+    return;
+  }
+
+  const user = await getUserById(client.userId);
+  if (!user || !hasFolderManagementAccess(user.role)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions to delete files' } }));
+    return;
+  }
+
+  const file = await getFolderChannelFileById(fileId);
+  if (!file || file.channel_id !== channelId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'File not found' } }));
+    return;
+  }
+
+  try {
+    const fullPath = resolveSafeStoredFilePath(channelId, file.storage_name);
+    if (fs.existsSync(fullPath)) {
+      fs.unlinkSync(fullPath);
+    }
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to delete stored folder file:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to delete file' } }));
+    return;
+  }
+
+  try {
+    await deleteFolderChannelFileById(file.id);
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to delete folder file metadata:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to delete file' } }));
+    return;
+  }
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'folder_file_deleted',
+    payload: {
+      channel_id: channelId,
+      file_id: file.id
+    }
+  });
+
+  client.ws.send(JSON.stringify({
+    type: 'folder_delete_success',
+    payload: {
+      channel_id: channelId,
+      file_id: file.id
+    }
+  }));
 };
 
 export const handleClientDisconnect = (client: ClientConnection) => {

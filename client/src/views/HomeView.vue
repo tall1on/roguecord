@@ -43,7 +43,12 @@ const activeFolderFiles = computed<FolderChannelFile[]>(() => {
   return chatStore.folderFiles[channelId] || []
 })
 
-const canUploadToFolder = computed(() => chatStore.currentUserRole === 'admin')
+const canManageFolderFiles = computed(() => {
+  const role = chatStore.currentUserRole || 'user'
+  return role === 'admin' || role === 'owner'
+})
+
+const canUploadToFolder = computed(() => canManageFolderFiles.value)
 
 const activeVoiceParticipants = computed(() => {
   if (!activeVoiceChannel.value) return []
@@ -511,6 +516,16 @@ const requestFolderFileDownload = (fileId: string) => {
   chatStore.downloadFolderFile(channelId, fileId)
 }
 
+const requestFolderFileDelete = (fileId: string, fileName: string) => {
+  const channelId = activeFolderChannel.value?.id
+  if (!channelId || !canManageFolderFiles.value) return
+
+  const confirmed = window.confirm(`Delete file \"${fileName}\"? This cannot be undone.`)
+  if (!confirmed) return
+
+  chatStore.deleteFolderFile(channelId, fileId)
+}
+
 type FolderFileCategory = 'image' | 'video' | 'audio' | 'archive' | 'code' | 'text' | 'pdf' | 'generic'
 
 const imageExtensions = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'])
@@ -874,13 +889,23 @@ watch(
                 </p>
               </div>
             </div>
-            <button
-              type="button"
-              class="shrink-0 px-3 py-1.5 text-sm rounded bg-[#404249] hover:bg-[#4e5058] text-white"
-              @click="requestFolderFileDownload(file.id)"
-            >
-              Download
-            </button>
+            <div class="shrink-0 flex items-center gap-2">
+              <button
+                type="button"
+                class="px-3 py-1.5 text-sm rounded bg-[#404249] hover:bg-[#4e5058] text-white"
+                @click="requestFolderFileDownload(file.id)"
+              >
+                Download
+              </button>
+              <button
+                v-if="canManageFolderFiles"
+                type="button"
+                class="px-3 py-1.5 text-sm rounded bg-[#5b2d31] hover:bg-[#6a3136] text-white"
+                @click="requestFolderFileDelete(file.id, file.original_name)"
+              >
+                Delete
+              </button>
+            </div>
           </div>
         </div>
 
@@ -903,13 +928,23 @@ watch(
               <p class="text-xs text-gray-400 truncate mt-1">{{ file.uploader_username || 'Unknown uploader' }}</p>
               <p class="text-xs text-gray-400 mt-1">{{ formatTime(file.created_at) }}</p>
             </div>
-            <button
-              type="button"
-              class="mt-auto w-full px-3 py-1.5 text-sm rounded bg-[#404249] hover:bg-[#4e5058] text-white"
-              @click="requestFolderFileDownload(file.id)"
-            >
-              Download
-            </button>
+            <div class="mt-auto flex items-center gap-2">
+              <button
+                type="button"
+                class="w-full px-3 py-1.5 text-sm rounded bg-[#404249] hover:bg-[#4e5058] text-white"
+                @click="requestFolderFileDownload(file.id)"
+              >
+                Download
+              </button>
+              <button
+                v-if="canManageFolderFiles"
+                type="button"
+                class="w-full px-3 py-1.5 text-sm rounded bg-[#5b2d31] hover:bg-[#6a3136] text-white"
+                @click="requestFolderFileDelete(file.id, file.original_name)"
+              >
+                Delete
+              </button>
+            </div>
           </div>
         </div>
       </main>

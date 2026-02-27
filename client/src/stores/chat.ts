@@ -858,6 +858,16 @@ export const useChatStore = defineStore('chat', () => {
         break;
       }
 
+      case 'folder_file_deleted': {
+        const channelId = payload.channel_id as string;
+        const fileId = payload.file_id as string;
+        if (!channelId || !fileId) break;
+
+        const existing = folderFiles.value[channelId] || [];
+        folderFiles.value[channelId] = existing.filter((file) => file.id !== fileId);
+        break;
+      }
+
       case 'folder_file_download': {
         const file = payload.file as { original_name?: string; mime_type?: string | null } | undefined;
         const dataBase64 = payload.data_base64 as string | undefined;
@@ -1202,6 +1212,15 @@ export const useChatStore = defineStore('chat', () => {
     send('folder_download_file', { channel_id, file_id });
   };
 
+  const deleteFolderFile = (channel_id: string, file_id: string) => {
+    if (!channel_id || !file_id) {
+      lastError.value = 'Channel ID and file ID are required';
+      return;
+    }
+
+    send('folder_delete_file', { channel_id, file_id });
+  };
+
   const setActiveVoicePanel = (channel_id: string) => {
     activeMainPanel.value = { type: 'voice', channelId: channel_id };
   };
@@ -1266,6 +1285,7 @@ export const useChatStore = defineStore('chat', () => {
     requestFolderFiles,
     uploadFolderFile,
     downloadFolderFile,
+    deleteFolderFile,
     send,
     ws,
     addMessageListener,
