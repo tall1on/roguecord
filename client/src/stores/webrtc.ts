@@ -44,7 +44,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     userScreenStreams.value = new Map(userScreenStreams.value);
   };
 
-  const cleanupScreenShareProducer = () => {
+  const cleanupScreenShareProducer = (notifyServer: boolean = true) => {
+    const currentScreenProducerId = screenProducer.value?.id as string | undefined;
     if (screenProducer.value) {
       try {
         screenProducer.value.close();
@@ -52,6 +53,17 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         // no-op
       }
       screenProducer.value = null;
+    }
+
+    if (notifyServer && currentScreenProducerId && activeVoiceChannelId.value) {
+      console.info('[WebRTC][screen] Requesting server-side producer close', {
+        channelId: activeVoiceChannelId.value,
+        producerId: currentScreenProducerId
+      });
+      chatStore.send('close_producer', {
+        channel_id: activeVoiceChannelId.value,
+        producer_id: currentScreenProducerId
+      });
     }
 
     if (screenShareStream.value) {
@@ -103,7 +115,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
   const stopScreenShare = () => {
     screenShareError.value = null;
-    cleanupScreenShareProducer();
+    cleanupScreenShareProducer(true);
   };
 
   const waitForSendTransport = async (timeoutMs: number = 4000) => {
@@ -194,7 +206,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       }
 
       screenProducer.value.on('transportclose', () => {
-        cleanupScreenShareProducer();
+        cleanupScreenShareProducer(false);
       });
     } catch (error) {
       screenShareError.value = 'Failed to start screen share. Please try again.';
@@ -1014,6 +1026,65 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           console.error('Failed to consume:', error);
         }
         break;
+
+      case 'producer_closed': {
+        if (payload.channel_id !== activeVoiceChannelId.value) return;
+
+        const producerId = payload.producer_id as string;
+        const source = producerToSource.get(producerId)
+          || (payload.source as MediaSourceType | undefined)
+          || null;
+
+        console.info('[WebRTC][consume] Producer closed notification', {
+          channelId: payload.channel_id,
+          producerId,
+          source,
+          userId: payload.user_id
+        });
+
+        const consumerIdsToClose: string[] = [];
+        for (const [consumerId, mappedProducerId] of consumerToProducer.entries()) {
+          if (mappedProducerId === producerId) {
+            consumerIdsToClose.push(consumerId);
+          }
+        }
+
+        for (const consumerId of consumerIdsToClose) {
+          const consumer = consumers.value.get(consumerId);
+          if (consumer) {
+            try {
+              consumer.close();
+            } catch (_e) {
+              // no-op
+            }
+            consumers.value.delete(consumerId);
+          }
+
+          removeSpeakingDetector(consumerId);
+          remoteStreams.value.delete(consumerId);
+
+          const audio = audioElements.get(consumerId);
+          if (audio) {
+            audio.pause();
+            audio.srcObject = null;
+            audioElements.delete(consumerId);
+          }
+
+          consumerToProducer.delete(consumerId);
+        }
+
+        if (source === 'screen') {
+          if (!producerToSource.has(producerId) && payload.user_id) {
+            deleteUserScreenStream(payload.user_id as string);
+          }
+          removeUserScreenByProducer(producerId);
+        }
+
+        producerToUser.delete(producerId);
+        producerToSource.delete(producerId);
+        remoteStreams.value = new Map(remoteStreams.value);
+        break;
+      }
     }
   };
 

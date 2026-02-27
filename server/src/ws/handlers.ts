@@ -70,6 +70,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'produce':
         await handleProduce(client, payload);
         break;
+      case 'close_producer':
+        await handleCloseProducer(client, payload);
+        break;
       case 'consume':
         await handleConsume(client, payload);
         break;
@@ -664,6 +667,47 @@ const handleProduce = async (client: ClientConnection, payload: { channel_id: st
       });
     }
   }
+};
+
+const handleCloseProducer = async (client: ClientConnection, payload: { channel_id: string, producer_id: string }) => {
+  if (!client.userId) return;
+  const { channel_id, producer_id } = payload;
+  if (!channel_id || !producer_id) return;
+
+  const room = rooms.get(channel_id);
+  if (!room) return;
+
+  const peer = room.peers.get(client.userId);
+  if (!peer) return;
+
+  const producer = peer.producers.get(producer_id);
+  if (!producer) return;
+
+  const producerSource = (producer.appData as { source?: unknown } | undefined)?.source;
+  const source: 'mic' | 'screen' | 'camera' =
+    producerSource === 'mic' || producerSource === 'screen' || producerSource === 'camera'
+      ? producerSource
+      : (producer.kind === 'audio' ? 'mic' : 'camera');
+
+  console.log('[WS DEBUG] Closing producer by client request', {
+    userId: client.userId,
+    channel_id,
+    producer_id,
+    source
+  });
+
+  producer.close();
+  peer.producers.delete(producer_id);
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'producer_closed',
+    payload: {
+      channel_id,
+      producer_id,
+      user_id: client.userId,
+      source
+    }
+  });
 };
 
 const handleConsume = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, producer_id: string, rtpCapabilities: any }) => {
