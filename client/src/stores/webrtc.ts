@@ -31,6 +31,19 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const consumerToProducer = new Map<string, string>();
   const userScreenStreams = shallowRef<Map<string, MediaStream>>(new Map());
 
+  const setUserScreenStream = (userId: string, stream: MediaStream) => {
+    const existing = userScreenStreams.value.get(userId);
+    if (existing === stream) return;
+    userScreenStreams.value.set(userId, stream);
+    userScreenStreams.value = new Map(userScreenStreams.value);
+  };
+
+  const deleteUserScreenStream = (userId: string) => {
+    if (!userScreenStreams.value.has(userId)) return;
+    userScreenStreams.value.delete(userId);
+    userScreenStreams.value = new Map(userScreenStreams.value);
+  };
+
   const cleanupScreenShareProducer = () => {
     if (screenProducer.value) {
       try {
@@ -54,8 +67,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
     const localUserId = chatStore.currentUser?.id;
     if (localUserId && userScreenStreams.value.has(localUserId)) {
-      userScreenStreams.value.delete(localUserId);
-      userScreenStreams.value = new Map(userScreenStreams.value);
+      deleteUserScreenStream(localUserId);
     }
   };
 
@@ -85,8 +97,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           }
         });
       }
-      userScreenStreams.value.delete(userId);
-      userScreenStreams.value = new Map(userScreenStreams.value);
+      deleteUserScreenStream(userId);
     }
   };
 
@@ -179,8 +190,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
       const localUserId = chatStore.currentUser?.id;
       if (localUserId) {
-        userScreenStreams.value.set(localUserId, displayStream);
-        userScreenStreams.value = new Map(userScreenStreams.value);
+        setUserScreenStream(localUserId, displayStream);
       }
 
       screenProducer.value.on('transportclose', () => {
@@ -971,8 +981,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
           if (remoteUserId) {
             if (remoteSource === 'screen') {
-              userScreenStreams.value.set(remoteUserId, stream);
-              userScreenStreams.value = new Map(userScreenStreams.value);
+              setUserScreenStream(remoteUserId, stream);
             } else if (payload.kind === 'audio') {
               addSpeakingDetector(consumer.id, remoteUserId, stream);
             }
