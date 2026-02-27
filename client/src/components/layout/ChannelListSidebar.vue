@@ -343,6 +343,14 @@ const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userI
         </button>
       </div>
 
+      <div
+        v-if="webrtcStore.screenShareError"
+        class="px-3 py-1 text-[11px] leading-4 text-amber-300 bg-amber-950/30 border-b border-amber-700/40"
+        role="alert"
+      >
+        {{ webrtcStore.screenShareError }}
+      </div>
+
       <div v-if="showVoiceStats" class="absolute bottom-[56px] left-2 w-64 bg-[#1e1f22] rounded-lg shadow-xl border border-[#3f4147] p-4 z-50">
         <div class="flex justify-between items-center mb-3">
           <h3 class="text-sm font-bold text-white uppercase">Voice Connection</h3>

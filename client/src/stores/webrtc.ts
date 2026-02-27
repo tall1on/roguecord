@@ -14,6 +14,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const producer = shallowRef<any | null>(null);
   const screenProducer = shallowRef<any | null>(null);
   const screenShareStream = shallowRef<MediaStream | null>(null);
+  const screenShareError = ref<string | null>(null);
   const consumers = shallowRef<Map<string, any>>(new Map());
   
   const activeVoiceChannelId = ref<string | null>(null);
@@ -90,12 +91,40 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   };
 
   const stopScreenShare = () => {
+    screenShareError.value = null;
     cleanupScreenShareProducer();
   };
 
+  const waitForSendTransport = async (timeoutMs: number = 4000) => {
+    if (sendTransport.value) return sendTransport.value;
+
+    const startedAt = Date.now();
+    while (!sendTransport.value && activeVoiceChannelId.value && Date.now() - startedAt < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return sendTransport.value;
+  };
+
   const startScreenShare = async () => {
-    if (!activeVoiceChannelId.value || !sendTransport.value) return;
+    if (!activeVoiceChannelId.value) {
+      screenShareError.value = 'Join a voice channel before sharing your screen.';
+      return;
+    }
     if (screenProducer.value) return;
+
+    screenShareError.value = null;
+    console.info('[WebRTC][screen] Share requested', {
+      channelId: activeVoiceChannelId.value,
+      hasSendTransport: Boolean(sendTransport.value)
+    });
+
+    const readySendTransport = await waitForSendTransport();
+    if (!readySendTransport) {
+      screenShareError.value = 'Screen share is not ready yet. Please try again in a moment.';
+      console.warn('[WebRTC][screen] Share failed: send transport not ready');
+      return;
+    }
 
     try {
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
@@ -103,20 +132,36 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         audio: false
       });
 
+      console.info('[WebRTC][screen] getDisplayMedia resolved', {
+        streamId: displayStream.id,
+        trackCount: displayStream.getTracks().length
+      });
+
       const videoTrack = displayStream.getVideoTracks()[0];
       if (!videoTrack) {
         displayStream.getTracks().forEach((track) => track.stop());
+        screenShareError.value = 'No screen video track was provided by the browser.';
+        console.warn('[WebRTC][screen] Share failed: missing video track after picker confirm');
         return;
       }
+
+      console.info('[WebRTC][screen] Producing screen track', {
+        trackId: videoTrack.id,
+        readyState: videoTrack.readyState
+      });
 
       screenShareStream.value = displayStream;
       videoTrack.onended = () => {
         stopScreenShare();
       };
 
-      screenProducer.value = await sendTransport.value.produce({
+      screenProducer.value = await readySendTransport.produce({
         track: videoTrack,
         appData: { source: 'screen' as MediaSourceType }
+      });
+
+      console.info('[WebRTC][screen] Produce resolved', {
+        producerId: screenProducer.value?.id
       });
 
       const localUserId = chatStore.currentUser?.id;
@@ -129,7 +174,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         cleanupScreenShareProducer();
       });
     } catch (error) {
-      console.error('Failed to start screen share:', error);
+      screenShareError.value = 'Failed to start screen share. Please try again.';
+      console.error('[WebRTC][screen] Failed to start screen share:', error);
       cleanupScreenShareProducer();
     }
   };
@@ -710,32 +756,74 @@ export const useWebRtcStore = defineStore('webrtc', () => {
             callback();
           });
           
-          sendTransport.value.on('produce', async ({ kind, rtpParameters, appData }: any, callback: any, _errback: any) => {
+          sendTransport.value.on('produce', async ({ kind, rtpParameters, appData }: any, callback: any, errback: any) => {
             const inferredSource: MediaSourceType = kind === 'audio' ? 'mic' : 'camera';
             const appDataSource = appData?.source;
             const source: MediaSourceType =
               appDataSource === 'mic' || appDataSource === 'screen' || appDataSource === 'camera'
                 ? appDataSource
                 : inferredSource;
+            const requestId = typeof crypto?.randomUUID === 'function'
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+            let settled = false;
+            let producedTimeout: number | null = null;
+            const cleanupProducedWait = () => {
+              if (producedTimeout !== null) {
+                window.clearTimeout(producedTimeout);
+                producedTimeout = null;
+              }
+              chatStore.removeMessageListener(onProduced);
+            };
+
+            const onProduced = (msg: any) => {
+              if (
+                msg.type === 'produced'
+                && msg.payload.channel_id === payload.channel_id
+                && msg.payload.request_id === requestId
+              ) {
+                settled = true;
+                cleanupProducedWait();
+                console.info('[WebRTC][produce] ACK received', {
+                  source,
+                  requestId,
+                  producerId: msg.payload.id
+                });
+                callback({ id: msg.payload.id });
+              }
+            };
+
+            chatStore.addMessageListener(onProduced);
+
+            producedTimeout = window.setTimeout(() => {
+              if (settled) return;
+              cleanupProducedWait();
+              if (source === 'screen') {
+                screenShareError.value = 'Screen share did not start (produce acknowledgement timeout). Please retry.';
+              }
+              console.warn('[WebRTC][produce] ACK timeout', {
+                source,
+                requestId,
+                channelId: payload.channel_id
+              });
+              errback(new Error(`Produce ACK timeout for source: ${source}`));
+            }, 5000);
+
+            console.info('[WebRTC][produce] Sending produce request', {
+              source,
+              requestId,
+              channelId: payload.channel_id
+            });
+
             chatStore.send('produce', {
               channel_id: payload.channel_id,
               transport_id: sendTransport.value!.id,
               kind,
               rtpParameters,
-              source
+              source,
+              request_id: requestId
             });
-            
-            // We need the producer ID from the server
-            // We'll handle this in the 'produced' event
-            // But mediasoup-client expects the ID in the callback
-            // We'll use a temporary listener
-            const onProduced = (msg: any) => {
-              if (msg.type === 'produced' && msg.payload.channel_id === payload.channel_id) {
-                chatStore.removeMessageListener(onProduced);
-                callback({ id: msg.payload.id });
-              }
-            };
-            chatStore.addMessageListener(onProduced);
           });
           
           // Start producing audio
@@ -930,6 +1018,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     remoteStreams,
     userScreenStreams,
     screenShareStream,
+    screenShareError,
     screenProducer,
     ping,
     bandwidth,
