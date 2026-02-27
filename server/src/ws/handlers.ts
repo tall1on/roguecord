@@ -16,7 +16,15 @@ import {
   getUsers,
   getServer,
   createServer,
-  updateServerSettings
+  updateServerSettings,
+  updateUserLastIp,
+  getMatchingActiveBan,
+  deleteMessagesByUser,
+  createModerationAction,
+  createBanRule,
+  getPendingModerationActions,
+  markModerationActionEnforced,
+  MessageDeleteMode
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -92,6 +100,12 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'JOIN_SERVER':
         await handleJoinServer(client, payload);
         break;
+      case 'kick_member':
+        await handleKickMember(client, payload);
+        break;
+      case 'ban_member':
+        await handleBanMember(client, payload);
+        break;
       case 'ping':
         client.ws.send(JSON.stringify({ type: 'pong', payload: {} }));
         break;
@@ -107,6 +121,25 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
 const handleAuthRequest = async (client: ClientConnection, payload: { username: string, publicKey: string }) => {
   const { username, publicKey } = payload;
   if (!username || !publicKey) return;
+
+  const normalizedIp = normalizeIp(client.ipAddress);
+  const activeBan = await getMatchingActiveBan({
+    targetPublicKey: publicKey,
+    targetIp: normalizedIp
+  });
+
+  if (activeBan) {
+    client.ws.send(JSON.stringify({
+      type: 'auth:banned',
+      payload: {
+        reason: activeBan.reason || 'You are banned from this server.',
+        blacklistIdentity: activeBan.blacklist_identity === 1,
+        blacklistIp: activeBan.blacklist_ip === 1,
+        targetIp: normalizedIp || null
+      }
+    }));
+    return;
+  }
 
   let user = await getUserByPublicKey(publicKey);
   let isNewUser = false;
@@ -149,24 +182,74 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
     if (isValid) {
       const user = await getUserByPublicKey(client.pendingPublicKey);
       if (user) {
+        const normalizedIp = normalizeIp(client.ipAddress);
+        await updateUserLastIp(user.id, normalizedIp || null);
+
+        const activeBan = await getMatchingActiveBan({
+          targetUserId: user.id,
+          targetPublicKey: user.public_key,
+          targetIp: normalizedIp
+        });
+
+        if (activeBan) {
+          client.ws.send(JSON.stringify({
+            type: 'auth:banned',
+            payload: {
+              reason: activeBan.reason || 'You are banned from this server.',
+              blacklistIdentity: activeBan.blacklist_identity === 1,
+              blacklistIp: activeBan.blacklist_ip === 1,
+              targetIp: normalizedIp || null
+            }
+          }));
+          return;
+        }
+
         connectionManager.setUserId(client, user.id);
         client.challenge = undefined;
         client.pendingPublicKey = undefined;
 
+        const pendingActions = await getPendingModerationActions(user.id);
+        if (pendingActions.length > 0) {
+          for (const action of pendingActions) {
+            await markModerationActionEnforced(action.id);
+            client.ws.send(JSON.stringify({
+              type: 'moderation_action_enforced',
+              payload: {
+                actionType: action.action_type,
+                reason: action.reason,
+                deleteMode: action.delete_mode,
+                deleteHours: action.delete_hours,
+                blacklistIdentity: action.blacklist_identity === 1,
+                blacklistIp: action.blacklist_ip === 1,
+                targetIp: action.target_ip
+              }
+            }));
+          }
+
+          // Offline moderation is enforced immediately on next connect.
+          client.ws.close(4003, 'Moderation action enforced');
+          return;
+        }
+
         const server = await getServer();
+        const userWithUpdatedIp = await getUserById(user.id);
         client.ws.send(JSON.stringify({
           type: 'authenticated',
-          payload: { user, server }
+          payload: { user: userWithUpdatedIp || user, server }
         }));
 
         // Send full member list to the newly authenticated user
         const allUsers = await getUsers();
         const onlineUserIds = connectionManager.getOnlineUserIds();
+        const memberIps = Object.fromEntries(
+          allUsers.map((member) => [member.id, member.last_ip || connectionManager.getUserIp(member.id) || null])
+        );
         client.ws.send(JSON.stringify({
           type: 'member_list',
           payload: {
             members: allUsers,
-            onlineUserIds
+            onlineUserIds,
+            memberIps
           }
         }));
 
@@ -806,6 +889,20 @@ const handleJoinServer = async (client: ClientConnection, payload: { serverId: s
   
   const user = await getUserById(client.userId);
   if (!user) return;
+
+  const activeBan = await getMatchingActiveBan({
+    targetUserId: user.id,
+    targetPublicKey: user.public_key,
+    targetIp: normalizeIp(client.ipAddress)
+  });
+
+  if (activeBan) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message: activeBan.reason || 'You are banned from this server.' }
+    }));
+    return;
+  }
   
   if (server.welcomeChannelId) {
     const welcomeContent = `Just joined the server!`;
@@ -821,6 +918,233 @@ const handleJoinServer = async (client: ClientConnection, payload: { serverId: s
   client.ws.send(JSON.stringify({
     type: 'SERVER_JOINED',
     payload: { serverId }
+  }));
+};
+
+const parseDeleteMode = (input: unknown): MessageDeleteMode => {
+  if (input === 'all') return 'all';
+  if (input === 'hours') return 'hours';
+  return 'none';
+};
+
+const normalizeIp = (value?: string): string | null => {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('::ffff:')) {
+    return trimmed.slice('::ffff:'.length);
+  }
+  return trimmed;
+};
+
+const canModerate = (role: string): boolean => {
+  return role === 'admin' || role === 'owner' || role === 'mod' || role === 'moderator';
+};
+
+const handleKickMember = async (
+  client: ClientConnection,
+  payload: { targetUserId: string; reason?: string; deleteMode?: MessageDeleteMode; deleteHours?: number }
+) => {
+  if (!client.userId) return;
+  const moderator = await getUserById(client.userId);
+  if (!moderator || !canModerate(moderator.role)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions' } }));
+    return;
+  }
+
+  const targetUserId = payload?.targetUserId;
+  if (!targetUserId || targetUserId === moderator.id) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid target user' } }));
+    return;
+  }
+
+  const targetUser = await getUserById(targetUserId);
+  if (!targetUser) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Target user not found' } }));
+    return;
+  }
+
+  const deleteMode = parseDeleteMode(payload?.deleteMode);
+  const deleteHours = deleteMode === 'hours' ? Math.max(1, Math.floor(payload?.deleteHours || 1)) : undefined;
+  const reason = (payload?.reason || '').trim() || 'You were kicked from this server.';
+  const targetIp = normalizeIp(connectionManager.getUserIp(targetUser.id) || targetUser.last_ip || undefined);
+
+  if (deleteMode !== 'none') {
+    await deleteMessagesByUser(targetUser.id, deleteMode, deleteHours);
+  }
+
+  const isOnlineNow = connectionManager.isUserOnline(targetUser.id);
+  await createModerationAction({
+    targetUserId: targetUser.id,
+    moderatorUserId: moderator.id,
+    actionType: 'kick',
+    reason,
+    deleteMode,
+    deleteHours,
+    targetIp,
+    enforced: isOnlineNow
+  });
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'member_removed',
+    payload: {
+      actionType: 'kick',
+      userId: targetUser.id,
+      reason,
+      deleteMode,
+      deleteHours: deleteHours || null,
+      targetIp
+    }
+  });
+
+  if (isOnlineNow) {
+    connectionManager.sendToUser(targetUser.id, {
+      type: 'moderation_action_enforced',
+      payload: {
+        actionType: 'kick',
+        reason,
+        deleteMode,
+        deleteHours: deleteHours || null,
+        blacklistIdentity: false,
+        blacklistIp: false,
+        targetIp
+      }
+    });
+    connectionManager.closeUserConnections(targetUser.id);
+  }
+
+  client.ws.send(JSON.stringify({
+    type: 'moderation_action_applied',
+    payload: {
+      actionType: 'kick',
+      targetUserId: targetUser.id,
+      enforcedImmediately: isOnlineNow,
+      reason,
+      deleteMode,
+      deleteHours: deleteHours || null,
+      targetIp
+    }
+  }));
+};
+
+const handleBanMember = async (
+  client: ClientConnection,
+  payload: {
+    targetUserId: string;
+    reason?: string;
+    deleteMode?: MessageDeleteMode;
+    deleteHours?: number;
+    blacklistIdentity?: boolean;
+    blacklistIp?: boolean;
+  }
+) => {
+  if (!client.userId) return;
+  const moderator = await getUserById(client.userId);
+  if (!moderator || !canModerate(moderator.role)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions' } }));
+    return;
+  }
+
+  const targetUserId = payload?.targetUserId;
+  if (!targetUserId || targetUserId === moderator.id) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid target user' } }));
+    return;
+  }
+
+  const targetUser = await getUserById(targetUserId);
+  if (!targetUser) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Target user not found' } }));
+    return;
+  }
+
+  const deleteMode = parseDeleteMode(payload?.deleteMode);
+  const deleteHours = deleteMode === 'hours' ? Math.max(1, Math.floor(payload?.deleteHours || 1)) : undefined;
+  const reason = (payload?.reason || '').trim() || 'You were banned from this server.';
+  const blacklistIdentity = payload?.blacklistIdentity !== false;
+  const blacklistIp = payload?.blacklistIp === true;
+  const targetIp = normalizeIp(connectionManager.getUserIp(targetUser.id) || targetUser.last_ip || undefined);
+
+  if (!blacklistIdentity && !blacklistIp) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'At least one blacklist dimension is required' } }));
+    return;
+  }
+
+  if (blacklistIp && !targetIp) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Cannot apply IP blacklist without a known target IP' } }));
+    return;
+  }
+
+  if (deleteMode !== 'none') {
+    await deleteMessagesByUser(targetUser.id, deleteMode, deleteHours);
+  }
+
+  await createBanRule({
+    targetUserId: targetUser.id,
+    targetPublicKey: targetUser.public_key,
+    targetIp,
+    blacklistIdentity,
+    blacklistIp,
+    reason,
+    moderatorUserId: moderator.id
+  });
+
+  const isOnlineNow = connectionManager.isUserOnline(targetUser.id);
+  await createModerationAction({
+    targetUserId: targetUser.id,
+    moderatorUserId: moderator.id,
+    actionType: 'ban',
+    reason,
+    deleteMode,
+    deleteHours,
+    blacklistIdentity,
+    blacklistIp,
+    targetIp,
+    enforced: isOnlineNow
+  });
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'member_removed',
+    payload: {
+      actionType: 'ban',
+      userId: targetUser.id,
+      reason,
+      deleteMode,
+      deleteHours: deleteHours || null,
+      blacklistIdentity,
+      blacklistIp,
+      targetIp
+    }
+  });
+
+  if (isOnlineNow) {
+    connectionManager.sendToUser(targetUser.id, {
+      type: 'moderation_action_enforced',
+      payload: {
+        actionType: 'ban',
+        reason,
+        deleteMode,
+        deleteHours: deleteHours || null,
+        blacklistIdentity,
+        blacklistIp,
+        targetIp
+      }
+    });
+    connectionManager.closeUserConnections(targetUser.id);
+  }
+
+  client.ws.send(JSON.stringify({
+    type: 'moderation_action_applied',
+    payload: {
+      actionType: 'ban',
+      targetUserId: targetUser.id,
+      enforcedImmediately: isOnlineNow,
+      reason,
+      deleteMode,
+      deleteHours: deleteHours || null,
+      blacklistIdentity,
+      blacklistIp,
+      targetIp
+    }
   }));
 };
 

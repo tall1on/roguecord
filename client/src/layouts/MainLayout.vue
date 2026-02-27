@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterView } from 'vue-router'
+import { useRouter } from 'vue-router'
 import { useChatStore } from '../stores/chat'
 import LoginModal from '../components/layout/modals/LoginModal.vue'
 import CreateServerModal from '../components/layout/modals/CreateServerModal.vue'
@@ -18,6 +19,7 @@ type ServerSettingsNavGroup = {
 }
 
 const chatStore = useChatStore()
+const router = useRouter()
 
 const usernameInput = ref('')
 const showCreateServerModal = ref(false)
@@ -193,6 +195,14 @@ watch(showServerSettingsModal, (newVal) => {
   }
 })
 
+watch(
+  () => chatStore.moderationNotice,
+  (notice) => {
+    if (!notice) return
+    router.replace({ name: 'home' })
+  }
+)
+
 onMounted(() => {
   chatStore.addMessageListener(handleChatStoreMessage)
   chatStore.clearError()
@@ -288,6 +298,21 @@ onUnmounted(() => {
     </div>
 
     <ServerListSidebar @open-create-server="showCreateServerModal = true" />
+
+    <div v-if="chatStore.moderationNotice" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/80">
+      <div class="bg-[#313338] p-6 rounded-lg shadow-xl w-96 max-w-[95vw]">
+        <h2 class="text-xl font-bold text-white mb-2">{{ chatStore.moderationNotice.title }}</h2>
+        <p class="text-sm text-gray-300 mb-6">{{ chatStore.moderationNotice.message }}</p>
+        <div class="flex justify-end">
+          <button
+            @click="chatStore.clearModerationNotice()"
+            class="bg-indigo-500 hover:bg-indigo-600 text-white px-5 py-2 rounded text-sm font-medium"
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
 
     <ChannelListSidebar
       :is-admin="isAdmin"
