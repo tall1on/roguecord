@@ -19,9 +19,22 @@ export interface Channel {
   id: string;
   category_id: string | null;
   name: string;
-  type: 'text' | 'voice' | 'rss';
+  type: 'text' | 'voice' | 'rss' | 'folder';
   position: number;
   feed_url?: string | null;
+}
+
+export interface FolderChannelFile {
+  id: string;
+  channel_id: string;
+  original_name: string;
+  storage_name?: string;
+  mime_type: string | null;
+  size_bytes: number;
+  uploader_user_id: string;
+  uploader_username?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Message {
@@ -66,7 +79,7 @@ export interface Server {
 }
 
 export interface ActiveMainPanel {
-  type: 'text' | 'voice';
+  type: 'text' | 'voice' | 'folder';
   channelId: string | null;
 }
 
@@ -144,6 +157,26 @@ const signChallenge = async (privateKey: CryptoKey, challenge: string) => {
   return arrayBufferToHex(signature);
 };
 
+const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
+  'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx',
+  'html', 'htm', 'php', 'phtml',
+  'exe', 'dll', 'so', 'com', 'scr', 'msi',
+  'py', 'pyw', 'python',
+  'sh', 'bash', 'zsh',
+  'bat', 'cmd',
+  'ps1', 'psm1',
+  'vbs', 'vbe', 'wsf', 'wsh',
+  'jar', 'appimage'
+]);
+
+const getBlockedFolderUploadExtension = (fileName: string) => {
+  const extension = fileName.split('.').pop()?.trim().toLowerCase() || '';
+  if (!extension) {
+    return null;
+  }
+  return BLOCKED_FOLDER_UPLOAD_EXTENSIONS.has(extension) ? extension : null;
+};
+
 export const useChatStore = defineStore('chat', () => {
   const ws = ref<WebSocket | null>(null);
   const isConnected = ref(false);
@@ -168,6 +201,7 @@ export const useChatStore = defineStore('chat', () => {
   const categories = ref<Category[]>([]);
   const channels = ref<Channel[]>([]);
   const messages = ref<Record<string, Message[]>>({}); // channel_id -> Message[]
+  const folderFiles = ref<Record<string, FolderChannelFile[]>>({});
   const messagePageState = ref<Record<string, ChannelMessagePageState>>({});
   const unreadChannelIds = ref<Set<string>>(new Set());
   
@@ -489,6 +523,7 @@ export const useChatStore = defineStore('chat', () => {
     activeChannelId.value = null;
     activeMainPanel.value = { type: 'text', channelId: null };
     messages.value = {};
+    folderFiles.value = {};
     messagePageState.value = {};
     unreadChannelIds.value = new Set();
     lastMarkedReadMessageByChannel.value = {};
@@ -790,14 +825,59 @@ export const useChatStore = defineStore('chat', () => {
         const deletedChannel = channels.value.find((c: Channel) => c.id === deletedChannelId);
         channels.value = channels.value.filter((c: Channel) => c.id !== deletedChannelId);
         delete messages.value[deletedChannelId];
+        delete folderFiles.value[deletedChannelId];
         delete messagePageState.value[deletedChannelId];
         clearChannelUnread(deletedChannelId);
 
         if ((deletedChannel?.type === 'text' || deletedChannel?.type === 'rss') && activeChannelId.value === deletedChannelId) {
           setFallbackActiveTextChannel(channels.value);
+        } else if (deletedChannel?.type === 'folder' && activeMainPanel.value.type === 'folder' && activeMainPanel.value.channelId === deletedChannelId) {
+          setFallbackActiveTextChannel(channels.value);
         } else if (deletedChannel?.type === 'voice' && activeMainPanel.value.type === 'voice' && activeMainPanel.value.channelId === deletedChannelId) {
           setFallbackActiveTextChannel(channels.value);
         }
+        break;
+      }
+
+      case 'folder_files_list': {
+        const channelId = payload.channel_id as string;
+        if (!channelId) break;
+        folderFiles.value[channelId] = Array.isArray(payload.files) ? payload.files : [];
+        break;
+      }
+
+      case 'folder_file_uploaded': {
+        const channelId = payload.channel_id as string;
+        const file = payload.file as FolderChannelFile | undefined;
+        if (!channelId || !file?.id) break;
+        const existing = folderFiles.value[channelId] || [];
+        if (existing.some((f) => f.id === file.id)) {
+          break;
+        }
+        folderFiles.value[channelId] = [file, ...existing];
+        break;
+      }
+
+      case 'folder_file_download': {
+        const file = payload.file as { original_name?: string; mime_type?: string | null } | undefined;
+        const dataBase64 = payload.data_base64 as string | undefined;
+        if (!file?.original_name || !dataBase64) break;
+
+        const binary = atob(dataBase64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+
+        const blob = new Blob([bytes], { type: file.mime_type || 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = file.original_name;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
         break;
       }
         
@@ -903,7 +983,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   };
 
-  const createChannel = (category_id: string | null, name: string, type: 'text' | 'voice' | 'rss', feed_url?: string) => {
+  const createChannel = (category_id: string | null, name: string, type: 'text' | 'voice' | 'rss' | 'folder', feed_url?: string) => {
     if (!name.trim()) {
       lastError.value = 'Channel name is required';
       return;
@@ -1073,9 +1153,53 @@ export const useChatStore = defineStore('chat', () => {
 
   const setActiveChannel = (channel_id: string) => {
     activeChannelId.value = channel_id;
+    const channel = channels.value.find((c) => c.id === channel_id);
+    if (channel?.type === 'folder') {
+      activeMainPanel.value = { type: 'folder', channelId: channel_id };
+      requestFolderFiles(channel_id);
+      return;
+    }
+
     activeMainPanel.value = { type: 'text', channelId: channel_id };
     clearChannelUnread(channel_id);
     getMessages(channel_id);
+  };
+
+  const requestFolderFiles = (channel_id: string) => {
+    send('folder_list_files', { channel_id });
+  };
+
+  const uploadFolderFile = async (channel_id: string, file: File) => {
+    const blockedExtension = getBlockedFolderUploadExtension(file.name);
+    if (blockedExtension) {
+      throw new Error(`Upload blocked: .${blockedExtension} files are not allowed in folder channels.`);
+    }
+
+    const dataBase64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = typeof reader.result === 'string' ? reader.result : '';
+        const base64 = result.includes(',') ? result.split(',')[1] : result;
+        if (!base64) {
+          reject(new Error('Failed to read file'));
+          return;
+        }
+        resolve(base64);
+      };
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    });
+
+    send('folder_upload_file', {
+      channel_id,
+      file_name: file.name,
+      mime_type: file.type || 'application/octet-stream',
+      data_base64: dataBase64
+    });
+  };
+
+  const downloadFolderFile = (channel_id: string, file_id: string) => {
+    send('folder_download_file', { channel_id, file_id });
   };
 
   const setActiveVoicePanel = (channel_id: string) => {
@@ -1091,7 +1215,7 @@ export const useChatStore = defineStore('chat', () => {
   });
 
   const activeChannelMessages = computed(() => {
-    if (!activeChannelId.value) return [];
+    if (activeMainPanel.value.type !== 'text' || !activeChannelId.value) return [];
     return messages.value[activeChannelId.value] || [];
   });
 
@@ -1111,6 +1235,7 @@ export const useChatStore = defineStore('chat', () => {
     categories,
     channels,
     messages,
+    folderFiles,
     unreadChannelIds,
     activeChannelId,
     activeMainPanel,
@@ -1138,6 +1263,9 @@ export const useChatStore = defineStore('chat', () => {
     submitAdminKey,
     setActiveChannel,
     setActiveVoicePanel,
+    requestFolderFiles,
+    uploadFolderFile,
+    downloadFolderFile,
     send,
     ws,
     addMessageListener,

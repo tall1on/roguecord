@@ -162,7 +162,7 @@ export interface Channel {
   id: string;
   category_id: string | null;
   name: string;
-  type: 'text' | 'voice' | 'rss';
+  type: 'text' | 'voice' | 'rss' | 'folder';
   position: number;
   feed_url: string | null;
 }
@@ -170,7 +170,7 @@ export interface Channel {
 export const createChannel = async (
   category_id: string | null,
   name: string,
-  type: 'text' | 'voice' | 'rss',
+  type: 'text' | 'voice' | 'rss' | 'folder',
   position: number = 0,
   feedUrl: string | null = null
 ): Promise<Channel> => {
@@ -199,7 +199,78 @@ export const getRssChannels = async (): Promise<Channel[]> => {
 export const deleteChannel = async (id: string): Promise<void> => {
   await dbRun('DELETE FROM messages WHERE channel_id = ?', [id]);
   await dbRun('DELETE FROM rss_channel_items WHERE channel_id = ?', [id]);
+  await dbRun('DELETE FROM folder_channel_files WHERE channel_id = ?', [id]);
   await dbRun('DELETE FROM channels WHERE id = ?', [id]);
+};
+
+export interface FolderChannelFile {
+  id: string;
+  channel_id: string;
+  original_name: string;
+  storage_name: string;
+  mime_type: string | null;
+  size_bytes: number;
+  uploader_user_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FolderChannelFileWithUploader extends FolderChannelFile {
+  uploader_username: string;
+}
+
+export const createFolderChannelFile = async (input: {
+  channelId: string;
+  originalName: string;
+  storageName: string;
+  mimeType?: string | null;
+  sizeBytes: number;
+  uploaderUserId: string;
+}): Promise<FolderChannelFile> => {
+  const id = crypto.randomUUID();
+  await dbRun(
+    `
+      INSERT INTO folder_channel_files (
+        id,
+        channel_id,
+        original_name,
+        storage_name,
+        mime_type,
+        size_bytes,
+        uploader_user_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `,
+    [
+      id,
+      input.channelId,
+      input.originalName,
+      input.storageName,
+      input.mimeType || null,
+      input.sizeBytes,
+      input.uploaderUserId
+    ]
+  );
+
+  return (await dbGet<FolderChannelFile>('SELECT * FROM folder_channel_files WHERE id = ?', [id]))!;
+};
+
+export const getFolderChannelFiles = async (channelId: string): Promise<FolderChannelFileWithUploader[]> => {
+  return dbAll<FolderChannelFileWithUploader>(
+    `
+      SELECT
+        f.*,
+        u.username AS uploader_username
+      FROM folder_channel_files f
+      INNER JOIN users u ON u.id = f.uploader_user_id
+      WHERE f.channel_id = ?
+      ORDER BY f.created_at DESC, f.id DESC
+    `,
+    [channelId]
+  );
+};
+
+export const getFolderChannelFileById = async (fileId: string): Promise<FolderChannelFile | undefined> => {
+  return dbGet<FolderChannelFile>('SELECT * FROM folder_channel_files WHERE id = ?', [fileId]);
 };
 
 // --- Messages ---
