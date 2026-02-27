@@ -126,6 +126,19 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       return;
     }
 
+    const canProduceVideo = Boolean(device.value?.canProduce('video'));
+    console.info('[WebRTC][screen] Capability check', {
+      hasDevice: Boolean(device.value),
+      canProduceVideo,
+      routerVideoCodecs: (device.value?.rtpCapabilities?.codecs || []).filter((codec: any) => codec.kind === 'video').map((codec: any) => codec.mimeType)
+    });
+
+    if (!canProduceVideo) {
+      screenShareError.value = 'Failed to start screen share. Please try again.';
+      console.error('[WebRTC][screen] Aborting: device cannot produce video');
+      return;
+    }
+
     try {
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
