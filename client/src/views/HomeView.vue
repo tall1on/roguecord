@@ -151,6 +151,7 @@ const syncScreenVideoMutedState = (userId: string) => {
 
 const openScreenContextMenu = (event: MouseEvent, userId: string) => {
   event.preventDefault()
+  event.stopPropagation()
   const isOwner = isCurrentUserStreamOwner(userId)
   const estimatedHeight = isOwner ? 336 : 52
   const estimatedWidth = 188
@@ -612,7 +613,7 @@ watch(
               playsinline
               class="w-full h-full object-contain rounded-xl bg-black cursor-pointer"
               @click="enterScreenFullscreen(user.id)"
-              @contextmenu="openScreenContextMenu($event, user.id)"
+              @contextmenu.prevent.stop="openScreenContextMenu($event, user.id)"
             />
             <div v-show="!getUserScreenStream(user.id)" class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
               <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
