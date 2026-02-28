@@ -11,7 +11,6 @@ export type S3StorageConfig = {
   bucket: string;
   accessKey: string;
   secretKey: string;
-  apiKey?: string | null;
   prefix?: string | null;
 };
 
@@ -39,7 +38,6 @@ const sanitizeConfig = (config: S3StorageConfig): S3StorageConfig => {
   const bucket = (config.bucket || '').trim();
   const accessKey = (config.accessKey || '').trim();
   const secretKey = (config.secretKey || '').trim();
-  const apiKey = (config.apiKey || '').trim();
   const prefix = normalizePrefix(config.prefix);
 
   if (!region) {
@@ -61,9 +59,44 @@ const sanitizeConfig = (config: S3StorageConfig): S3StorageConfig => {
     bucket,
     accessKey,
     secretKey,
-    apiKey: apiKey || null,
     prefix
   };
+};
+
+const extractS3ValidationErrorMessage = (error: unknown) => {
+  if (!error || typeof error !== 'object') {
+    return 'Unknown S3 error';
+  }
+
+  const awsError = error as {
+    name?: unknown;
+    code?: unknown;
+    message?: unknown;
+    $metadata?: { httpStatusCode?: unknown; requestId?: unknown; extendedRequestId?: unknown };
+    Code?: unknown;
+    Message?: unknown;
+  };
+
+  const name = typeof awsError.name === 'string' && awsError.name.trim() ? awsError.name.trim() : null;
+  const code = typeof awsError.code === 'string' && awsError.code.trim()
+    ? awsError.code.trim()
+    : (typeof awsError.Code === 'string' && awsError.Code.trim() ? awsError.Code.trim() : null);
+  const message = typeof awsError.message === 'string' && awsError.message.trim()
+    ? awsError.message.trim()
+    : (typeof awsError.Message === 'string' && awsError.Message.trim() ? awsError.Message.trim() : null);
+  const statusCode = typeof awsError.$metadata?.httpStatusCode === 'number' ? awsError.$metadata.httpStatusCode : null;
+
+  const parts: string[] = [];
+  if (statusCode) parts.push(`HTTP ${statusCode}`);
+  if (code) parts.push(code);
+  else if (name) parts.push(name);
+  if (message) parts.push(message);
+
+  if (parts.length === 0) {
+    return 'Unknown S3 error';
+  }
+
+  return parts.join(': ');
 };
 
 const createS3Client = (config: S3StorageConfig) => {
@@ -71,6 +104,7 @@ const createS3Client = (config: S3StorageConfig) => {
   return new S3Client({
     region: normalized.region,
     endpoint: normalized.endpoint,
+    forcePathStyle: true,
     credentials: {
       accessKeyId: normalized.accessKey,
       secretAccessKey: normalized.secretKey
@@ -113,7 +147,7 @@ export const validateS3Configuration = async (config: S3StorageConfig): Promise<
 
     return { ok: true };
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'S3 validation failed';
+    const message = extractS3ValidationErrorMessage(error);
     return {
       ok: false,
       message: `S3 validation failed: ${message}`

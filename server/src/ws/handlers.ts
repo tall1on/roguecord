@@ -139,7 +139,6 @@ const normalizeS3Config = (input: {
   bucket?: string | null;
   accessKey?: string | null;
   secretKey?: string | null;
-  apiKey?: string | null;
   prefix?: string | null;
 }): S3StorageConfig => {
   const endpoint = sanitizeS3Endpoint(input.endpoint || '');
@@ -147,7 +146,6 @@ const normalizeS3Config = (input: {
   const bucket = (input.bucket || '').trim();
   const accessKey = (input.accessKey || '').trim();
   const secretKey = (input.secretKey || '').trim();
-  const apiKey = (input.apiKey || '').trim();
 
   if (!region) {
     throw new Error('S3 region is required');
@@ -168,7 +166,6 @@ const normalizeS3Config = (input: {
     bucket,
     accessKey,
     secretKey,
-    apiKey: apiKey || null,
     prefix: sanitizeStoragePrefix(input.prefix)
   };
 };
@@ -213,7 +210,6 @@ const buildStorageSettingsPayloadForClient = (settings: Awaited<ReturnType<typeo
         bucket: settings.s3.bucket,
         accessKey: settings.s3.accessKey,
         secretKey: settings.s3.secretKey,
-        apiKey: settings.s3.apiKey || '',
         prefix: settings.s3.prefix || ''
       }
       : {
@@ -222,7 +218,6 @@ const buildStorageSettingsPayloadForClient = (settings: Awaited<ReturnType<typeo
         bucket: '',
         accessKey: '',
         secretKey: '',
-        apiKey: '',
         prefix: ''
       }
   };
@@ -1461,7 +1456,6 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
       bucket?: string;
       accessKey?: string;
       secretKey?: string;
-      apiKey?: string;
       prefix?: string;
     };
   };
@@ -1492,7 +1486,6 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
           bucket: storageInput.bucket || currentS3?.bucket || null,
           accessKey: storageInput.accessKey || currentS3?.accessKey || null,
           secretKey: storageInput.secretKey || currentS3?.secretKey || null,
-          apiKey: storageInput.apiKey ?? currentS3?.apiKey ?? null,
           prefix: storageInput.prefix ?? currentS3?.prefix ?? null
         });
 
@@ -1517,7 +1510,6 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
           s3Bucket: mergedS3Config.bucket,
           s3AccessKey: mergedS3Config.accessKey,
           s3SecretKey: mergedS3Config.secretKey,
-          s3ApiKey: mergedS3Config.apiKey || null,
           s3Prefix: mergedS3Config.prefix || null,
           storageLastError: null
         });
@@ -1534,7 +1526,6 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
           s3Bucket: currentS3?.bucket || null,
           s3AccessKey: currentS3?.accessKey || null,
           s3SecretKey: currentS3?.secretKey || null,
-          s3ApiKey: currentS3?.apiKey || null,
           s3Prefix: currentS3?.prefix || null,
           storageLastError: null
         });

@@ -61,7 +61,6 @@ function initializeDatabase() {
         s3_bucket TEXT,
         s3_access_key TEXT,
         s3_secret_key TEXT,
-        s3_api_key TEXT,
         s3_prefix TEXT,
         storage_last_error TEXT,
         storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -519,24 +518,142 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     if (!hasS3Bucket) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_bucket TEXT');
     if (!hasS3AccessKey) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_access_key TEXT');
     if (!hasS3SecretKey) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_secret_key TEXT');
-    if (!hasS3ApiKey) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_api_key TEXT');
     if (!hasS3Prefix) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_prefix TEXT');
     if (!hasStorageLastError) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_last_error TEXT');
     if (!hasStorageUpdatedAt) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_updated_at DATETIME');
 
+    const finalizeMigration = () => {
+      db.run(
+        `
+          UPDATE servers
+          SET
+            title = COALESCE(NULLIF(title, ''), name, 'My Server'),
+            storage_updated_at = COALESCE(storage_updated_at, CURRENT_TIMESTAMP)
+        `,
+        (updateErr) => {
+          done(updateErr || undefined);
+        }
+      );
+    };
+
+    const rebuildServersTableWithoutS3ApiKey = () => {
+      db.run('BEGIN TRANSACTION', (beginErr) => {
+        if (beginErr) {
+          done(beginErr);
+          return;
+        }
+
+        db.run('DROP TABLE IF EXISTS servers_new', (dropTempErr) => {
+          if (dropTempErr) {
+            db.run('ROLLBACK', () => done(dropTempErr));
+            return;
+          }
+
+          db.run(
+            `
+              CREATE TABLE servers_new (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT 'My Server',
+                rules_channel_id TEXT,
+                welcome_channel_id TEXT,
+                storage_type TEXT NOT NULL DEFAULT 'data_dir',
+                s3_endpoint TEXT,
+                s3_region TEXT,
+                s3_bucket TEXT,
+                s3_access_key TEXT,
+                s3_secret_key TEXT,
+                s3_prefix TEXT,
+                storage_last_error TEXT,
+                storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+              )
+            `,
+            (createErr) => {
+              if (createErr) {
+                db.run('ROLLBACK', () => done(createErr));
+                return;
+              }
+
+              db.run(
+                `
+                  INSERT INTO servers_new (
+                    id,
+                    name,
+                    title,
+                    rules_channel_id,
+                    welcome_channel_id,
+                    storage_type,
+                    s3_endpoint,
+                    s3_region,
+                    s3_bucket,
+                    s3_access_key,
+                    s3_secret_key,
+                    s3_prefix,
+                    storage_last_error,
+                    storage_updated_at
+                  )
+                  SELECT
+                    id,
+                    name,
+                    title,
+                    rules_channel_id,
+                    welcome_channel_id,
+                    storage_type,
+                    s3_endpoint,
+                    s3_region,
+                    s3_bucket,
+                    s3_access_key,
+                    s3_secret_key,
+                    s3_prefix,
+                    storage_last_error,
+                    storage_updated_at
+                  FROM servers
+                `,
+                (copyErr) => {
+                  if (copyErr) {
+                    db.run('ROLLBACK', () => done(copyErr));
+                    return;
+                  }
+
+                  db.run('DROP TABLE servers', (dropOldErr) => {
+                    if (dropOldErr) {
+                      db.run('ROLLBACK', () => done(dropOldErr));
+                      return;
+                    }
+
+                    db.run('ALTER TABLE servers_new RENAME TO servers', (renameErr) => {
+                      if (renameErr) {
+                        db.run('ROLLBACK', () => done(renameErr));
+                        return;
+                      }
+
+                      db.run('COMMIT', (commitErr) => {
+                        if (commitErr) {
+                          db.run('ROLLBACK', () => done(commitErr));
+                          return;
+                        }
+
+                        console.log('Migrated servers table schema to remove unused s3_api_key column.');
+                        finalizeMigration();
+                      });
+                    });
+                  });
+                }
+              );
+            }
+          );
+        });
+      });
+    };
+
     const runNextAlter = (index: number) => {
       if (index >= pendingAlterStatements.length) {
-        db.run(
-          `
-            UPDATE servers
-            SET
-              title = COALESCE(NULLIF(title, ''), name, 'My Server'),
-              storage_updated_at = COALESCE(storage_updated_at, CURRENT_TIMESTAMP)
-          `,
-          (updateErr) => {
-            done(updateErr || undefined);
-          }
-        );
+        if (hasS3ApiKey) {
+          rebuildServersTableWithoutS3ApiKey();
+          return;
+        }
+
+        finalizeMigration();
         return;
       }
 
