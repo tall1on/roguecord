@@ -22,6 +22,7 @@ type ResolvedS3Config = S3StorageConfig & {
 
 type S3ClientMode = {
   endpoint: string;
+  region: string;
   forcePathStyle: boolean;
   label: string;
 };
@@ -154,16 +155,60 @@ const getBaseEndpointWithoutBucketSubdomain = (endpoint: string, bucket: string)
   return parsedEndpoint.toString().replace(/\/$/, '');
 };
 
+const buildSignerRegionFallbacks = (primaryRegion: string) => {
+  const candidates = [primaryRegion.trim(), 'us-east-1'];
+  const unique = new Set<string>();
+  for (const candidate of candidates) {
+    const normalized = candidate.trim();
+    if (normalized) {
+      unique.add(normalized);
+    }
+  }
+  return Array.from(unique.values());
+};
+
+const buildHetznerDirectBucketEndpoint = (endpoint: string, bucket: string, location: string) => {
+  const parsed = new URL(endpoint);
+  parsed.hostname = `${bucket}.${location}.your-objectstorage.com`;
+  return parsed.toString().replace(/\/$/, '');
+};
+
 const buildS3ValidationModes = (config: S3StorageConfig): S3ClientMode[] => {
   const sanitized = sanitizeConfig(config);
   const resolved = resolveS3ClientConfig(sanitized);
+  const signerRegions = buildSignerRegionFallbacks(resolved.region);
 
   if (resolved.provider === 'hetzner') {
-    return [{
-      endpoint: resolved.endpoint,
-      forcePathStyle: true,
-      label: 'path-style/hetzner-normalized'
-    }];
+    const parsedHetzner = parseHetznerEndpointHost(resolved.endpoint);
+    const baseEndpoint = getBaseEndpointWithoutBucketSubdomain(resolved.endpoint, resolved.bucket);
+    const directEndpoint = parsedHetzner
+      ? buildHetznerDirectBucketEndpoint(baseEndpoint, resolved.bucket, parsedHetzner.location)
+      : resolved.endpoint;
+
+    const candidates: S3ClientMode[] = [];
+    for (const signerRegion of signerRegions) {
+      candidates.push(
+        {
+          endpoint: directEndpoint,
+          region: signerRegion,
+          forcePathStyle: false,
+          label: 'virtual-host/hetzner-direct-bucket-endpoint'
+        },
+        {
+          endpoint: baseEndpoint,
+          region: signerRegion,
+          forcePathStyle: true,
+          label: 'path-style/hetzner-base-endpoint'
+        }
+      );
+    }
+
+    const unique = new Map<string, S3ClientMode>();
+    for (const candidate of candidates) {
+      unique.set(`${candidate.endpoint}|${candidate.forcePathStyle}|${candidate.region}`, candidate);
+    }
+
+    return Array.from(unique.values());
   }
 
   const baseEndpoint = getBaseEndpointWithoutBucketSubdomain(sanitized.endpoint, sanitized.bucket);
@@ -173,12 +218,14 @@ const buildS3ValidationModes = (config: S3StorageConfig): S3ClientMode[] => {
     {
       // Primary mode (existing behavior): base endpoint + path-style
       endpoint: resolved.endpoint,
+      region: resolved.region,
       forcePathStyle: true,
       label: 'path-style/base-endpoint'
     },
     {
       // Fallback mode for providers that validate signatures only in virtual-host mode.
       endpoint: baseEndpoint,
+      region: resolved.region,
       forcePathStyle: false,
       label: 'virtual-host/base-endpoint'
     },
@@ -186,6 +233,7 @@ const buildS3ValidationModes = (config: S3StorageConfig): S3ClientMode[] => {
       // Final fallback for endpoint formats that already include a bucket hostname.
       // In virtual-host mode this avoids adding bucket into the URL path.
       endpoint: directEndpoint,
+      region: resolved.region,
       forcePathStyle: false,
       label: 'virtual-host/direct-endpoint'
     }
@@ -193,10 +241,65 @@ const buildS3ValidationModes = (config: S3StorageConfig): S3ClientMode[] => {
 
   const unique = new Map<string, S3ClientMode>();
   for (const candidate of candidates) {
-    unique.set(`${candidate.endpoint}|${candidate.forcePathStyle}`, candidate);
+    unique.set(`${candidate.endpoint}|${candidate.forcePathStyle}|${candidate.region}`, candidate);
   }
 
   return Array.from(unique.values());
+};
+
+const sanitizeS3DiagnosticText = (value: string) => {
+  return value.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+};
+
+const extractXmlField = (xml: string, tagName: 'Code' | 'Message') => {
+  const match = xml.match(new RegExp(`<${tagName}>([\\s\\S]*?)</${tagName}>`, 'i'));
+  if (!match || typeof match[1] !== 'string') {
+    return null;
+  }
+
+  const value = sanitizeS3DiagnosticText(match[1]);
+  return value || null;
+};
+
+const tryExtractXmlS3Error = (value: unknown): { code: string | null; message: string | null } | null => {
+  let raw: string | null = null;
+  if (typeof value === 'string') {
+    raw = value;
+  } else if (Buffer.isBuffer(value)) {
+    raw = value.toString('utf8');
+  }
+
+  if (!raw || !raw.trim()) {
+    return null;
+  }
+
+  const normalized = raw.trim();
+  if (!normalized.startsWith('<') || normalized.indexOf('<Error') === -1) {
+    return null;
+  }
+
+  return {
+    code: extractXmlField(normalized, 'Code'),
+    message: extractXmlField(normalized, 'Message')
+  };
+};
+
+const tryBuildBodySnippet = (value: unknown): string | null => {
+  if (typeof value === 'string') {
+    const normalized = sanitizeS3DiagnosticText(value);
+    return normalized ? normalized.slice(0, 240) : null;
+  }
+  if (Buffer.isBuffer(value)) {
+    const normalized = sanitizeS3DiagnosticText(value.toString('utf8'));
+    return normalized ? normalized.slice(0, 240) : null;
+  }
+  if (value && typeof value === 'object') {
+    const withMessage = value as { message?: unknown };
+    if (typeof withMessage.message === 'string' && withMessage.message.trim()) {
+      return sanitizeS3DiagnosticText(withMessage.message).slice(0, 240);
+    }
+  }
+  return null;
 };
 
 const extractS3ValidationErrorMessage = (error: unknown) => {
@@ -211,6 +314,13 @@ const extractS3ValidationErrorMessage = (error: unknown) => {
     $metadata?: { httpStatusCode?: unknown; requestId?: unknown; extendedRequestId?: unknown };
     Code?: unknown;
     Message?: unknown;
+    requestId?: unknown;
+    RequestId?: unknown;
+    hostId?: unknown;
+    HostId?: unknown;
+    body?: unknown;
+    Body?: unknown;
+    $response?: { body?: unknown };
   };
 
   const name = typeof awsError.name === 'string' && awsError.name.trim() ? awsError.name.trim() : null;
@@ -221,11 +331,31 @@ const extractS3ValidationErrorMessage = (error: unknown) => {
     ? awsError.message.trim()
     : (typeof awsError.Message === 'string' && awsError.Message.trim() ? awsError.Message.trim() : null);
   const statusCode = typeof awsError.$metadata?.httpStatusCode === 'number' ? awsError.$metadata.httpStatusCode : null;
+  const requestId = typeof awsError.$metadata?.requestId === 'string' && awsError.$metadata.requestId.trim()
+    ? awsError.$metadata.requestId.trim()
+    : (typeof awsError.requestId === 'string' && awsError.requestId.trim()
+      ? awsError.requestId.trim()
+      : (typeof awsError.RequestId === 'string' && awsError.RequestId.trim() ? awsError.RequestId.trim() : null));
+  const hostId = typeof awsError.$metadata?.extendedRequestId === 'string' && awsError.$metadata.extendedRequestId.trim()
+    ? awsError.$metadata.extendedRequestId.trim()
+    : (typeof awsError.hostId === 'string' && awsError.hostId.trim()
+      ? awsError.hostId.trim()
+      : (typeof awsError.HostId === 'string' && awsError.HostId.trim() ? awsError.HostId.trim() : null));
+  const bodySnippet = tryBuildBodySnippet(awsError.body)
+    || tryBuildBodySnippet(awsError.Body)
+    || tryBuildBodySnippet(awsError.$response?.body);
+  const xmlFromBody = tryExtractXmlS3Error(awsError.body)
+    || tryExtractXmlS3Error(awsError.Body)
+    || tryExtractXmlS3Error(awsError.$response?.body);
 
   const isMeaningful = (value: string | null) => Boolean(value && value.toLowerCase() !== 'unknownerror');
-  const normalizedCode = isMeaningful(code) ? code : null;
+  const normalizedCode = isMeaningful(code)
+    ? code
+    : (isMeaningful(xmlFromBody?.code || null) ? xmlFromBody?.code || null : null);
   const normalizedName = isMeaningful(name) ? name : null;
-  const normalizedMessage = isMeaningful(message) ? message : null;
+  const normalizedMessage = isMeaningful(message)
+    ? message
+    : (isMeaningful(xmlFromBody?.message || null) ? xmlFromBody?.message || null : null);
 
   const parts: string[] = [];
   if (statusCode) parts.push(`HTTP ${statusCode}`);
@@ -243,6 +373,16 @@ const extractS3ValidationErrorMessage = (error: unknown) => {
     parts.push(normalizedMessage);
   }
 
+  if (requestId) {
+    parts.push(`requestId=${requestId}`);
+  }
+  if (hostId) {
+    parts.push(`hostId=${hostId}`);
+  }
+  if (bodySnippet && (!normalizedMessage || !bodySnippet.includes(normalizedMessage))) {
+    parts.push(`body=${bodySnippet}`);
+  }
+
   if (parts.length === 0) {
     return 'Unknown S3 error';
   }
@@ -250,56 +390,15 @@ const extractS3ValidationErrorMessage = (error: unknown) => {
   return parts.join(': ');
 };
 
-const extractS3ErrorCode = (error: unknown): string | null => {
-  if (!error || typeof error !== 'object') {
-    return null;
-  }
-
-  const awsError = error as {
-    code?: unknown;
-    Code?: unknown;
-    name?: unknown;
-  };
-
-  const values = [awsError.code, awsError.Code, awsError.name];
-  for (const value of values) {
-    if (typeof value === 'string' && value.trim()) {
-      const normalized = value.trim();
-      if (normalized.toLowerCase() !== 'unknownerror') {
-        return normalized;
-      }
-    }
-  }
-
-  return null;
-};
-
-const shouldTrySignatureFallback = (error: unknown) => {
-  const code = extractS3ErrorCode(error)?.toLowerCase() || '';
-  const message = extractS3ValidationErrorMessage(error).toLowerCase();
-
-  if (!code && !message) {
-    return false;
-  }
-
-  return (
-    code.includes('signature')
-    || code.includes('authorization')
-    || code === 'accessdenied'
-    || message.includes('signature')
-    || message.includes('authorization')
-    || message.includes('credential')
-  );
-};
-
-const createS3Client = (config: S3StorageConfig, mode?: Pick<S3ClientMode, 'endpoint' | 'forcePathStyle'>) => {
+const createS3Client = (config: S3StorageConfig, mode?: Pick<S3ClientMode, 'endpoint' | 'forcePathStyle' | 'region'>) => {
   const normalized = sanitizeConfig(config);
   const resolved = resolveS3ClientConfig(normalized);
   const endpoint = mode?.endpoint || resolved.endpoint;
+  const region = mode?.region || resolved.region;
   const forcePathStyle = typeof mode?.forcePathStyle === 'boolean' ? mode.forcePathStyle : resolved.forcePathStyle;
 
   return new S3Client({
-    region: resolved.region,
+    region,
     endpoint,
     forcePathStyle,
     credentials: {
@@ -312,7 +411,7 @@ const createS3Client = (config: S3StorageConfig, mode?: Pick<S3ClientMode, 'endp
 const buildValidationDebugDetails = (attempt: S3ClientMode, resolved: ResolvedS3Config) => {
   const endpointHost = new URL(attempt.endpoint).host;
   const addressingStyle = attempt.forcePathStyle ? 'path' : 'virtual-host';
-  return `host=${endpointHost}, bucket=${resolved.bucket}, region=${resolved.region}, addressing=${addressingStyle}`;
+  return `host=${endpointHost}, bucket=${resolved.bucket}, signerRegion=${attempt.region}, configuredRegion=${resolved.region}, addressing=${addressingStyle}`;
 };
 
 export const buildS3StorageKey = (prefix: string | null | undefined, channelId: string, storageName: string) => {
@@ -342,6 +441,7 @@ export const validateS3Configuration = async (config: S3StorageConfig): Promise<
     const attempt = attempts[i];
     const client = createS3Client(normalized, {
       endpoint: attempt.endpoint,
+      region: attempt.region,
       forcePathStyle: attempt.forcePathStyle
     });
 
@@ -357,7 +457,7 @@ export const validateS3Configuration = async (config: S3StorageConfig): Promise<
       failedReasons.push(`${attempt.label} [${details}] => ${reason}`);
 
       const hasRemainingAttempt = i < attempts.length - 1;
-      if (!hasRemainingAttempt || !shouldTrySignatureFallback(error)) {
+      if (!hasRemainingAttempt) {
         break;
       }
     }
