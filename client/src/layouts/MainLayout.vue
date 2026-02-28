@@ -242,6 +242,33 @@ const hasStorageSettingsChanges = computed(() => {
   return currentFingerprint !== nextFingerprint
 })
 
+const hasGeneralSettingsChanges = computed(() => {
+  const server = chatStore.server
+  if (!server) {
+    return false
+  }
+
+  const currentTitle = (server.title || server.name || '').trim()
+  const nextTitle = serverSettingsForm.value.title.trim()
+  const currentRulesChannelId = server.rulesChannelId || ''
+  const nextRulesChannelId = serverSettingsForm.value.rulesChannelId || ''
+  const currentWelcomeChannelId = server.welcomeChannelId || ''
+  const nextWelcomeChannelId = serverSettingsForm.value.welcomeChannelId || ''
+
+  return (
+    currentTitle !== nextTitle ||
+    currentRulesChannelId !== nextRulesChannelId ||
+    currentWelcomeChannelId !== nextWelcomeChannelId
+  )
+})
+
+const hasServerSettingsChanges = computed(() =>
+  hasGeneralSettingsChanges.value ||
+  hasStorageSettingsChanges.value ||
+  Boolean(serverIconDataUrl.value) ||
+  removeServerIcon.value
+)
+
 const canSaveServerSettings = computed(() => {
   if (!hasStorageSettingsChanges.value) {
     return true
@@ -469,6 +496,7 @@ onUnmounted(() => {
       :active-section="activeServerSettingsSection"
       :nav-groups="serverSettingsNavGroups"
       :save-disabled="!canSaveServerSettings"
+      :has-unsaved-changes="hasServerSettingsChanges"
       :s3-test-state="s3ConnectionTestState"
       :s3-test-message="s3ConnectionTestMessage"
       :save-message="serverSettingsSaveMessage"
