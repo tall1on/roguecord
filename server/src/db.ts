@@ -888,14 +888,3 @@ function migrateFolderChannelFilesStorageSchema(done: (error?: Error) => void) {
     runNextAlter(0);
   });
 }
-    };
-
-    runNextAlter(0);
-  });
-}
-
-
-    runNextAlter(0);
-  });
-}
-
