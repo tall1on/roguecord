@@ -86,8 +86,12 @@ export interface ServerStorageS3Settings {
   bucket: string;
   accessKey: string;
   secretKey: string;
-  apiKey: string;
   prefix: string;
+}
+
+export interface ServerStorageTestResult {
+  ok: boolean;
+  message: string;
 }
 
 export interface ServerStorageSettings {
@@ -210,7 +214,6 @@ export const useChatStore = defineStore('chat', () => {
       bucket: '',
       accessKey: '',
       secretKey: '',
-      apiKey: '',
       prefix: ''
     }
   });
@@ -244,6 +247,8 @@ export const useChatStore = defineStore('chat', () => {
   let reconnectTimer: number | null = null;
   let reconnectAttempts = 0;
   let isIntentionalDisconnect = false;
+  let pendingStorageTestResolve: ((result: ServerStorageTestResult) => void) | null = null;
+  let pendingStorageTestTimeout: number | null = null;
   const lastMarkedReadMessageByChannel = ref<Record<string, string>>({});
 
   const saveLocalUsername = (username: string) => {
@@ -571,7 +576,6 @@ export const useChatStore = defineStore('chat', () => {
         bucket: '',
         accessKey: '',
         secretKey: '',
-        apiKey: '',
         prefix: ''
       }
     };
@@ -787,11 +791,30 @@ export const useChatStore = defineStore('chat', () => {
             bucket: payload?.s3?.bucket || '',
             accessKey: payload?.s3?.accessKey || '',
             secretKey: payload?.s3?.secretKey || '',
-            apiKey: payload?.s3?.apiKey || '',
             prefix: payload?.s3?.prefix || ''
           }
         };
         break;
+
+      case 'server_storage_test_result': {
+        const result: ServerStorageTestResult = {
+          ok: payload?.ok === true,
+          message: typeof payload?.message === 'string' && payload.message.trim()
+            ? payload.message
+            : (payload?.ok === true ? 'S3 connection test succeeded.' : 'S3 connection test failed.')
+        };
+
+        if (pendingStorageTestTimeout) {
+          window.clearTimeout(pendingStorageTestTimeout);
+          pendingStorageTestTimeout = null;
+        }
+
+        if (pendingStorageTestResolve) {
+          pendingStorageTestResolve(result);
+          pendingStorageTestResolve = null;
+        }
+        break;
+      }
         
       case 'member_list':
         users.value = payload.members;
@@ -1096,7 +1119,6 @@ export const useChatStore = defineStore('chat', () => {
       bucket: string;
       accessKey: string;
       secretKey: string;
-      apiKey: string;
       prefix: string;
     }
   ) => {
@@ -1122,10 +1144,44 @@ export const useChatStore = defineStore('chat', () => {
           bucket: storage.bucket,
           accessKey: storage.accessKey,
           secretKey: storage.secretKey,
-          apiKey: storage.apiKey,
           prefix: storage.prefix
         }
         : undefined
+    });
+  };
+
+  const testServerStorageSettings = async (storage: {
+    endpoint: string;
+    accessKey: string;
+    secretKey: string;
+    prefix: string;
+  }): Promise<ServerStorageTestResult> => {
+    if (pendingStorageTestTimeout) {
+      window.clearTimeout(pendingStorageTestTimeout);
+      pendingStorageTestTimeout = null;
+    }
+
+    return new Promise<ServerStorageTestResult>((resolve) => {
+      pendingStorageTestResolve = resolve;
+      pendingStorageTestTimeout = window.setTimeout(() => {
+        if (pendingStorageTestResolve) {
+          pendingStorageTestResolve({
+            ok: false,
+            message: 'S3 connection test timed out. Please try again.'
+          });
+          pendingStorageTestResolve = null;
+        }
+        pendingStorageTestTimeout = null;
+      }, 15000);
+
+      send('test_server_storage_s3', {
+        storage: {
+          endpoint: storage.endpoint,
+          accessKey: storage.accessKey,
+          secretKey: storage.secretKey,
+          prefix: storage.prefix
+        }
+      });
     });
   };
 
@@ -1376,6 +1432,7 @@ export const useChatStore = defineStore('chat', () => {
     createChannel,
     deleteChannel,
     updateServerSettings,
+    testServerStorageSettings,
     requestServerStorageSettings,
     clearError,
     sendMessage,

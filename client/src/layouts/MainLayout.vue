@@ -36,6 +36,11 @@ const showInviteModal = ref(false)
 const showServerSettingsModal = ref(false)
 const showAdminModal = ref(false)
 const adminKeyInput = ref('')
+const s3ConnectionTestState = ref<'idle' | 'testing' | 'success' | 'error'>('idle')
+const s3ConnectionTestMessage = ref<string | null>(null)
+const s3LastSuccessfulFingerprint = ref<string | null>(null)
+const serverSettingsSaveMessage = ref<string | null>(null)
+const serverSettingsSaveError = ref<string | null>(null)
 
 const serverSettingsForm = ref({
   title: '',
@@ -48,7 +53,6 @@ const serverSettingsForm = ref({
     bucket: '',
     accessKey: '',
     secretKey: '',
-    apiKey: '',
     prefix: '',
     status: 'data_dir' as 'data_dir' | 's3',
     lastError: null as string | null
@@ -139,20 +143,35 @@ const handleCreateChannel = () => {
 }
 
 const handleChatStoreMessage = (message: any) => {
-  if (!showCreateChannelModal.value) return
+  if (showCreateChannelModal.value) {
+    if (message.type === 'channel_created') {
+      showCreateChannelModal.value = false
+      newChannelName.value = ''
+      newChannelType.value = 'text'
+      newChannelFeedUrl.value = ''
+      createChannelError.value = null
+      chatStore.clearError()
+      return
+    }
 
-  if (message.type === 'channel_created') {
-    showCreateChannelModal.value = false
-    newChannelName.value = ''
-    newChannelType.value = 'text'
-    newChannelFeedUrl.value = ''
-    createChannelError.value = null
-    chatStore.clearError()
+    if (message.type === 'error') {
+      createChannelError.value = message.payload?.message || 'Failed to create channel'
+    }
+  }
+
+  if (!showServerSettingsModal.value) {
+    return
+  }
+
+  if (message.type === 'server_settings_updated' || message.type === 'SERVER_UPDATED') {
+    serverSettingsSaveMessage.value = 'Settings saved.'
+    serverSettingsSaveError.value = null
     return
   }
 
   if (message.type === 'error') {
-    createChannelError.value = message.payload?.message || 'Failed to create channel'
+    serverSettingsSaveError.value = message.payload?.message || 'Failed to save settings'
+    serverSettingsSaveMessage.value = null
   }
 }
 
@@ -185,8 +204,60 @@ const selectServerSettingsSection = (sectionId: string) => {
   activeServerSettingsSection.value = sectionId
 }
 
+const getCurrentStorageFingerprint = () => {
+  const storage = serverSettingsForm.value.storage
+  return JSON.stringify({
+    enabled: storage.enabled,
+    endpoint: storage.endpoint.trim(),
+    accessKey: storage.accessKey.trim(),
+    secretKey: storage.secretKey.trim(),
+    prefix: storage.prefix.trim()
+  })
+}
+
+const canSaveServerSettings = computed(() => {
+  if (!serverSettingsForm.value.storage.enabled) {
+    return true
+  }
+
+  return s3ConnectionTestState.value === 'success' && s3LastSuccessfulFingerprint.value === getCurrentStorageFingerprint()
+})
+
+const handleTestStorageConnection = async () => {
+  serverSettingsSaveError.value = null
+  serverSettingsSaveMessage.value = null
+  s3ConnectionTestState.value = 'testing'
+  s3ConnectionTestMessage.value = 'Testing S3 connection...'
+
+  const result = await chatStore.testServerStorageSettings({
+    endpoint: serverSettingsForm.value.storage.endpoint,
+    accessKey: serverSettingsForm.value.storage.accessKey,
+    secretKey: serverSettingsForm.value.storage.secretKey,
+    prefix: serverSettingsForm.value.storage.prefix
+  })
+
+  if (result.ok) {
+    s3ConnectionTestState.value = 'success'
+    s3ConnectionTestMessage.value = result.message
+    s3LastSuccessfulFingerprint.value = getCurrentStorageFingerprint()
+    return
+  }
+
+  s3ConnectionTestState.value = 'error'
+  s3ConnectionTestMessage.value = result.message
+  s3LastSuccessfulFingerprint.value = null
+}
+
 const saveServerSettings = () => {
   if (chatStore.server) {
+    serverSettingsSaveError.value = null
+    serverSettingsSaveMessage.value = null
+
+    if (!canSaveServerSettings.value) {
+      serverSettingsSaveError.value = 'Run a successful S3 connection test before saving.'
+      return
+    }
+
     chatStore.updateServerSettings(
       chatStore.server.id,
       serverSettingsForm.value.title,
@@ -199,11 +270,10 @@ const saveServerSettings = () => {
         bucket: serverSettingsForm.value.storage.bucket,
         accessKey: serverSettingsForm.value.storage.accessKey,
         secretKey: serverSettingsForm.value.storage.secretKey,
-        apiKey: serverSettingsForm.value.storage.apiKey,
         prefix: serverSettingsForm.value.storage.prefix
       }
     )
-    showServerSettingsModal.value = false
+    serverSettingsSaveMessage.value = 'Saving settings...'
   }
 }
 
@@ -224,10 +294,14 @@ watch(showServerSettingsModal, (newVal) => {
     serverSettingsForm.value.storage.bucket = chatStore.serverStorageSettings.s3.bucket
     serverSettingsForm.value.storage.accessKey = chatStore.serverStorageSettings.s3.accessKey
     serverSettingsForm.value.storage.secretKey = chatStore.serverStorageSettings.s3.secretKey
-    serverSettingsForm.value.storage.apiKey = chatStore.serverStorageSettings.s3.apiKey
     serverSettingsForm.value.storage.prefix = chatStore.serverStorageSettings.s3.prefix
     serverSettingsForm.value.storage.status = chatStore.serverStorageSettings.storageType
     serverSettingsForm.value.storage.lastError = chatStore.serverStorageSettings.storageLastError
+    s3ConnectionTestState.value = 'idle'
+    s3ConnectionTestMessage.value = null
+    s3LastSuccessfulFingerprint.value = null
+    serverSettingsSaveMessage.value = null
+    serverSettingsSaveError.value = null
   }
 })
 
@@ -245,10 +319,30 @@ watch(
     serverSettingsForm.value.storage.bucket = storageSettings.s3.bucket
     serverSettingsForm.value.storage.accessKey = storageSettings.s3.accessKey
     serverSettingsForm.value.storage.secretKey = storageSettings.s3.secretKey
-    serverSettingsForm.value.storage.apiKey = storageSettings.s3.apiKey
     serverSettingsForm.value.storage.prefix = storageSettings.s3.prefix
   },
   { deep: true }
+)
+
+watch(
+  () => [
+    showServerSettingsModal.value,
+    serverSettingsForm.value.storage.enabled,
+    serverSettingsForm.value.storage.endpoint,
+    serverSettingsForm.value.storage.accessKey,
+    serverSettingsForm.value.storage.secretKey,
+    serverSettingsForm.value.storage.prefix
+  ],
+  () => {
+    if (!showServerSettingsModal.value || s3ConnectionTestState.value !== 'success') {
+      return
+    }
+
+    if (s3LastSuccessfulFingerprint.value !== getCurrentStorageFingerprint()) {
+      s3ConnectionTestState.value = 'idle'
+      s3ConnectionTestMessage.value = 'S3 inputs changed. Test connection again before saving.'
+    }
+  }
 )
 
 watch(
@@ -298,8 +392,14 @@ onUnmounted(() => {
       v-model:form="serverSettingsForm"
       :active-section="activeServerSettingsSection"
       :nav-groups="serverSettingsNavGroups"
+      :save-disabled="!canSaveServerSettings"
+      :s3-test-state="s3ConnectionTestState"
+      :s3-test-message="s3ConnectionTestMessage"
+      :save-message="serverSettingsSaveMessage"
+      :save-error="serverSettingsSaveError"
       @toggle-group="toggleServerSettingsGroup"
       @select-section="selectServerSettingsSection"
+      @test-storage="handleTestStorageConnection"
       @save="saveServerSettings"
     />
 

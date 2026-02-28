@@ -130,7 +130,32 @@ const sanitizeS3Endpoint = (endpoint: string) => {
   }
   const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
   const parsed = new URL(withProtocol);
-  return parsed.toString().replace(/\/$/, '');
+  return parsed.origin;
+};
+
+const parseHetznerEndpointHost = (endpoint: string): { bucket: string; region: string } | null => {
+  try {
+    const host = new URL(endpoint).hostname.toLowerCase();
+    const labels = host.split('.').filter(Boolean);
+    if (labels.length < 4) {
+      return null;
+    }
+
+    const suffix = labels.slice(-2).join('.');
+    if (suffix !== 'your-objectstorage.com') {
+      return null;
+    }
+
+    const region = labels[labels.length - 3];
+    const bucket = labels.slice(0, labels.length - 3).join('.');
+    if (!region || !bucket) {
+      return null;
+    }
+
+    return { bucket, region };
+  } catch {
+    return null;
+  }
 };
 
 const normalizeS3Config = (input: {
@@ -142,10 +167,27 @@ const normalizeS3Config = (input: {
   prefix?: string | null;
 }): S3StorageConfig => {
   const endpoint = sanitizeS3Endpoint(input.endpoint || '');
-  const region = (input.region || '').trim();
-  const bucket = (input.bucket || '').trim();
+  const requestedRegion = (input.region || '').trim();
+  const requestedBucket = (input.bucket || '').trim();
   const accessKey = (input.accessKey || '').trim();
   const secretKey = (input.secretKey || '').trim();
+
+  const parsedHetzner = parseHetznerEndpointHost(endpoint);
+  const region = requestedRegion || parsedHetzner?.region || '';
+  const bucket = requestedBucket || parsedHetzner?.bucket || '';
+
+  if ((!requestedRegion || !requestedBucket) && !parsedHetzner) {
+    throw new Error('Hetzner endpoint URL must match https://<bucket-name>.<location>.your-objectstorage.com');
+  }
+
+  if (parsedHetzner) {
+    if (requestedRegion && requestedRegion !== parsedHetzner.region) {
+      throw new Error('S3 region does not match endpoint URL location segment');
+    }
+    if (requestedBucket && requestedBucket !== parsedHetzner.bucket) {
+      throw new Error('S3 bucket does not match endpoint URL bucket segment');
+    }
+  }
 
   if (!region) {
     throw new Error('S3 region is required');
@@ -354,6 +396,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'get_server_storage_settings':
         await handleGetServerStorageSettings(client);
+        break;
+      case 'test_server_storage_s3':
+        await handleTestServerStorageS3(client, payload);
         break;
       case 'voice_state_update':
         await handleVoiceStateUpdate(client, payload);
@@ -1553,6 +1598,59 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
   } catch (error) {
     console.error('[WS DEBUG] Failed to update server settings:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to update server settings' } }));
+  }
+};
+
+const handleTestServerStorageS3 = async (
+  client: ClientConnection,
+  payload: {
+    storage?: {
+      endpoint?: string;
+      region?: string;
+      bucket?: string;
+      accessKey?: string;
+      secretKey?: string;
+      prefix?: string;
+    };
+  }
+) => {
+  if (!client.userId) return;
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can test storage settings' } }));
+    return;
+  }
+
+  const currentStorage = await getServerStorageSettings();
+  const currentS3 = currentStorage?.s3;
+  const storageInput = payload?.storage || {};
+
+  try {
+    const mergedS3Config = normalizeS3Config({
+      endpoint: storageInput.endpoint || currentS3?.endpoint || null,
+      region: storageInput.region || currentS3?.region || null,
+      bucket: storageInput.bucket || currentS3?.bucket || null,
+      accessKey: storageInput.accessKey || currentS3?.accessKey || null,
+      secretKey: storageInput.secretKey || currentS3?.secretKey || null,
+      prefix: storageInput.prefix ?? currentS3?.prefix ?? null
+    });
+
+    const validation = await validateS3Configuration(mergedS3Config);
+    client.ws.send(JSON.stringify({
+      type: 'server_storage_test_result',
+      payload: validation.ok
+        ? { ok: true, message: 'S3 connection test succeeded.' }
+        : { ok: false, message: validation.message }
+    }));
+  } catch (error) {
+    client.ws.send(JSON.stringify({
+      type: 'server_storage_test_result',
+      payload: {
+        ok: false,
+        message: error instanceof Error ? error.message : 'Invalid S3 configuration'
+      }
+    }));
   }
 };
 
