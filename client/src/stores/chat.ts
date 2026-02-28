@@ -68,13 +68,14 @@ export interface SavedConnection {
   id: string;
   name: string;
   address: string;
-  iconUrl?: string;
+  iconUrl?: string | null;
 }
 
 export interface Server {
   id: string;
   name: string;
   title: string;
+  iconPath?: string | null;
   rulesChannelId?: string | null;
   welcomeChannelId?: string | null;
   storageType?: 'data_dir' | 's3';
@@ -268,6 +269,43 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     return wsUrl.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`);
+  };
+
+  const getHttpBaseFromWsAddress = (address: string) => {
+    try {
+      const normalizedAddress = normalizeServerAddress(address);
+      const wsUrl = new URL(normalizedAddress);
+      const protocol = wsUrl.protocol === 'wss:' ? 'https:' : 'http:';
+      return `${protocol}//${wsUrl.host}`;
+    } catch {
+      return window.location.origin;
+    }
+  };
+
+  const resolveServerIconUrl = (iconPath?: string | null, wsAddress?: string | null) => {
+    const path = (iconPath || '').trim();
+    if (!path) {
+      return null;
+    }
+
+    if (/^(data:|blob:|https?:\/\/|\/\/)/i.test(path)) {
+      return path;
+    }
+
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+    if (wsAddress) {
+      return `${getHttpBaseFromWsAddress(wsAddress)}${normalizedPath}`;
+    }
+
+    const activeConnection = activeConnectionId.value
+      ? savedConnections.value.find((connection) => connection.id === activeConnectionId.value)
+      : null;
+
+    const baseUrl = activeConnection
+      ? getHttpBaseFromWsAddress(activeConnection.address)
+      : window.location.origin;
+
+    return `${baseUrl}${normalizedPath}`;
   };
 
   const getConnectionNameFromAddress = (address: string) => {
@@ -588,8 +626,27 @@ export const useChatStore = defineStore('chat', () => {
 
     if (activeConnectionId.value) {
       const currentConnection = savedConnections.value.find((c) => c.id === activeConnectionId.value);
-      if (currentConnection && nextServer.title && currentConnection.name !== nextServer.title) {
-        currentConnection.name = nextServer.title;
+      if (currentConnection) {
+        const nextTitle = (nextServer.title || '').trim();
+        const resolvedIconUrl = resolveServerIconUrl(nextServer.iconPath || null, currentConnection.address);
+        let hasChanges = false;
+
+        if (nextTitle && currentConnection.name !== nextTitle) {
+          currentConnection.name = nextTitle;
+          hasChanges = true;
+        }
+
+        if ((currentConnection.iconUrl || null) !== resolvedIconUrl) {
+          currentConnection.iconUrl = resolvedIconUrl;
+          hasChanges = true;
+        }
+
+        if (hasChanges) {
+          localStorage.setItem('savedConnections', JSON.stringify(savedConnections.value));
+        }
+      }
+
+      if (!currentConnection && nextServer.title) {
         localStorage.setItem('savedConnections', JSON.stringify(savedConnections.value));
       }
     }
@@ -1120,6 +1177,10 @@ export const useChatStore = defineStore('chat', () => {
       accessKey: string;
       secretKey: string;
       prefix: string;
+    },
+    icon?: {
+      iconDataUrl?: string | null;
+      removeIcon?: boolean;
     }
   ) => {
     if (server.value && server.value.id === serverId) {
@@ -1136,6 +1197,8 @@ export const useChatStore = defineStore('chat', () => {
       title,
       rulesChannelId,
       welcomeChannelId,
+      iconDataUrl: icon?.iconDataUrl,
+      removeIcon: icon?.removeIcon === true,
       storage: storage
         ? {
           enabled: storage.enabled,
@@ -1449,6 +1512,7 @@ export const useChatStore = defineStore('chat', () => {
     uploadFolderFile,
     downloadFolderFile,
     deleteFolderFile,
+    resolveServerIconUrl,
     send,
     ws,
     addMessageListener,

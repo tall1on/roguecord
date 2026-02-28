@@ -57,6 +57,7 @@ export interface Server {
   id: string;
   name: string;
   title: string;
+  iconPath: string | null;
   rulesChannelId?: string;
   welcomeChannelId?: string;
   storageType: 'data_dir' | 's3';
@@ -85,6 +86,7 @@ const mapServerRow = (row: any): Server => ({
   id: row.id,
   name: row.name,
   title: row.title || row.name,
+  iconPath: row.icon_path || null,
   rulesChannelId: row.rules_channel_id,
   welcomeChannelId: row.welcome_channel_id,
   storageType: row.storage_type === 's3' ? 's3' : 'data_dir',
@@ -122,8 +124,22 @@ export const createServer = async (name: string, welcomeChannelId?: string): Pro
   return mapServerRow(row);
 };
 
-export const updateServerSettings = async (id: string, title: string, rulesChannelId: string | null, welcomeChannelId: string | null): Promise<void> => {
-  await dbRun('UPDATE servers SET title = ?, rules_channel_id = ?, welcome_channel_id = ? WHERE id = ?', [title, rulesChannelId, welcomeChannelId, id]);
+export const updateServerSettings = async (
+  id: string,
+  title: string,
+  rulesChannelId: string | null,
+  welcomeChannelId: string | null,
+  iconPath?: string | null
+): Promise<void> => {
+  if (typeof iconPath === 'undefined') {
+    await dbRun('UPDATE servers SET title = ?, rules_channel_id = ?, welcome_channel_id = ? WHERE id = ?', [title, rulesChannelId, welcomeChannelId, id]);
+    return;
+  }
+
+  await dbRun(
+    'UPDATE servers SET title = ?, rules_channel_id = ?, welcome_channel_id = ?, icon_path = ? WHERE id = ?',
+    [title, rulesChannelId, welcomeChannelId, iconPath, id]
+  );
 };
 
 export const getServerStorageSettings = async (): Promise<ServerStorageSettings | undefined> => {

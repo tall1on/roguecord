@@ -53,7 +53,9 @@ import {
 } from '../storage/s3Storage';
 
 const filesRootDir = path.join(dataDir, 'files');
+const serverIconsRootDir = path.join(dataDir, 'server-icons');
 const MAX_FOLDER_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+const MAX_SERVER_ICON_SIZE_BYTES = 2 * 1024 * 1024;
 const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
   'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx',
   'html', 'htm', 'php', 'phtml',
@@ -70,6 +72,93 @@ const ensureFilesRootDir = () => {
   if (!fs.existsSync(filesRootDir)) {
     fs.mkdirSync(filesRootDir, { recursive: true });
   }
+};
+
+const ensureServerIconsRootDir = () => {
+  if (!fs.existsSync(serverIconsRootDir)) {
+    fs.mkdirSync(serverIconsRootDir, { recursive: true });
+  }
+};
+
+const sanitizeServerIdForPath = (serverId: string) => (serverId || '').replace(/[^a-zA-Z0-9-]/g, '');
+
+const getSafeServerIconPath = (serverId: string, storageName: string) => {
+  ensureServerIconsRootDir();
+  const safeServerId = sanitizeServerIdForPath(serverId);
+  const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
+  if (!safeServerId || !safeStorageName) {
+    throw new Error('Invalid server icon path');
+  }
+
+  const dir = path.resolve(serverIconsRootDir, safeServerId);
+  const root = path.resolve(serverIconsRootDir);
+  if (!dir.startsWith(root)) {
+    throw new Error('Unsafe server icon directory');
+  }
+
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const fullPath = path.resolve(dir, safeStorageName);
+  if (!fullPath.startsWith(dir)) {
+    throw new Error('Unsafe server icon file path');
+  }
+
+  return fullPath;
+};
+
+const parseServerIconDataUrl = (value: unknown): { buffer: Buffer; mimeType: string; extension: string } | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  const match = trimmed.match(/^data:(image\/(png|jpeg|jpg|webp|gif));base64,(.+)$/i);
+  if (!match) return null;
+
+  const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase();
+  const extension = mimeType === 'image/jpeg' ? 'jpg' : mimeType.split('/')[1];
+  const base64 = match[3] || '';
+  const buffer = Buffer.from(base64, 'base64');
+  if (!buffer.length) return null;
+  return { buffer, mimeType, extension };
+};
+
+const buildServerIconPathForClient = (serverId: string, storageName: string) => {
+  const safeServerId = sanitizeServerIdForPath(serverId);
+  const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
+  return `/server-icons/${safeServerId}/${safeStorageName}`;
+};
+
+const storeServerIcon = async (serverId: string, iconDataUrl: string): Promise<string> => {
+  const parsed = parseServerIconDataUrl(iconDataUrl);
+  if (!parsed) {
+    throw new Error('Invalid icon data. Expected base64 data URL image.');
+  }
+
+  if (parsed.buffer.length > MAX_SERVER_ICON_SIZE_BYTES) {
+    throw new Error('Server icon exceeds 2MB size limit.');
+  }
+
+  const runtimeStorage = await getStorageRuntimeConfig();
+  const storageName = `icon-${Date.now()}-${crypto.randomUUID()}.${parsed.extension}`;
+
+  if (runtimeStorage.storageType === 's3') {
+    if (!runtimeStorage.s3Config) {
+      throw new Error('S3 storage is enabled but configuration is missing');
+    }
+
+    const key = buildS3StorageKey(runtimeStorage.s3Config.prefix, `server-icons/${serverId}`, storageName);
+    await uploadFileToS3({
+      config: runtimeStorage.s3Config,
+      key,
+      buffer: parsed.buffer,
+      mimeType: parsed.mimeType
+    });
+    return `s3:${key}`;
+  }
+
+  const targetPath = getSafeServerIconPath(serverId, storageName);
+  fs.writeFileSync(targetPath, parsed.buffer);
+  return buildServerIconPathForClient(serverId, storageName);
 };
 
 const sanitizeFileName = (name: string) => {
@@ -1494,6 +1583,8 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
     title: string;
     rulesChannelId: string | null;
     welcomeChannelId: string | null;
+    iconDataUrl?: string | null;
+    removeIcon?: boolean;
     storage?: {
       enabled?: boolean;
       endpoint?: string;
@@ -1577,7 +1668,14 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
       }
     }
 
-    await updateServerSettings(serverId, normalizedTitle, rulesChannelId, welcomeChannelId);
+    let nextIconPath: string | null | undefined = undefined;
+    if (typedPayload.removeIcon === true) {
+      nextIconPath = null;
+    } else if (typeof typedPayload.iconDataUrl === 'string' && typedPayload.iconDataUrl.trim()) {
+      nextIconPath = await storeServerIcon(serverId, typedPayload.iconDataUrl);
+    }
+
+    await updateServerSettings(serverId, normalizedTitle, rulesChannelId, welcomeChannelId, nextIconPath);
     const updatedServer = await getServer();
     const updatedStorageSettings = await getServerStorageSettings();
     
