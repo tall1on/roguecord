@@ -519,13 +519,21 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     if (!hasS3SecretKey) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_secret_key TEXT');
     if (!hasS3Prefix) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_prefix TEXT');
     if (!hasStorageLastError) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_last_error TEXT');
-    if (!hasStorageUpdatedAt) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP');
+    if (!hasStorageUpdatedAt) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_updated_at DATETIME');
 
     const runNextAlter = (index: number) => {
       if (index >= pendingAlterStatements.length) {
-        db.run("UPDATE servers SET title = COALESCE(NULLIF(title, ''), name, 'My Server')", (updateErr) => {
-          done(updateErr || undefined);
-        });
+        db.run(
+          `
+            UPDATE servers
+            SET
+              title = COALESCE(NULLIF(title, ''), name, 'My Server'),
+              storage_updated_at = COALESCE(storage_updated_at, CURRENT_TIMESTAMP)
+          `,
+          (updateErr) => {
+            done(updateErr || undefined);
+          }
+        );
         return;
       }
 
