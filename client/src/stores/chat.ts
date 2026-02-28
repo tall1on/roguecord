@@ -77,6 +77,22 @@ export interface Server {
   title: string;
   rulesChannelId?: string | null;
   welcomeChannelId?: string | null;
+  storageType?: 'data_dir' | 's3';
+}
+
+export interface ServerStorageS3Settings {
+  endpoint: string;
+  region: string;
+  bucket: string;
+  accessKey: string;
+  secretKey: string;
+  prefix: string;
+}
+
+export interface ServerStorageSettings {
+  storageType: 'data_dir' | 's3';
+  storageLastError: string | null;
+  s3: ServerStorageS3Settings;
 }
 
 export interface ActiveMainPanel {
@@ -184,6 +200,18 @@ export const useChatStore = defineStore('chat', () => {
   const currentUser = ref<User | null>(null);
   const currentUserRole = ref<string>('user');
   const server = ref<Server | null>(null);
+  const serverStorageSettings = ref<ServerStorageSettings>({
+    storageType: 'data_dir',
+    storageLastError: null,
+    s3: {
+      endpoint: '',
+      region: '',
+      bucket: '',
+      accessKey: '',
+      secretKey: '',
+      prefix: ''
+    }
+  });
   const lastError = ref<string | null>(null);
   
   const savedConnections = ref<SavedConnection[]>(
@@ -532,6 +560,18 @@ export const useChatStore = defineStore('chat', () => {
     onlineUserIds.value.clear();
     currentUser.value = null;
     server.value = null;
+    serverStorageSettings.value = {
+      storageType: 'data_dir',
+      storageLastError: null,
+      s3: {
+        endpoint: '',
+        region: '',
+        bucket: '',
+        accessKey: '',
+        secretKey: '',
+        prefix: ''
+      }
+    };
   };
 
   const messageListeners = ref<((message: any) => void)[]>([]);
@@ -719,6 +759,9 @@ export const useChatStore = defineStore('chat', () => {
         if (payload.server) {
           applyServerState(payload.server);
         }
+        if ((payload.user.role || 'user') === 'admin') {
+          requestServerStorageSettings();
+        }
         saveLocalUsername(payload.user.username);
         getChannels();
         break;
@@ -729,6 +772,21 @@ export const useChatStore = defineStore('chat', () => {
         if (payload.server) {
           applyServerState(payload.server);
         }
+        break;
+
+      case 'server_storage_settings':
+        serverStorageSettings.value = {
+          storageType: payload.storageType === 's3' ? 's3' : 'data_dir',
+          storageLastError: typeof payload.storageLastError === 'string' ? payload.storageLastError : null,
+          s3: {
+            endpoint: payload?.s3?.endpoint || '',
+            region: payload?.s3?.region || '',
+            bucket: payload?.s3?.bucket || '',
+            accessKey: payload?.s3?.accessKey || '',
+            secretKey: payload?.s3?.secretKey || '',
+            prefix: payload?.s3?.prefix || ''
+          }
+        };
         break;
         
       case 'member_list':
@@ -1022,7 +1080,21 @@ export const useChatStore = defineStore('chat', () => {
     send('delete_channel', { channel_id });
   };
 
-  const updateServerSettings = (serverId: string, title: string, rulesChannelId: string | null, welcomeChannelId: string | null) => {
+  const updateServerSettings = (
+    serverId: string,
+    title: string,
+    rulesChannelId: string | null,
+    welcomeChannelId: string | null,
+    storage?: {
+      enabled: boolean;
+      endpoint: string;
+      region: string;
+      bucket: string;
+      accessKey: string;
+      secretKey: string;
+      prefix: string;
+    }
+  ) => {
     if (server.value && server.value.id === serverId) {
       applyServerState({
         ...server.value,
@@ -1032,7 +1104,27 @@ export const useChatStore = defineStore('chat', () => {
       });
     }
 
-    send('UPDATE_SERVER_SETTINGS', { serverId, title, rulesChannelId, welcomeChannelId });
+    send('UPDATE_SERVER_SETTINGS', {
+      serverId,
+      title,
+      rulesChannelId,
+      welcomeChannelId,
+      storage: storage
+        ? {
+          enabled: storage.enabled,
+          endpoint: storage.endpoint,
+          region: storage.region,
+          bucket: storage.bucket,
+          accessKey: storage.accessKey,
+          secretKey: storage.secretKey,
+          prefix: storage.prefix
+        }
+        : undefined
+    });
+  };
+
+  const requestServerStorageSettings = () => {
+    send('get_server_storage_settings');
   };
 
   const clearError = () => {
@@ -1249,6 +1341,7 @@ export const useChatStore = defineStore('chat', () => {
     currentUser,
     currentUserRole,
     server,
+    serverStorageSettings,
     lastError,
     savedConnections,
     activeConnectionId,
@@ -1277,6 +1370,7 @@ export const useChatStore = defineStore('chat', () => {
     createChannel,
     deleteChannel,
     updateServerSettings,
+    requestServerStorageSettings,
     clearError,
     sendMessage,
     loadOlderMessages,

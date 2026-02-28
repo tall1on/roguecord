@@ -36,7 +36,16 @@ function initializeDatabase() {
         name TEXT NOT NULL,
         title TEXT NOT NULL DEFAULT 'My Server',
         rules_channel_id TEXT,
-        welcome_channel_id TEXT
+        welcome_channel_id TEXT,
+        storage_type TEXT NOT NULL DEFAULT 'data_dir',
+        s3_endpoint TEXT,
+        s3_region TEXT,
+        s3_bucket TEXT,
+        s3_access_key TEXT,
+        s3_secret_key TEXT,
+        s3_prefix TEXT,
+        storage_last_error TEXT,
+        storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `, (err) => {
       if (!err) {
@@ -45,6 +54,15 @@ function initializeDatabase() {
           db.run("ALTER TABLE servers ADD COLUMN title TEXT NOT NULL DEFAULT 'My Server'", () => {});
           db.run('ALTER TABLE servers ADD COLUMN rules_channel_id TEXT', () => {});
           db.run('ALTER TABLE servers ADD COLUMN welcome_channel_id TEXT', () => {});
+          db.run("ALTER TABLE servers ADD COLUMN storage_type TEXT NOT NULL DEFAULT 'data_dir'", () => {});
+          db.run('ALTER TABLE servers ADD COLUMN s3_endpoint TEXT', () => {});
+          db.run('ALTER TABLE servers ADD COLUMN s3_region TEXT', () => {});
+          db.run('ALTER TABLE servers ADD COLUMN s3_bucket TEXT', () => {});
+          db.run('ALTER TABLE servers ADD COLUMN s3_access_key TEXT', () => {});
+          db.run('ALTER TABLE servers ADD COLUMN s3_secret_key TEXT', () => {});
+          db.run('ALTER TABLE servers ADD COLUMN s3_prefix TEXT', () => {});
+          db.run('ALTER TABLE servers ADD COLUMN storage_last_error TEXT', () => {});
+          db.run('ALTER TABLE servers ADD COLUMN storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP', () => {});
           db.run("UPDATE servers SET title = COALESCE(NULLIF(title, ''), name, 'My Server')", () => {});
         } catch (e) {
           console.error('Migration error:', e);
@@ -115,9 +133,12 @@ function initializeDatabase() {
         channel_id TEXT NOT NULL,
         original_name TEXT NOT NULL,
         storage_name TEXT NOT NULL,
+        storage_provider TEXT NOT NULL DEFAULT 'data_dir',
+        storage_key TEXT,
         mime_type TEXT,
         size_bytes INTEGER NOT NULL,
         uploader_user_id TEXT NOT NULL,
+        migrated_to_s3_at DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (channel_id) REFERENCES channels(id),
@@ -132,6 +153,13 @@ function initializeDatabase() {
       db.serialize(() => {
         db.run('CREATE INDEX IF NOT EXISTS idx_folder_channel_files_channel_id ON folder_channel_files(channel_id)');
         db.run('CREATE INDEX IF NOT EXISTS idx_folder_channel_files_uploader_id ON folder_channel_files(uploader_user_id)');
+        db.run('CREATE INDEX IF NOT EXISTS idx_folder_channel_files_storage_provider ON folder_channel_files(storage_provider)');
+      });
+
+      migrateFolderChannelFilesStorageSchema((migrationErr) => {
+        if (migrationErr) {
+          console.error('Error migrating folder_channel_files table for storage schema:', migrationErr.message);
+        }
       });
     });
 
@@ -601,6 +629,41 @@ function migrateChannelReadStatesTable(done: (error?: Error) => void) {
           db.run('CREATE INDEX IF NOT EXISTS idx_channel_read_states_user ON channel_read_states(user_id)');
           db.run('CREATE INDEX IF NOT EXISTS idx_channel_read_states_channel ON channel_read_states(channel_id)');
         });
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function migrateFolderChannelFilesStorageSchema(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(folder_channel_files)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasStorageProvider = columns.some((column) => column.name === 'storage_provider');
+    const hasStorageKey = columns.some((column) => column.name === 'storage_key');
+    const hasMigratedToS3At = columns.some((column) => column.name === 'migrated_to_s3_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasStorageProvider) pendingAlterStatements.push("ALTER TABLE folder_channel_files ADD COLUMN storage_provider TEXT NOT NULL DEFAULT 'data_dir'");
+    if (!hasStorageKey) pendingAlterStatements.push('ALTER TABLE folder_channel_files ADD COLUMN storage_key TEXT');
+    if (!hasMigratedToS3At) pendingAlterStatements.push('ALTER TABLE folder_channel_files ADD COLUMN migrated_to_s3_at DATETIME');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
         done();
         return;
       }
