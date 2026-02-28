@@ -29,6 +29,29 @@ export const dbAll = <T>(sql: string, params: any[] = []): Promise<T[]> => {
   });
 };
 
+const isMissingColumnError = (error: unknown, columnName: string): boolean => {
+  if (!error || typeof error !== 'object' || !('message' in error)) return false;
+  const message = String((error as any).message || '').toLowerCase();
+  return message.includes('no such column') && message.includes(columnName.toLowerCase());
+};
+
+const folderFilesLegacySelect = `
+  SELECT
+    id,
+    channel_id,
+    original_name,
+    storage_name,
+    'data_dir' AS storage_provider,
+    NULL AS storage_key,
+    mime_type,
+    size_bytes,
+    uploader_user_id,
+    NULL AS migrated_to_s3_at,
+    created_at,
+    updated_at
+  FROM folder_channel_files
+`;
+
 // --- Servers ---
 export interface Server {
   id: string;
@@ -325,57 +348,132 @@ export const createFolderChannelFile = async (input: {
   uploaderUserId: string;
 }): Promise<FolderChannelFile> => {
   const id = crypto.randomUUID();
-  await dbRun(
-    `
-      INSERT INTO folder_channel_files (
+  try {
+    await dbRun(
+      `
+        INSERT INTO folder_channel_files (
+          id,
+          channel_id,
+          original_name,
+          storage_name,
+          storage_provider,
+          storage_key,
+          mime_type,
+          size_bytes,
+          uploader_user_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
         id,
-        channel_id,
-        original_name,
-        storage_name,
-        storage_provider,
-        storage_key,
-        mime_type,
-        size_bytes,
-        uploader_user_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-    [
-      id,
-      input.channelId,
-      input.originalName,
-      input.storageName,
-      input.storageProvider || 'data_dir',
-      input.storageKey || null,
-      input.mimeType || null,
-      input.sizeBytes,
-      input.uploaderUserId
-    ]
-  );
+        input.channelId,
+        input.originalName,
+        input.storageName,
+        input.storageProvider || 'data_dir',
+        input.storageKey || null,
+        input.mimeType || null,
+        input.sizeBytes,
+        input.uploaderUserId
+      ]
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key')) {
+      throw error;
+    }
 
-  return (await dbGet<FolderChannelFile>('SELECT * FROM folder_channel_files WHERE id = ?', [id]))!;
+    await dbRun(
+      `
+        INSERT INTO folder_channel_files (
+          id,
+          channel_id,
+          original_name,
+          storage_name,
+          mime_type,
+          size_bytes,
+          uploader_user_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        id,
+        input.channelId,
+        input.originalName,
+        input.storageName,
+        input.mimeType || null,
+        input.sizeBytes,
+        input.uploaderUserId
+      ]
+    );
+  }
+
+  return (await getFolderChannelFileById(id))!;
 };
 
 export const getFolderChannelFiles = async (channelId: string): Promise<FolderChannelFileWithUploader[]> => {
-  return dbAll<FolderChannelFileWithUploader>(
-    `
-      SELECT
-        f.*,
-        u.username AS uploader_username
-      FROM folder_channel_files f
-      INNER JOIN users u ON u.id = f.uploader_user_id
-      WHERE f.channel_id = ?
-      ORDER BY f.created_at DESC, f.id DESC
-    `,
-    [channelId]
-  );
+  try {
+    return await dbAll<FolderChannelFileWithUploader>(
+      `
+        SELECT
+          f.*,
+          u.username AS uploader_username
+        FROM folder_channel_files f
+        INNER JOIN users u ON u.id = f.uploader_user_id
+        WHERE f.channel_id = ?
+        ORDER BY f.created_at DESC, f.id DESC
+      `,
+      [channelId]
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key') && !isMissingColumnError(error, 'migrated_to_s3_at')) {
+      throw error;
+    }
+
+    return dbAll<FolderChannelFileWithUploader>(
+      `
+        SELECT
+          f.id,
+          f.channel_id,
+          f.original_name,
+          f.storage_name,
+          'data_dir' AS storage_provider,
+          NULL AS storage_key,
+          f.mime_type,
+          f.size_bytes,
+          f.uploader_user_id,
+          NULL AS migrated_to_s3_at,
+          f.created_at,
+          f.updated_at,
+          u.username AS uploader_username
+        FROM folder_channel_files f
+        INNER JOIN users u ON u.id = f.uploader_user_id
+        WHERE f.channel_id = ?
+        ORDER BY f.created_at DESC, f.id DESC
+      `,
+      [channelId]
+    );
+  }
 };
 
 export const getFolderChannelFileById = async (fileId: string): Promise<FolderChannelFile | undefined> => {
-  return dbGet<FolderChannelFile>('SELECT * FROM folder_channel_files WHERE id = ?', [fileId]);
+  try {
+    return await dbGet<FolderChannelFile>('SELECT * FROM folder_channel_files WHERE id = ?', [fileId]);
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key') && !isMissingColumnError(error, 'migrated_to_s3_at')) {
+      throw error;
+    }
+
+    return dbGet<FolderChannelFile>(`${folderFilesLegacySelect} WHERE id = ?`, [fileId]);
+  }
 };
 
 export const getAllFolderChannelFiles = async (): Promise<FolderChannelFile[]> => {
-  return dbAll<FolderChannelFile>('SELECT * FROM folder_channel_files ORDER BY created_at ASC, id ASC');
+  try {
+    return await dbAll<FolderChannelFile>('SELECT * FROM folder_channel_files ORDER BY created_at ASC, id ASC');
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key') && !isMissingColumnError(error, 'migrated_to_s3_at')) {
+      throw error;
+    }
+
+    return dbAll<FolderChannelFile>(`${folderFilesLegacySelect} ORDER BY created_at ASC, id ASC`);
+  }
 };
 
 export const deleteFolderChannelFileById = async (fileId: string): Promise<void> => {
@@ -388,17 +486,32 @@ export const updateFolderChannelFileStorage = async (input: {
   storageKey: string | null;
   migratedToS3At: string | null;
 }): Promise<void> => {
-  await dbRun(
-    `
-      UPDATE folder_channel_files
-      SET storage_provider = ?,
-          storage_key = ?,
-          migrated_to_s3_at = ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `,
-    [input.storageProvider, input.storageKey, input.migratedToS3At, input.fileId]
-  );
+  try {
+    await dbRun(
+      `
+        UPDATE folder_channel_files
+        SET storage_provider = ?,
+            storage_key = ?,
+            migrated_to_s3_at = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `,
+      [input.storageProvider, input.storageKey, input.migratedToS3At, input.fileId]
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key') && !isMissingColumnError(error, 'migrated_to_s3_at')) {
+      throw error;
+    }
+
+    await dbRun(
+      `
+        UPDATE folder_channel_files
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `,
+      [input.fileId]
+    );
+  }
 };
 
 // --- Messages ---
