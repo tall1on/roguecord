@@ -167,32 +167,22 @@ const buildSignerRegionFallbacks = (primaryRegion: string) => {
   return Array.from(unique.values());
 };
 
-const buildHetznerDirectBucketEndpoint = (endpoint: string, bucket: string, location: string) => {
-  const parsed = new URL(endpoint);
-  parsed.hostname = `${bucket}.${location}.your-objectstorage.com`;
-  return parsed.toString().replace(/\/$/, '');
-};
-
 const buildS3ValidationModes = (config: S3StorageConfig): S3ClientMode[] => {
   const sanitized = sanitizeConfig(config);
   const resolved = resolveS3ClientConfig(sanitized);
   const signerRegions = buildSignerRegionFallbacks(resolved.region);
 
   if (resolved.provider === 'hetzner') {
-    const parsedHetzner = parseHetznerEndpointHost(resolved.endpoint);
     const baseEndpoint = getBaseEndpointWithoutBucketSubdomain(resolved.endpoint, resolved.bucket);
-    const directEndpoint = parsedHetzner
-      ? buildHetznerDirectBucketEndpoint(baseEndpoint, resolved.bucket, parsedHetzner.location)
-      : resolved.endpoint;
 
     const candidates: S3ClientMode[] = [];
     for (const signerRegion of signerRegions) {
       candidates.push(
         {
-          endpoint: directEndpoint,
+          endpoint: baseEndpoint,
           region: signerRegion,
           forcePathStyle: false,
-          label: 'virtual-host/hetzner-direct-bucket-endpoint'
+          label: 'virtual-host/hetzner-base-endpoint'
         },
         {
           endpoint: baseEndpoint,
@@ -464,9 +454,15 @@ export const validateS3Configuration = async (config: S3StorageConfig): Promise<
   }
 
   const summary = failedReasons.join(' | ');
+  const shouldAddHetzner403Hint = resolved.provider === 'hetzner'
+    && failedReasons.some((reason) => /\bHTTP\s*403\b/i.test(reason))
+    && failedReasons.some((reason) => /\b(unknown|unknownerror)\b/i.test(reason));
+  const hetznerHint = shouldAddHetzner403Hint
+    ? ' Hint: Hetzner HTTP 403/Unknown usually means invalid access key/secret or region/signing mismatch.'
+    : '';
   return {
     ok: false,
-    message: `S3 validation failed: ${summary || 'Unknown S3 error'}`
+    message: `S3 validation failed: ${summary || 'Unknown S3 error'}${hetznerHint}`
   };
 };
 
