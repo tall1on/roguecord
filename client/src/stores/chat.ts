@@ -288,6 +288,21 @@ export const useChatStore = defineStore('chat', () => {
       return null;
     }
 
+    if (path.startsWith('s3:')) {
+      const key = path.slice(3).trim();
+      if (!key) {
+        return null;
+      }
+
+      const baseUrl = wsAddress
+        ? getHttpBaseFromWsAddress(wsAddress)
+        : (activeConnectionId.value
+          ? getHttpBaseFromWsAddress(savedConnections.value.find((connection) => connection.id === activeConnectionId.value)?.address || '')
+          : window.location.origin);
+
+      return `${baseUrl}/server-icons/s3/${encodeURIComponent(key)}`;
+    }
+
     if (/^(data:|blob:|https?:\/\/|\/\/)/i.test(path)) {
       return path;
     }

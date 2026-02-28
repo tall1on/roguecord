@@ -219,7 +219,34 @@ const getCurrentStorageFingerprint = () => {
   })
 }
 
+const hasStorageSettingsChanges = computed(() => {
+  const currentStorage = chatStore.serverStorageSettings
+  const formStorage = serverSettingsForm.value.storage
+
+  const currentFingerprint = JSON.stringify({
+    enabled: currentStorage.storageType === 's3',
+    endpoint: (currentStorage.s3.endpoint || '').trim(),
+    accessKey: (currentStorage.s3.accessKey || '').trim(),
+    secretKey: (currentStorage.s3.secretKey || '').trim(),
+    prefix: (currentStorage.s3.prefix || '').trim()
+  })
+
+  const nextFingerprint = JSON.stringify({
+    enabled: formStorage.enabled,
+    endpoint: formStorage.endpoint.trim(),
+    accessKey: formStorage.accessKey.trim(),
+    secretKey: formStorage.secretKey.trim(),
+    prefix: formStorage.prefix.trim()
+  })
+
+  return currentFingerprint !== nextFingerprint
+})
+
 const canSaveServerSettings = computed(() => {
+  if (!hasStorageSettingsChanges.value) {
+    return true
+  }
+
   if (!serverSettingsForm.value.storage.enabled) {
     return true
   }
@@ -257,7 +284,19 @@ const handleTestStorageConnection = async () => {
     serverSettingsSaveError.value = null
     serverSettingsSaveMessage.value = null
 
-    if (!canSaveServerSettings.value) {
+    const nextStoragePayload = hasStorageSettingsChanges.value
+      ? {
+          enabled: serverSettingsForm.value.storage.enabled,
+          endpoint: serverSettingsForm.value.storage.endpoint,
+          region: serverSettingsForm.value.storage.region,
+          bucket: serverSettingsForm.value.storage.bucket,
+          accessKey: serverSettingsForm.value.storage.accessKey,
+          secretKey: serverSettingsForm.value.storage.secretKey,
+          prefix: serverSettingsForm.value.storage.prefix
+        }
+      : undefined
+
+    if (nextStoragePayload && !canSaveServerSettings.value) {
       serverSettingsSaveError.value = 'Run a successful S3 connection test before saving.'
       return
     }
@@ -267,15 +306,7 @@ const handleTestStorageConnection = async () => {
       serverSettingsForm.value.title,
       serverSettingsForm.value.rulesChannelId || null,
       serverSettingsForm.value.welcomeChannelId || null,
-      {
-        enabled: serverSettingsForm.value.storage.enabled,
-        endpoint: serverSettingsForm.value.storage.endpoint,
-        region: serverSettingsForm.value.storage.region,
-        bucket: serverSettingsForm.value.storage.bucket,
-        accessKey: serverSettingsForm.value.storage.accessKey,
-        secretKey: serverSettingsForm.value.storage.secretKey,
-        prefix: serverSettingsForm.value.storage.prefix
-      },
+      nextStoragePayload,
       {
         iconDataUrl: serverIconDataUrl.value,
         removeIcon: removeServerIcon.value
