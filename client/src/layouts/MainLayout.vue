@@ -41,6 +41,10 @@ const s3ConnectionTestMessage = ref<string | null>(null)
 const s3LastSuccessfulFingerprint = ref<string | null>(null)
 const serverSettingsSaveMessage = ref<string | null>(null)
 const serverSettingsSaveError = ref<string | null>(null)
+const serverIconDataUrl = ref<string | null>(null)
+const removeServerIcon = ref(false)
+const serverIconPreviewUrl = ref<string | null>(null)
+const serverIconError = ref<string | null>(null)
 
 const serverSettingsForm = ref({
   title: '',
@@ -248,7 +252,7 @@ const handleTestStorageConnection = async () => {
   s3LastSuccessfulFingerprint.value = null
 }
 
-const saveServerSettings = () => {
+  const saveServerSettings = () => {
   if (chatStore.server) {
     serverSettingsSaveError.value = null
     serverSettingsSaveMessage.value = null
@@ -271,10 +275,47 @@ const saveServerSettings = () => {
         accessKey: serverSettingsForm.value.storage.accessKey,
         secretKey: serverSettingsForm.value.storage.secretKey,
         prefix: serverSettingsForm.value.storage.prefix
+      },
+      {
+        iconDataUrl: serverIconDataUrl.value,
+        removeIcon: removeServerIcon.value
       }
     )
     serverSettingsSaveMessage.value = 'Saving settings...'
   }
+}
+
+const handleServerIconSelected = (file: File) => {
+  serverIconError.value = null
+
+  if (!file.type.startsWith('image/')) {
+    serverIconError.value = 'Please select an image file (PNG, JPG, WEBP, etc.).'
+    return
+  }
+
+  const reader = new FileReader()
+  reader.onload = () => {
+    const result = typeof reader.result === 'string' ? reader.result : ''
+    if (!result.startsWith('data:image/')) {
+      serverIconError.value = 'Failed to read image. Please try another file.'
+      return
+    }
+
+    serverIconDataUrl.value = result
+    serverIconPreviewUrl.value = result
+    removeServerIcon.value = false
+  }
+  reader.onerror = () => {
+    serverIconError.value = 'Failed to read image. Please try again.'
+  }
+  reader.readAsDataURL(file)
+}
+
+const handleRemoveServerIcon = () => {
+  serverIconError.value = null
+  serverIconDataUrl.value = null
+  serverIconPreviewUrl.value = null
+  removeServerIcon.value = true
 }
 
 watch(showServerSettingsModal, (newVal) => {
@@ -297,6 +338,10 @@ watch(showServerSettingsModal, (newVal) => {
     serverSettingsForm.value.storage.prefix = chatStore.serverStorageSettings.s3.prefix
     serverSettingsForm.value.storage.status = chatStore.serverStorageSettings.storageType
     serverSettingsForm.value.storage.lastError = chatStore.serverStorageSettings.storageLastError
+    serverIconDataUrl.value = null
+    removeServerIcon.value = false
+    serverIconError.value = null
+    serverIconPreviewUrl.value = chatStore.resolveServerIconUrl(chatStore.server.iconPath || null)
     s3ConnectionTestState.value = 'idle'
     s3ConnectionTestMessage.value = null
     s3LastSuccessfulFingerprint.value = null
@@ -397,9 +442,14 @@ onUnmounted(() => {
       :s3-test-message="s3ConnectionTestMessage"
       :save-message="serverSettingsSaveMessage"
       :save-error="serverSettingsSaveError"
+      :icon-preview-url="serverIconPreviewUrl"
+      :icon-error="serverIconError"
+      :can-remove-icon="Boolean(serverIconPreviewUrl || chatStore.server?.iconPath)"
       @toggle-group="toggleServerSettingsGroup"
       @select-section="selectServerSettingsSection"
       @test-storage="handleTestStorageConnection"
+      @select-icon="handleServerIconSelected"
+      @remove-icon="handleRemoveServerIcon"
       @save="saveServerSettings"
     />
 

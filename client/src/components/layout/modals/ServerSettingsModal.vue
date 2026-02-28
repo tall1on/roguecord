@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useChatStore } from '../../../stores/chat'
 
 type ServerSettingsNavItem = {
@@ -40,18 +40,38 @@ defineProps<{
   s3TestMessage: string | null
   saveMessage: string | null
   saveError: string | null
+  iconPreviewUrl: string | null
+  iconError: string | null
+  canRemoveIcon: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'toggle-group', groupId: string): void
   (e: 'select-section', sectionId: string): void
   (e: 'test-storage'): void
+  (e: 'select-icon', file: File): void
+  (e: 'remove-icon'): void
   (e: 'save'): void
 }>()
 
 const chatStore = useChatStore()
 const textChannels = computed(() => chatStore.activeServerChannels.filter((c) => c.type === 'text'))
 const storageStatusLabel = computed(() => (form.value.storage.status === 's3' ? 'S3 enabled' : 'data-dir enabled'))
+const iconFileInput = ref<HTMLInputElement | null>(null)
+
+const openIconPicker = () => {
+  iconFileInput.value?.click()
+}
+
+const onIconInputChange = (event: Event) => {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file) {
+    return
+  }
+  emit('select-icon', file)
+  target.value = ''
+}
 </script>
 
 <template>
@@ -97,6 +117,45 @@ const storageStatusLabel = computed(() => (form.value.storage.status === 's3' ? 
 
         <div class="flex-1 overflow-y-auto px-6 py-5">
           <div v-if="activeSection === 'general-settings'" class="space-y-6 max-w-3xl">
+            <div>
+              <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Server Icon</label>
+              <div class="rounded border border-[#3f4147] bg-[#2b2d31] px-4 py-4">
+                <div class="flex items-center gap-4">
+                  <div class="w-16 h-16 rounded-2xl bg-[#1e1f22] overflow-hidden flex items-center justify-center text-white font-bold text-xl">
+                    <img v-if="iconPreviewUrl" :src="iconPreviewUrl" alt="Server icon preview" class="w-full h-full object-cover" />
+                    <span v-else>{{ (form.title || chatStore.server?.title || chatStore.server?.name || 'S').charAt(0).toUpperCase() }}</span>
+                  </div>
+
+                  <div class="flex flex-wrap items-center gap-2">
+                    <input
+                      ref="iconFileInput"
+                      type="file"
+                      accept="image/*"
+                      class="hidden"
+                      @change="onIconInputChange"
+                    />
+                    <button
+                      type="button"
+                      class="bg-[#4f46e5] hover:bg-[#4338ca] text-white px-3 py-1.5 rounded text-sm font-medium transition-colors"
+                      @click="openIconPicker"
+                    >
+                      Upload Icon
+                    </button>
+                    <button
+                      type="button"
+                      class="bg-[#4e5058] hover:bg-[#5b5e66] text-white px-3 py-1.5 rounded text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      :disabled="!canRemoveIcon"
+                      @click="emit('remove-icon')"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+                <p class="text-gray-400 text-xs mt-2">Upload a square image for best results. PNG, JPG, and WEBP are supported.</p>
+                <p v-if="iconError" class="text-rose-300 text-xs mt-2">{{ iconError }}</p>
+              </div>
+            </div>
+
             <div>
               <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Server Title</label>
               <input

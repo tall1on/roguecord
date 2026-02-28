@@ -53,6 +53,7 @@ function initializeDatabase() {
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         title TEXT NOT NULL DEFAULT 'My Server',
+        icon_path TEXT,
         rules_channel_id TEXT,
         welcome_channel_id TEXT,
         storage_type TEXT NOT NULL DEFAULT 'data_dir',
@@ -495,6 +496,7 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     }
 
     const hasTitle = columns.some((column) => column.name === 'title');
+    const hasIconPath = columns.some((column) => column.name === 'icon_path');
     const hasRulesChannelId = columns.some((column) => column.name === 'rules_channel_id');
     const hasWelcomeChannelId = columns.some((column) => column.name === 'welcome_channel_id');
     const hasStorageType = columns.some((column) => column.name === 'storage_type');
@@ -510,6 +512,7 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
 
     const pendingAlterStatements: string[] = [];
     if (!hasTitle) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN title TEXT NOT NULL DEFAULT 'My Server'");
+    if (!hasIconPath) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN icon_path TEXT');
     if (!hasRulesChannelId) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN rules_channel_id TEXT');
     if (!hasWelcomeChannelId) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN welcome_channel_id TEXT');
     if (!hasStorageType) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN storage_type TEXT NOT NULL DEFAULT 'data_dir'");
@@ -555,6 +558,7 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 title TEXT NOT NULL DEFAULT 'My Server',
+                icon_path TEXT,
                 rules_channel_id TEXT,
                 welcome_channel_id TEXT,
                 storage_type TEXT NOT NULL DEFAULT 'data_dir',
@@ -580,6 +584,7 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                     id,
                     name,
                     title,
+                    icon_path,
                     rules_channel_id,
                     welcome_channel_id,
                     storage_type,
@@ -596,6 +601,7 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                     id,
                     name,
                     title,
+                    icon_path,
                     rules_channel_id,
                     welcome_channel_id,
                     storage_type,
@@ -882,3 +888,14 @@ function migrateFolderChannelFilesStorageSchema(done: (error?: Error) => void) {
     runNextAlter(0);
   });
 }
+    };
+
+    runNextAlter(0);
+  });
+}
+
+
+    runNextAlter(0);
+  });
+}
+
