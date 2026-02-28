@@ -36,6 +36,7 @@ defineProps<{
   activeSection: string
   navGroups: ServerSettingsNavGroup[]
   saveDisabled: boolean
+  hasUnsavedChanges: boolean
   s3TestState: 'idle' | 'testing' | 'success' | 'error'
   s3TestMessage: string | null
   saveMessage: string | null
@@ -313,9 +314,17 @@ const onIconInputChange = (event: Event) => {
           </div>
         </div>
 
-        <div class="flex justify-end gap-3 px-6 py-4 border-t border-[#1e1f22]">
-          <button class="text-gray-400 hover:text-white text-sm font-medium px-4 py-2" @click="visible = false">Cancel</button>
-          <button class="bg-[#5865F2] hover:bg-[#4752C4] disabled:bg-[#4e5058] disabled:text-gray-300 text-white px-4 py-2 rounded text-sm font-medium transition-colors" :disabled="saveDisabled" @click="emit('save')">Save Changes</button>
+        <div class="px-6 py-4 border-t border-[#1e1f22]">
+          <p
+            v-if="hasUnsavedChanges"
+            class="mb-3 rounded border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200"
+          >
+            You have unsaved server settings changes.
+          </p>
+          <div class="flex justify-end gap-3">
+            <button class="text-gray-400 hover:text-white text-sm font-medium px-4 py-2" @click="visible = false">Cancel</button>
+            <button class="bg-[#5865F2] hover:bg-[#4752C4] disabled:bg-[#4e5058] disabled:text-gray-300 text-white px-4 py-2 rounded text-sm font-medium transition-colors" :disabled="saveDisabled" @click="emit('save')">Save Changes</button>
+          </div>
         </div>
       </div>
     </div>
