@@ -473,6 +473,31 @@ const getAvatarBadgeType = (userId: string, showPresence: boolean): AvatarBadgeT
   return showPresence ? 'presence' : null
 }
 
+const escapeHtml = (value: string) => value
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/\"/g, '&quot;')
+  .replace(/'/g, '&#39;')
+
+const TRAILING_PUNCTUATION_REGEX = /[),.;:!?\]]+$/
+const URL_REGEX = /(https?:\/\/[^\s<]+)/gi
+
+const formatMessageContentWithLinks = (content: string) => {
+  const escaped = escapeHtml(content)
+
+  return escaped.replace(URL_REGEX, (rawUrl) => {
+    const trailing = rawUrl.match(TRAILING_PUNCTUATION_REGEX)?.[0] || ''
+    const url = trailing ? rawUrl.slice(0, -trailing.length) : rawUrl
+
+    if (!url) {
+      return rawUrl
+    }
+
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:text-blue-300 underline break-all">${url}</a>${trailing}`
+  })
+}
+
 const sendMessage = () => {
   if (isReadOnlyRssChannel.value) {
     return
@@ -790,7 +815,7 @@ watch(
                 <span class="font-medium hover:underline cursor-pointer" :class="entry.message.user?.role === 'admin' ? 'text-red-500' : 'text-white'">{{ entry.message.user?.username || 'Unknown User' }}</span>
                 <span class="text-xs text-gray-400">{{ formatTime(entry.message.created_at) }}</span>
               </div>
-              <p class="text-gray-300 whitespace-pre-wrap break-words">{{ entry.message.content }}</p>
+              <p class="text-gray-300 whitespace-pre-wrap break-words" v-html="formatMessageContentWithLinks(entry.message.content)"></p>
             </div>
           </div>
         </template>
@@ -913,22 +938,26 @@ watch(
           <div
             v-for="file in activeFolderFiles"
             :key="file.id"
-            class="rounded-md border border-[#3f4147] bg-[#2b2d31] p-3 flex flex-col gap-3"
+            class="rounded-md border border-[#3f4147] bg-[#2b2d31] p-4 flex flex-col aspect-square"
           >
-            <div class="min-w-0">
-              <div class="flex items-center gap-2">
+            <div class="min-w-0 flex flex-col items-center text-center gap-2">
+              <div class="flex justify-center w-full">
                 <component
                   :is="getFolderFileIcon(file.original_name)"
-                  class="w-5 h-5 shrink-0"
+                  class="w-12 h-12 shrink-0"
                   :class="getFolderFileIconClass(file.original_name)"
                 />
-                <p class="truncate text-sm text-white font-medium">{{ file.original_name }}</p>
               </div>
-              <p class="text-xs text-gray-400 mt-2">{{ formatFileSize(file.size_bytes) }}</p>
-              <p class="text-xs text-gray-400 truncate mt-1">{{ file.uploader_username || 'Unknown uploader' }}</p>
-              <p class="text-xs text-gray-400 mt-1">{{ formatTime(file.created_at) }}</p>
+              <p class="w-full truncate text-sm text-white font-medium">{{ file.original_name }}</p>
+              <p class="w-full text-xs text-gray-400 mt-1 min-w-0 flex items-center justify-center gap-1.5 whitespace-nowrap overflow-hidden">
+                <span class="shrink-0">{{ formatFileSize(file.size_bytes) }}</span>
+                <span class="text-gray-500 shrink-0">·</span>
+                <span class="truncate min-w-0">{{ file.uploader_username || 'Unknown uploader' }}</span>
+                <span class="text-gray-500 shrink-0">·</span>
+                <span class="shrink-0">{{ formatTime(file.created_at) }}</span>
+              </p>
             </div>
-            <div class="mt-auto flex items-center gap-2">
+            <div class="mt-auto grid gap-2" :class="canManageFolderFiles ? 'grid-cols-2' : 'grid-cols-1'">
               <button
                 type="button"
                 class="w-full px-3 py-1.5 text-sm rounded bg-[#404249] hover:bg-[#4e5058] text-white"
