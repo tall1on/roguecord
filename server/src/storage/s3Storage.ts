@@ -1,6 +1,7 @@
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   PutObjectCommand,
   S3Client
 } from '@aws-sdk/client-s3';
@@ -12,6 +13,17 @@ export type S3StorageConfig = {
   accessKey: string;
   secretKey: string;
   prefix?: string | null;
+};
+
+type ResolvedS3Config = S3StorageConfig & {
+  forcePathStyle: boolean;
+  provider: 'generic' | 'hetzner';
+};
+
+type S3ClientMode = {
+  endpoint: string;
+  forcePathStyle: boolean;
+  label: string;
 };
 
 const normalizePrefix = (prefix: string | null | undefined) => {
@@ -63,6 +75,130 @@ const sanitizeConfig = (config: S3StorageConfig): S3StorageConfig => {
   };
 };
 
+const parseHetznerEndpointHost = (endpoint: string): { location: string; bucketFromHost: string | null } | null => {
+  try {
+    const host = new URL(endpoint).hostname.toLowerCase();
+    const labels = host.split('.').filter(Boolean);
+    if (labels.length < 3) {
+      return null;
+    }
+
+    const suffix = labels.slice(-2).join('.');
+    if (suffix !== 'your-objectstorage.com') {
+      return null;
+    }
+
+    const location = labels[labels.length - 3] || '';
+    const bucketFromHost = labels.length > 3 ? labels.slice(0, labels.length - 3).join('.') : null;
+    if (!location) {
+      return null;
+    }
+
+    return {
+      location,
+      bucketFromHost: bucketFromHost || null
+    };
+  } catch {
+    return null;
+  }
+};
+
+const resolveS3ClientConfig = (config: S3StorageConfig): ResolvedS3Config => {
+  const parsedEndpoint = new URL(config.endpoint);
+  const parsedHetzner = parseHetznerEndpointHost(config.endpoint);
+
+  if (parsedHetzner) {
+    const normalizedBucket = config.bucket.trim();
+    const normalizedRegion = config.region.trim();
+    const hostBucket = parsedHetzner.bucketFromHost;
+
+    if (hostBucket && hostBucket !== normalizedBucket.toLowerCase()) {
+      throw new Error('S3 bucket does not match Hetzner endpoint bucket segment');
+    }
+    if (normalizedRegion.toLowerCase() !== parsedHetzner.location) {
+      throw new Error('S3 region does not match Hetzner endpoint location segment');
+    }
+
+    const normalizedBase = new URL(parsedEndpoint.toString());
+    normalizedBase.hostname = `${parsedHetzner.location}.your-objectstorage.com`;
+
+    return {
+      ...config,
+      endpoint: normalizedBase.toString().replace(/\/$/, ''),
+      region: parsedHetzner.location,
+      bucket: hostBucket || normalizedBucket,
+      forcePathStyle: true,
+      provider: 'hetzner'
+    };
+  }
+
+  return {
+    ...config,
+    forcePathStyle: true,
+    provider: 'generic'
+  };
+};
+
+const getBaseEndpointWithoutBucketSubdomain = (endpoint: string, bucket: string) => {
+  const parsedEndpoint = new URL(endpoint);
+  const endpointHost = parsedEndpoint.hostname.toLowerCase();
+  const normalizedBucket = bucket.toLowerCase();
+
+  if (endpointHost.startsWith(`${normalizedBucket}.`)) {
+    const baseHost = endpointHost.slice(normalizedBucket.length + 1);
+    const normalizedBase = new URL(parsedEndpoint.toString());
+    normalizedBase.hostname = baseHost;
+    return normalizedBase.toString().replace(/\/$/, '');
+  }
+
+  return parsedEndpoint.toString().replace(/\/$/, '');
+};
+
+const buildS3ValidationModes = (config: S3StorageConfig): S3ClientMode[] => {
+  const sanitized = sanitizeConfig(config);
+  const resolved = resolveS3ClientConfig(sanitized);
+
+  if (resolved.provider === 'hetzner') {
+    return [{
+      endpoint: resolved.endpoint,
+      forcePathStyle: true,
+      label: 'path-style/hetzner-normalized'
+    }];
+  }
+
+  const baseEndpoint = getBaseEndpointWithoutBucketSubdomain(sanitized.endpoint, sanitized.bucket);
+  const directEndpoint = sanitized.endpoint;
+
+  const candidates: S3ClientMode[] = [
+    {
+      // Primary mode (existing behavior): base endpoint + path-style
+      endpoint: resolved.endpoint,
+      forcePathStyle: true,
+      label: 'path-style/base-endpoint'
+    },
+    {
+      // Fallback mode for providers that validate signatures only in virtual-host mode.
+      endpoint: baseEndpoint,
+      forcePathStyle: false,
+      label: 'virtual-host/base-endpoint'
+    },
+    {
+      // Final fallback for endpoint formats that already include a bucket hostname.
+      // In virtual-host mode this avoids adding bucket into the URL path.
+      endpoint: directEndpoint,
+      forcePathStyle: false,
+      label: 'virtual-host/direct-endpoint'
+    }
+  ];
+
+  const unique = new Map<string, S3ClientMode>();
+  for (const candidate of candidates) {
+    unique.set(`${candidate.endpoint}|${candidate.forcePathStyle}`, candidate);
+  }
+
+  return Array.from(unique.values());
+};
+
 const extractS3ValidationErrorMessage = (error: unknown) => {
   if (!error || typeof error !== 'object') {
     return 'Unknown S3 error';
@@ -86,11 +222,26 @@ const extractS3ValidationErrorMessage = (error: unknown) => {
     : (typeof awsError.Message === 'string' && awsError.Message.trim() ? awsError.Message.trim() : null);
   const statusCode = typeof awsError.$metadata?.httpStatusCode === 'number' ? awsError.$metadata.httpStatusCode : null;
 
+  const isMeaningful = (value: string | null) => Boolean(value && value.toLowerCase() !== 'unknownerror');
+  const normalizedCode = isMeaningful(code) ? code : null;
+  const normalizedName = isMeaningful(name) ? name : null;
+  const normalizedMessage = isMeaningful(message) ? message : null;
+
   const parts: string[] = [];
   if (statusCode) parts.push(`HTTP ${statusCode}`);
-  if (code) parts.push(code);
-  else if (name) parts.push(name);
-  if (message) parts.push(message);
+  if (normalizedCode) {
+    parts.push(normalizedCode);
+  } else if (normalizedName) {
+    parts.push(normalizedName);
+  }
+
+  if (
+    normalizedMessage
+    && normalizedMessage !== normalizedCode
+    && normalizedMessage !== normalizedName
+  ) {
+    parts.push(normalizedMessage);
+  }
 
   if (parts.length === 0) {
     return 'Unknown S3 error';
@@ -99,17 +250,69 @@ const extractS3ValidationErrorMessage = (error: unknown) => {
   return parts.join(': ');
 };
 
-const createS3Client = (config: S3StorageConfig) => {
+const extractS3ErrorCode = (error: unknown): string | null => {
+  if (!error || typeof error !== 'object') {
+    return null;
+  }
+
+  const awsError = error as {
+    code?: unknown;
+    Code?: unknown;
+    name?: unknown;
+  };
+
+  const values = [awsError.code, awsError.Code, awsError.name];
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      const normalized = value.trim();
+      if (normalized.toLowerCase() !== 'unknownerror') {
+        return normalized;
+      }
+    }
+  }
+
+  return null;
+};
+
+const shouldTrySignatureFallback = (error: unknown) => {
+  const code = extractS3ErrorCode(error)?.toLowerCase() || '';
+  const message = extractS3ValidationErrorMessage(error).toLowerCase();
+
+  if (!code && !message) {
+    return false;
+  }
+
+  return (
+    code.includes('signature')
+    || code.includes('authorization')
+    || code === 'accessdenied'
+    || message.includes('signature')
+    || message.includes('authorization')
+    || message.includes('credential')
+  );
+};
+
+const createS3Client = (config: S3StorageConfig, mode?: Pick<S3ClientMode, 'endpoint' | 'forcePathStyle'>) => {
   const normalized = sanitizeConfig(config);
+  const resolved = resolveS3ClientConfig(normalized);
+  const endpoint = mode?.endpoint || resolved.endpoint;
+  const forcePathStyle = typeof mode?.forcePathStyle === 'boolean' ? mode.forcePathStyle : resolved.forcePathStyle;
+
   return new S3Client({
-    region: normalized.region,
-    endpoint: normalized.endpoint,
-    forcePathStyle: true,
+    region: resolved.region,
+    endpoint,
+    forcePathStyle,
     credentials: {
-      accessKeyId: normalized.accessKey,
-      secretAccessKey: normalized.secretKey
+      accessKeyId: resolved.accessKey,
+      secretAccessKey: resolved.secretKey
     }
   });
+};
+
+const buildValidationDebugDetails = (attempt: S3ClientMode, resolved: ResolvedS3Config) => {
+  const endpointHost = new URL(attempt.endpoint).host;
+  const addressingStyle = attempt.forcePathStyle ? 'path' : 'virtual-host';
+  return `host=${endpointHost}, bucket=${resolved.bucket}, region=${resolved.region}, addressing=${addressingStyle}`;
 };
 
 export const buildS3StorageKey = (prefix: string | null | undefined, channelId: string, storageName: string) => {
@@ -120,8 +323,10 @@ export const buildS3StorageKey = (prefix: string | null | undefined, channelId: 
 
 export const validateS3Configuration = async (config: S3StorageConfig): Promise<{ ok: true } | { ok: false; message: string }> => {
   let normalized: S3StorageConfig;
+  let resolved: ResolvedS3Config;
   try {
     normalized = sanitizeConfig(config);
+    resolved = resolveS3ClientConfig(normalized);
   } catch (error) {
     return {
       ok: false,
@@ -129,30 +334,40 @@ export const validateS3Configuration = async (config: S3StorageConfig): Promise<
     };
   }
 
-  const client = createS3Client(normalized);
   const testKey = buildS3StorageKey(normalized.prefix, '__healthcheck__', `${Date.now()}-roguecord.txt`);
+  const attempts = buildS3ValidationModes(resolved);
+  const failedReasons: string[] = [];
 
-  try {
-    await client.send(new PutObjectCommand({
-      Bucket: normalized.bucket,
-      Key: testKey,
-      Body: Buffer.from('roguecord-s3-healthcheck', 'utf8'),
-      ContentType: 'text/plain'
-    }));
+  for (let i = 0; i < attempts.length; i += 1) {
+    const attempt = attempts[i];
+    const client = createS3Client(normalized, {
+      endpoint: attempt.endpoint,
+      forcePathStyle: attempt.forcePathStyle
+    });
 
-    await client.send(new DeleteObjectCommand({
-      Bucket: normalized.bucket,
-      Key: testKey
-    }));
+    try {
+      await client.send(new HeadBucketCommand({
+        Bucket: resolved.bucket
+      }));
 
-    return { ok: true };
-  } catch (error) {
-    const message = extractS3ValidationErrorMessage(error);
-    return {
-      ok: false,
-      message: `S3 validation failed: ${message}`
-    };
+      return { ok: true };
+    } catch (error) {
+      const reason = extractS3ValidationErrorMessage(error);
+      const details = buildValidationDebugDetails(attempt, resolved);
+      failedReasons.push(`${attempt.label} [${details}] => ${reason}`);
+
+      const hasRemainingAttempt = i < attempts.length - 1;
+      if (!hasRemainingAttempt || !shouldTrySignatureFallback(error)) {
+        break;
+      }
+    }
   }
+
+  const summary = failedReasons.join(' | ');
+  return {
+    ok: false,
+    message: `S3 validation failed: ${summary || 'Unknown S3 error'}`
+  };
 };
 
 export const uploadFileToS3 = async (input: {
@@ -162,9 +377,10 @@ export const uploadFileToS3 = async (input: {
   mimeType?: string | null;
 }) => {
   const normalized = sanitizeConfig(input.config);
-  const client = createS3Client(normalized);
+  const resolved = resolveS3ClientConfig(normalized);
+  const client = createS3Client(resolved);
   await client.send(new PutObjectCommand({
-    Bucket: normalized.bucket,
+    Bucket: resolved.bucket,
     Key: input.key,
     Body: input.buffer,
     ContentType: input.mimeType || 'application/octet-stream'
@@ -176,9 +392,10 @@ export const downloadFileFromS3 = async (input: {
   key: string;
 }): Promise<Buffer> => {
   const normalized = sanitizeConfig(input.config);
-  const client = createS3Client(normalized);
+  const resolved = resolveS3ClientConfig(normalized);
+  const client = createS3Client(resolved);
   const response = await client.send(new GetObjectCommand({
-    Bucket: normalized.bucket,
+    Bucket: resolved.bucket,
     Key: input.key
   }));
 
@@ -198,9 +415,10 @@ export const deleteFileFromS3 = async (input: {
   key: string;
 }) => {
   const normalized = sanitizeConfig(input.config);
-  const client = createS3Client(normalized);
+  const resolved = resolveS3ClientConfig(normalized);
+  const client = createS3Client(resolved);
   await client.send(new DeleteObjectCommand({
-    Bucket: normalized.bucket,
+    Bucket: resolved.bucket,
     Key: input.key
   }));
 };
