@@ -3,6 +3,7 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Compon
 import { Archive, Code2, File, FileText, Film, Image, Music2 } from 'lucide-vue-next'
 import { useChatStore, type Message, type FolderChannelFile } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
+import RougeCordMark from '../components/branding/RougeCordMark.vue'
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
@@ -58,20 +59,6 @@ const activeVoiceParticipants = computed(() => {
 const voiceParticipantCount = computed(() => activeVoiceParticipants.value.length)
 
 const isTwoParticipantVoiceLayout = computed(() => activeVoiceParticipants.value.length === 2)
-
-const isThreeParticipantVoiceLayout = computed(() => activeVoiceParticipants.value.length === 3)
-
-const voiceGridClass = computed(() => {
-  if (isTwoParticipantVoiceLayout.value) {
-    return 'grid-cols-1 grid-rows-2 auto-rows-fr'
-  }
-
-  if (isThreeParticipantVoiceLayout.value) {
-    return 'grid-cols-1 grid-rows-3 auto-rows-fr'
-  }
-
-  return 'grid-cols-[repeat(auto-fit,minmax(min(100%,360px),1fr))] auto-rows-fr'
-})
 
 const voiceTileClass = computed(() => {
   if (isTwoParticipantVoiceLayout.value) {
@@ -750,57 +737,57 @@ watch(
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col h-full bg-[#313338]">
+  <div class="flex-1 flex flex-col h-full bg-zinc-950">
     <template v-if="activeTextChannel">
       <!-- Chat Header -->
-      <header class="h-12 border-b border-[#1e1f22] flex items-center px-4 shadow-sm shrink-0">
-        <h2 class="font-semibold text-white flex items-center">
-          <span class="text-gray-400 text-xl mr-2">#</span>
+      <header class="h-12 border-b border-white/5 flex items-center px-4 shadow-sm shrink-0 bg-zinc-950/80 backdrop-blur-md relative z-10">
+        <h2 class="font-bold text-white flex items-center text-[15px]">
+          <span class="text-zinc-500 text-lg mr-1.5 font-medium">#</span>
           {{ activeTextChannel.name }}
         </h2>
       </header>
 
       <!-- Chat Messages Area -->
-      <main ref="messagesContainer" class="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar" @scroll.passive="onMessagesScroll">
+      <main ref="messagesContainer" class="flex-1 overflow-y-auto p-4 sm:p-5 space-y-1.5 custom-scrollbar bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-zinc-900/40 via-zinc-950 to-zinc-950" @scroll.passive="onMessagesScroll">
           <div v-if="isFetchingOlderMessages" class="text-center text-xs text-gray-400 py-1">Loading older messages...</div>
-          <div v-if="chatStore.activeChannelMessages.length === 0" class="flex flex-col justify-end h-full pb-4">
-            <div class="w-16 h-16 rounded-full bg-[#4e5058] flex items-center justify-center mb-4">
-              <span class="text-3xl text-white">#</span>
+          <div v-if="chatStore.activeChannelMessages.length === 0" class="flex flex-col justify-end h-full pb-6">
+            <div class="w-14 h-14 rounded-2xl bg-zinc-900 border border-white/5 flex items-center justify-center mb-4 shadow-sm">
+              <span class="text-2xl text-zinc-400 font-medium">#</span>
             </div>
-            <h1 class="text-3xl font-bold text-white mb-2">Welcome to #{{ activeTextChannel.name }}!</h1>
-            <p class="text-gray-400">This is the start of the #{{ activeTextChannel.name }} channel.</p>
+            <h1 class="text-2xl font-bold text-white mb-1.5 tracking-tight">Welcome to #{{ activeTextChannel.name }}!</h1>
+            <p class="text-zinc-400 text-sm">This is the start of the #{{ activeTextChannel.name }} channel.</p>
           </div>
 
         <template v-for="entry in activeChannelEntries" :key="entry.key">
           <div v-if="entry.type === 'divider'" class="flex items-center gap-3 py-2">
-            <hr class="flex-1 border-t border-[#3f4147]" />
-            <span class="text-[11px] uppercase tracking-wide text-gray-400">{{ entry.label }}</span>
-            <hr class="flex-1 border-t border-[#3f4147]" />
+            <hr class="flex-1 border-t border-white/10" />
+            <span class="text-[11px] uppercase tracking-wide text-zinc-500 font-bold">{{ entry.label }}</span>
+            <hr class="flex-1 border-t border-white/10" />
           </div>
 
           <div
             v-else
-            class="flex items-start gap-4 hover:bg-[#2e3035] p-1 -mx-1 rounded transition-colors"
+            class="flex items-start gap-3 hover:bg-zinc-900/40 py-1 px-2 -mx-2 rounded-lg transition-colors duration-100 group"
           >
-            <div class="w-10 h-10 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mt-0.5">
+            <div class="w-9 h-9 rounded-full bg-indigo-500/20 text-indigo-400 shrink-0 flex items-center justify-center font-bold mt-0.5 text-xs ring-1 ring-white/5 shadow-sm">
               {{ entry.message.user?.username.charAt(0).toUpperCase() || '?' }}
             </div>
-            <div>
-              <div class="flex items-baseline gap-2">
-                <span class="font-medium hover:underline cursor-pointer" :class="entry.message.user?.role === 'admin' ? 'text-red-500' : 'text-white'">{{ entry.message.user?.username || 'Unknown User' }}</span>
-                <span class="text-xs text-gray-400">{{ formatTime(entry.message.created_at) }}</span>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-baseline gap-2 mb-[1px]">
+                <span class="font-semibold text-[14px] cursor-pointer transition-colors" :class="entry.message.user?.role === 'admin' ? 'text-red-400 hover:text-red-300' : 'text-zinc-200 hover:text-white'">{{ entry.message.user?.username || 'Unknown User' }}</span>
+                <span class="text-[10px] font-medium text-zinc-500 group-hover:text-zinc-400">{{ formatTime(entry.message.created_at) }}</span>
               </div>
-              <p class="text-gray-300 whitespace-pre-wrap break-words">{{ entry.message.content }}</p>
+              <p class="text-zinc-300 whitespace-pre-wrap break-words leading-[1.35] text-[14px]">{{ entry.message.content }}</p>
             </div>
           </div>
         </template>
       </main>
 
       <!-- Chat Input Area -->
-      <div class="p-4 shrink-0">
-        <div class="bg-[#383a40] rounded-lg p-3 flex items-center gap-3" :class="isReadOnlyRssChannel ? 'opacity-80' : ''">
-          <button class="w-6 h-6 rounded-full bg-[#4e5058] flex items-center justify-center text-gray-300 hover:text-white shrink-0 transition-colors">
-            +
+      <div class="p-4 pt-1 shrink-0 bg-zinc-950 relative z-10">
+        <div class="bg-zinc-900/60 border border-white/5 rounded-lg py-2.5 px-3 flex items-center gap-2.5 shadow-sm focus-within:ring-1 focus-within:ring-indigo-500/50 focus-within:border-indigo-500/30 transition-all duration-200 focus-within:bg-zinc-900/90" :class="isReadOnlyRssChannel ? 'opacity-80' : ''">
+          <button class="w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-700 shrink-0 transition-colors">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
           </button>
           <input 
             v-model="messageInput"
@@ -808,7 +795,7 @@ watch(
             type="text" 
             :placeholder="messagePlaceholder"
             :disabled="isReadOnlyRssChannel"
-            class="bg-transparent border-none outline-none flex-1 text-gray-200 placeholder-gray-500"
+            class="bg-transparent border-none outline-none flex-1 text-zinc-200 placeholder-zinc-500 text-[14px]"
           />
         </div>
         <p v-if="isReadOnlyRssChannel" class="mt-2 text-xs text-gray-400">
@@ -818,25 +805,25 @@ watch(
     </template>
 
     <template v-else-if="activeFolderChannel">
-      <header class="h-12 border-b border-[#1e1f22] flex items-center justify-between px-4 shadow-sm shrink-0">
-        <h2 class="font-semibold text-white flex items-center">
-          <span class="text-gray-400 text-xl mr-2">📁</span>
+      <header class="h-14 border-b border-white/5 flex items-center justify-between px-6 shadow-sm shrink-0 bg-zinc-950/80 backdrop-blur-md relative z-10">
+        <h2 class="font-bold text-white flex items-center text-[15px]">
+          <span class="text-zinc-500 text-lg mr-1.5 font-medium">📁</span>
           {{ activeFolderChannel.name }}
         </h2>
         <div class="flex items-center gap-2">
-          <div class="flex items-center rounded-md border border-[#3f4147] bg-[#2b2d31] p-0.5">
+          <div class="flex items-center rounded-lg border border-white/5 bg-zinc-900/50 p-0.5">
             <button
               type="button"
-              class="px-2.5 py-1 text-xs rounded text-gray-300 transition-colors"
-              :class="folderViewMode === 'list' ? 'bg-[#404249] text-white' : 'hover:bg-[#36393f]'"
+              class="px-2.5 py-1 text-xs rounded-md text-zinc-400 transition-colors font-medium"
+              :class="folderViewMode === 'list' ? 'bg-zinc-800 text-white shadow-sm' : 'hover:bg-zinc-800/50 hover:text-zinc-300'"
               @click="folderViewMode = 'list'"
             >
               List
             </button>
             <button
               type="button"
-              class="px-2.5 py-1 text-xs rounded text-gray-300 transition-colors"
-              :class="folderViewMode === 'tiles' ? 'bg-[#404249] text-white' : 'hover:bg-[#36393f]'"
+              class="px-2.5 py-1 text-xs rounded-md text-zinc-400 transition-colors font-medium"
+              :class="folderViewMode === 'tiles' ? 'bg-zinc-800 text-white shadow-sm' : 'hover:bg-zinc-800/50 hover:text-zinc-300'"
               @click="folderViewMode = 'tiles'"
             >
               Tiles
@@ -874,17 +861,17 @@ watch(
           <div
             v-for="file in activeFolderFiles"
             :key="file.id"
-            class="flex items-center justify-between gap-4 rounded-md border border-[#3f4147] bg-[#2b2d31] px-3 py-2"
+            class="flex items-center justify-between gap-4 rounded-xl border border-white/5 bg-zinc-900/60 px-4 py-3 hover:bg-zinc-900/80 transition-colors"
           >
-            <div class="min-w-0 flex items-center gap-2.5">
+            <div class="min-w-0 flex items-center gap-3">
               <component
                 :is="getFolderFileIcon(file.original_name)"
-                class="w-4 h-4 shrink-0"
+                class="w-5 h-5 shrink-0"
                 :class="getFolderFileIconClass(file.original_name)"
               />
               <div class="min-w-0">
-                <p class="truncate text-sm text-white font-medium">{{ file.original_name }}</p>
-                <p class="text-xs text-gray-400 truncate">
+                <p class="truncate text-sm text-zinc-100 font-medium">{{ file.original_name }}</p>
+                <p class="text-[11px] font-medium text-zinc-500 truncate mt-0.5">
                   {{ formatFileSize(file.size_bytes) }} · {{ file.uploader_username || 'Unknown uploader' }} · {{ formatTime(file.created_at) }}
                 </p>
               </div>
@@ -892,7 +879,7 @@ watch(
             <div class="shrink-0 flex items-center gap-2">
               <button
                 type="button"
-                class="px-3 py-1.5 text-sm rounded bg-[#404249] hover:bg-[#4e5058] text-white"
+                class="px-3 py-1.5 text-[13px] font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors"
                 @click="requestFolderFileDownload(file.id)"
               >
                 Download
@@ -900,7 +887,7 @@ watch(
               <button
                 v-if="canManageFolderFiles"
                 type="button"
-                class="px-3 py-1.5 text-sm rounded bg-[#5b2d31] hover:bg-[#6a3136] text-white"
+                class="px-3 py-1.5 text-[13px] font-medium rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 transition-colors"
                 @click="requestFolderFileDelete(file.id, file.original_name)"
               >
                 Delete
@@ -909,29 +896,29 @@ watch(
           </div>
         </div>
 
-        <div v-else class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div v-else class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           <div
             v-for="file in activeFolderFiles"
             :key="file.id"
-            class="rounded-md border border-[#3f4147] bg-[#2b2d31] p-3 flex flex-col gap-3"
+            class="rounded-xl border border-white/5 bg-zinc-900/60 hover:bg-zinc-900/80 p-4 flex flex-col gap-4 shadow-sm transition-colors"
           >
             <div class="min-w-0">
-              <div class="flex items-center gap-2">
+              <div class="flex items-center gap-2.5">
                 <component
                   :is="getFolderFileIcon(file.original_name)"
-                  class="w-5 h-5 shrink-0"
+                  class="w-6 h-6 shrink-0"
                   :class="getFolderFileIconClass(file.original_name)"
                 />
-                <p class="truncate text-sm text-white font-medium">{{ file.original_name }}</p>
+                <p class="truncate text-sm text-zinc-100 font-medium">{{ file.original_name }}</p>
               </div>
-              <p class="text-xs text-gray-400 mt-2">{{ formatFileSize(file.size_bytes) }}</p>
-              <p class="text-xs text-gray-400 truncate mt-1">{{ file.uploader_username || 'Unknown uploader' }}</p>
-              <p class="text-xs text-gray-400 mt-1">{{ formatTime(file.created_at) }}</p>
+              <p class="text-[11px] font-medium text-zinc-400 mt-3">{{ formatFileSize(file.size_bytes) }}</p>
+              <p class="text-[11px] font-medium text-zinc-500 truncate mt-1">{{ file.uploader_username || 'Unknown uploader' }}</p>
+              <p class="text-[11px] font-medium text-zinc-500 mt-1">{{ formatTime(file.created_at) }}</p>
             </div>
             <div class="mt-auto flex items-center gap-2">
               <button
                 type="button"
-                class="w-full px-3 py-1.5 text-sm rounded bg-[#404249] hover:bg-[#4e5058] text-white"
+                class="w-full px-3 py-2 text-[13px] font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors"
                 @click="requestFolderFileDownload(file.id)"
               >
                 Download
@@ -939,7 +926,7 @@ watch(
               <button
                 v-if="canManageFolderFiles"
                 type="button"
-                class="w-full px-3 py-1.5 text-sm rounded bg-[#5b2d31] hover:bg-[#6a3136] text-white"
+                class="w-full px-3 py-2 text-[13px] font-medium rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 transition-colors"
                 @click="requestFolderFileDelete(file.id, file.original_name)"
               >
                 Delete
@@ -951,25 +938,22 @@ watch(
     </template>
 
     <template v-else-if="activeVoiceChannel">
-      <header class="h-12 border-b border-[#1e1f22] flex items-center px-4 shadow-sm shrink-0">
-        <h2 class="font-semibold text-white flex items-center">
-          <span class="text-gray-400 text-xl mr-2">🔊</span>
+      <header class="h-14 border-b border-white/5 flex items-center px-6 shadow-sm shrink-0 bg-zinc-950">
+        <h2 class="font-bold text-white flex items-center">
+          <span class="text-zinc-500 text-xl mr-2">🔊</span>
           {{ activeVoiceChannel.name }}
         </h2>
       </header>
 
-      <main class="flex-1 overflow-y-auto p-6 custom-scrollbar">
-        <div
-          v-if="activeVoiceParticipants.length > 0"
-          class="grid gap-4 h-full"
-          :class="voiceGridClass"
-        >
+      <main class="flex-1 overflow-y-auto p-8 custom-scrollbar bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-zinc-900/40 via-zinc-950 to-zinc-950">
+        <div v-if="activeVoiceParticipants.length > 0" class="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-6">
           <div
             v-for="user in activeVoiceParticipants"
             :key="user.id"
-            class="rounded-xl bg-[#2b2d31] border border-[#3f4147] flex items-center justify-center overflow-hidden"
+            class="h-48 rounded-2xl bg-zinc-900/80 border border-white/5 flex flex-col items-center justify-center shadow-lg relative overflow-hidden group"
             :class="voiceTileClass"
           >
+            <div class="absolute inset-0 bg-indigo-500/5 transition-opacity duration-300" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'opacity-100' : 'opacity-0'"></div>
             <div
               v-show="getUserScreenStream(user.id)"
               :ref="(el) => setScreenContainerRef(user.id, el)"
@@ -987,13 +971,13 @@ watch(
               />
 
               <div
-                class="screen-stream-overlay absolute bottom-2 left-2 right-2 z-20 flex items-center gap-2 rounded-md border border-[#1f2124] bg-[#1f2124]/90 px-2 py-1.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                class="screen-stream-overlay absolute bottom-3 left-3 right-3 z-20 flex items-center gap-3 rounded-xl border border-white/10 bg-zinc-950/90 backdrop-blur-md px-3 py-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 shadow-xl"
                 @click.stop
                 @contextmenu.stop
               >
                 <button
                   type="button"
-                  class="screen-stream-control w-7 h-7 rounded bg-[#2b2d31] hover:bg-[#3a3d44] text-sm flex items-center justify-center text-gray-200"
+                  class="screen-stream-control w-8 h-8 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm flex items-center justify-center text-zinc-300 hover:text-white transition-colors"
                   :aria-label="webrtcStore.isScreenStreamMuted(user.id) ? 'Unmute stream volume' : 'Mute stream volume'"
                   @click="onToggleScreenVolumeMute(user.id, $event)"
                 >
@@ -1017,14 +1001,15 @@ watch(
                 </span>
               </div>
             </div>
-            <div v-show="!getUserScreenStream(user.id)" class="relative w-20 h-20 rounded-full bg-indigo-500 overflow-hidden flex items-center justify-center text-white font-bold text-3xl" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-400 ring-offset-2 ring-offset-[#2b2d31]' : ''">
+            <div v-show="!getUserScreenStream(user.id)" class="relative w-24 h-24 rounded-full bg-zinc-800 overflow-hidden flex items-center justify-center text-zinc-400 font-bold text-4xl mb-4 transition-all duration-300" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-500 shadow-[0_0_20px_rgba(34,197,94,0.3)] bg-indigo-500/20 text-indigo-400' : 'shadow-sm'">
               <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
               <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
             </div>
+            <span class="text-sm font-bold text-white tracking-wide truncate px-4 relative z-10">{{ user.username }}</span>
           </div>
         </div>
 
-        <div v-else class="h-full flex items-center justify-center text-gray-400">
+        <div v-else class="h-full flex items-center justify-center text-zinc-500 font-medium">
           No participants in this voice channel.
         </div>
       </main>
@@ -1032,47 +1017,47 @@ watch(
       <div
         v-if="screenContextMenu.visible"
         ref="screenContextMenuRef"
-        class="fixed z-50 min-w-[188px] rounded-md border border-[#1e1f22] bg-[#1f2124] py-1 shadow-xl"
+        class="fixed z-50 min-w-[200px] rounded-xl border border-white/10 bg-zinc-950 p-1.5 shadow-2xl backdrop-blur-md"
         :style="{ left: `${screenContextMenu.x}px`, top: `${screenContextMenu.y}px` }"
         role="menu"
       >
         <template v-if="screenContextMenu.isOwner && screenContextMenu.userId">
-          <div class="px-3 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wide text-gray-500">FPS</div>
+          <div class="px-3 pb-1.5 pt-2 text-[10px] font-bold uppercase tracking-widest text-zinc-500">FPS</div>
           <button
             v-for="option in screenFpsOptions"
             :key="option.value"
             type="button"
-            class="flex w-full items-center justify-between px-3 py-2 text-sm text-left text-gray-200 hover:bg-[#2b2d31]"
-            :class="webrtcStore.getScreenStreamFps(screenContextMenu.userId) === option.value ? 'text-white' : 'text-gray-300'"
+            class="flex w-full items-center justify-between px-3 py-2 rounded-md text-sm text-left text-zinc-300 hover:bg-zinc-900 hover:text-white transition-colors"
+            :class="webrtcStore.getScreenStreamFps(screenContextMenu.userId) === option.value ? 'bg-zinc-900/50 text-white font-medium' : ''"
             role="menuitemradio"
             :aria-checked="webrtcStore.getScreenStreamFps(screenContextMenu.userId) === option.value"
             @click="onSelectScreenFps(option.value)"
           >
             <span>{{ option.label }}</span>
-            <span v-if="webrtcStore.getScreenStreamFps(screenContextMenu.userId) === option.value">✓</span>
+            <span v-if="webrtcStore.getScreenStreamFps(screenContextMenu.userId) === option.value" class="text-indigo-400">✓</span>
           </button>
 
-          <div class="my-1 border-t border-[#2b2d31]"></div>
-          <div class="px-3 pb-1 pt-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Resolution</div>
+          <div class="my-1.5 border-t border-white/5 mx-2"></div>
+          <div class="px-3 pb-1.5 pt-1 text-[10px] font-bold uppercase tracking-widest text-zinc-500">Resolution</div>
           <button
             v-for="option in getScreenResolutionOptions(screenContextMenu.userId)"
             :key="option.value"
             type="button"
-            class="flex w-full items-center justify-between px-3 py-2 text-sm text-left text-gray-200 hover:bg-[#2b2d31]"
-            :class="webrtcStore.getScreenStreamResolution(screenContextMenu.userId) === option.value ? 'text-white' : 'text-gray-300'"
+            class="flex w-full items-center justify-between px-3 py-2 rounded-md text-sm text-left text-zinc-300 hover:bg-zinc-900 hover:text-white transition-colors"
+            :class="webrtcStore.getScreenStreamResolution(screenContextMenu.userId) === option.value ? 'bg-zinc-900/50 text-white font-medium' : ''"
             role="menuitemradio"
             :aria-checked="webrtcStore.getScreenStreamResolution(screenContextMenu.userId) === option.value"
             @click="onSelectScreenResolution(option.value)"
           >
             <span>{{ option.label }}</span>
-            <span v-if="webrtcStore.getScreenStreamResolution(screenContextMenu.userId) === option.value">✓</span>
+            <span v-if="webrtcStore.getScreenStreamResolution(screenContextMenu.userId) === option.value" class="text-indigo-400">✓</span>
           </button>
         </template>
 
         <button
           v-else
           type="button"
-          class="w-full px-3 py-2 text-sm text-left text-gray-200 hover:bg-[#2b2d31]"
+          class="w-full px-3 py-2 rounded-md text-sm text-left text-zinc-300 hover:bg-zinc-900 hover:text-white font-medium transition-colors"
           role="menuitem"
           @click="onToggleLocalScreenMute"
         >
@@ -1082,14 +1067,12 @@ watch(
     </template>
     
     <template v-else>
-      <div class="flex-1 flex items-center justify-center flex-col text-gray-400">
-        <div class="w-24 h-24 mb-6 opacity-50">
-          <svg fill="currentColor" viewBox="0 0 24 24">
-            <path d="M19.73 4.87a18.2 18.2 0 0 0-4.6-1.44c-.21.4-.4.8-.58 1.21-1.69-.25-3.4-.25-5.1 0-.18-.41-.37-.82-.59-1.2-1.6.27-3.14.75-4.6 1.43A19.04 19.04 0 0 0 1.96 19.58c2.09 1.52 4.1 2.44 6.09 3.04.5-.66.95-1.36 1.35-2.09-1.08-.4-2.1-.89-3.06-1.46.26-.19.51-.39.75-.6 3.9 1.79 8.18 1.79 12.06 0 .24.21.49.41.75.6-.96.57-1.98 1.06-3.06 1.46.4.73.85 1.43 1.35 2.09 2-.6 4.01-1.52 6.1-3.04a19.02 19.02 0 0 0-2.32-14.71zM8.52 16.28c-1.21 0-2.21-1.08-2.21-2.4 0-1.33.98-2.4 2.21-2.4 1.23 0 2.23 1.07 2.21 2.4 0 1.32-.98 2.4-2.21 2.4zm6.96 0c-1.21 0-2.21-1.08-2.21-2.4 0-1.33.98-2.4 2.21-2.4 1.23 0 2.23 1.07 2.21 2.4 0 1.32-.98 2.4-2.21 2.4z"/>
-          </svg>
+      <div class="flex-1 flex items-center justify-center flex-col text-zinc-500 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-zinc-900/30 via-zinc-950 to-zinc-950">
+        <div class="w-32 h-32 mb-8 flex items-center justify-center opacity-40 mix-blend-plus-lighter">
+          <RougeCordMark :size="128" />
         </div>
-        <h2 class="text-xl font-semibold mb-2">No Channel Selected</h2>
-        <p>Select a channel from the sidebar to start chatting.</p>
+        <h2 class="text-2xl font-bold text-white mb-3 tracking-tight">No Channel Selected</h2>
+        <p class="text-[15px] max-w-md text-center">Select a channel from the sidebar to start chatting in RougeCord.</p>
       </div>
     </template>
   </div>
