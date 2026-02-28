@@ -26,7 +26,6 @@ const form = defineModel<{
     bucket: string
     accessKey: string
     secretKey: string
-    apiKey: string
     prefix: string
     status: 'data_dir' | 's3'
     lastError: string | null
@@ -36,11 +35,17 @@ const form = defineModel<{
 defineProps<{
   activeSection: string
   navGroups: ServerSettingsNavGroup[]
+  saveDisabled: boolean
+  s3TestState: 'idle' | 'testing' | 'success' | 'error'
+  s3TestMessage: string | null
+  saveMessage: string | null
+  saveError: string | null
 }>()
 
 const emit = defineEmits<{
   (e: 'toggle-group', groupId: string): void
   (e: 'select-section', sectionId: string): void
+  (e: 'test-storage'): void
   (e: 'save'): void
 }>()
 
@@ -173,7 +178,7 @@ const storageStatusLabel = computed(() => (form.value.storage.status === 's3' ? 
             <div class="rounded border border-[#3f4147] bg-[#2b2d31] px-4 py-3">
               <p class="text-xs font-bold uppercase text-gray-300">Hetzner S3 help</p>
               <p class="mt-1 text-xs text-gray-400">
-                Required for S3 access: endpoint, region, bucket, access key, and secret key. Hetzner API key is optional and stored for convenience.
+                Use Hetzner endpoint format: https://&lt;bucket-name&gt;.&lt;location&gt;.your-objectstorage.com. Bucket and location are parsed from the endpoint URL.
               </p>
               <a
                 href="https://hetzner.cloud/?ref=JmdXQVT3XHM1"
@@ -187,32 +192,12 @@ const storageStatusLabel = computed(() => (form.value.storage.status === 's3' ? 
 
             <div class="grid gap-4 md:grid-cols-2">
               <div>
-                <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Endpoint</label>
+                <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Endpoint URL</label>
                 <input
                   v-model="form.storage.endpoint"
                   type="text"
                   class="w-full bg-[#1e1f22] text-gray-300 rounded p-2 outline-none border border-transparent focus:border-[#5865F2]"
-                  placeholder="https://nbg1.your-objectstorage.com"
-                />
-              </div>
-
-              <div>
-                <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Region</label>
-                <input
-                  v-model="form.storage.region"
-                  type="text"
-                  class="w-full bg-[#1e1f22] text-gray-300 rounded p-2 outline-none border border-transparent focus:border-[#5865F2]"
-                  placeholder="nbg1"
-                />
-              </div>
-
-              <div>
-                <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Bucket</label>
-                <input
-                  v-model="form.storage.bucket"
-                  type="text"
-                  class="w-full bg-[#1e1f22] text-gray-300 rounded p-2 outline-none border border-transparent focus:border-[#5865F2]"
-                  placeholder="roguecord-files"
+                  placeholder="https://my-bucket.nbg1.your-objectstorage.com"
                 />
               </div>
 
@@ -246,23 +231,32 @@ const storageStatusLabel = computed(() => (form.value.storage.status === 's3' ? 
                 />
               </div>
 
-              <div class="md:col-span-2">
-                <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Hetzner API Key (optional)</label>
-                <input
-                  v-model="form.storage.apiKey"
-                  type="password"
-                  class="w-full bg-[#1e1f22] text-gray-300 rounded p-2 outline-none border border-transparent focus:border-[#5865F2]"
-                  autocomplete="new-password"
-                />
-                <p class="mt-1 text-xs text-gray-400">Not used for S3-compatible object storage authentication; only kept as additional Hetzner metadata.</p>
+              <div class="md:col-span-2 flex items-center gap-3">
+                <button
+                  class="bg-[#4f46e5] hover:bg-[#4338ca] disabled:bg-[#4e5058] disabled:text-gray-300 text-white px-4 py-2 rounded text-sm font-medium transition-colors"
+                  :disabled="s3TestState === 'testing'"
+                  @click="emit('test-storage')"
+                >
+                  {{ s3TestState === 'testing' ? 'Testing...' : 'Test Connection' }}
+                </button>
+                <p
+                  v-if="s3TestMessage"
+                  class="text-xs"
+                  :class="s3TestState === 'success' ? 'text-emerald-300' : s3TestState === 'error' ? 'text-rose-300' : 'text-gray-400'"
+                >
+                  {{ s3TestMessage }}
+                </p>
               </div>
             </div>
+
+            <p v-if="saveError" class="text-sm text-rose-300">{{ saveError }}</p>
+            <p v-if="saveMessage" class="text-sm text-emerald-300">{{ saveMessage }}</p>
           </div>
         </div>
 
         <div class="flex justify-end gap-3 px-6 py-4 border-t border-[#1e1f22]">
           <button class="text-gray-400 hover:text-white text-sm font-medium px-4 py-2" @click="visible = false">Cancel</button>
-          <button class="bg-[#5865F2] hover:bg-[#4752C4] text-white px-4 py-2 rounded text-sm font-medium transition-colors" @click="emit('save')">Save Changes</button>
+          <button class="bg-[#5865F2] hover:bg-[#4752C4] disabled:bg-[#4e5058] disabled:text-gray-300 text-white px-4 py-2 rounded text-sm font-medium transition-colors" :disabled="saveDisabled" @click="emit('save')">Save Changes</button>
         </div>
       </div>
     </div>
