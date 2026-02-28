@@ -30,7 +30,12 @@ import {
   createFolderChannelFile,
   getFolderChannelFiles,
   getFolderChannelFileById,
-  deleteFolderChannelFileById
+  deleteFolderChannelFileById,
+  getServerStorageSettings,
+  updateServerStorageSettings,
+  updateServerStorageLastError,
+  updateFolderChannelFileStorage,
+  getAllFolderChannelFiles
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -38,9 +43,19 @@ import { adminKey } from '../admin';
 import fs from 'node:fs';
 import path from 'node:path';
 import { dataDir } from '../db';
+import {
+  buildS3StorageKey,
+  deleteFileFromS3,
+  downloadFileFromS3,
+  type S3StorageConfig,
+  uploadFileToS3,
+  validateS3Configuration
+} from '../storage/s3Storage';
 
 const filesRootDir = path.join(dataDir, 'files');
+const serverIconsRootDir = path.join(dataDir, 'server-icons');
 const MAX_FOLDER_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+const MAX_SERVER_ICON_SIZE_BYTES = 2 * 1024 * 1024;
 const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
   'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx',
   'html', 'htm', 'php', 'phtml',
@@ -57,6 +72,180 @@ const ensureFilesRootDir = () => {
   if (!fs.existsSync(filesRootDir)) {
     fs.mkdirSync(filesRootDir, { recursive: true });
   }
+};
+
+const ensureServerIconsRootDir = () => {
+  if (!fs.existsSync(serverIconsRootDir)) {
+    fs.mkdirSync(serverIconsRootDir, { recursive: true });
+  }
+};
+
+const sanitizeServerIdForPath = (serverId: string) => (serverId || '').replace(/[^a-zA-Z0-9-]/g, '');
+
+const getSafeServerIconPath = (serverId: string, storageName: string) => {
+  ensureServerIconsRootDir();
+  const safeServerId = sanitizeServerIdForPath(serverId);
+  const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
+  if (!safeServerId || !safeStorageName) {
+    throw new Error('Invalid server icon path');
+  }
+
+  const dir = path.resolve(serverIconsRootDir, safeServerId);
+  const root = path.resolve(serverIconsRootDir);
+  if (!dir.startsWith(root)) {
+    throw new Error('Unsafe server icon directory');
+  }
+
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const fullPath = path.resolve(dir, safeStorageName);
+  if (!fullPath.startsWith(dir)) {
+    throw new Error('Unsafe server icon file path');
+  }
+
+  return fullPath;
+};
+
+const parseServerIconDataUrl = (value: unknown): { buffer: Buffer; mimeType: string; extension: string } | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  const match = trimmed.match(/^data:(image\/(png|jpeg|jpg|webp|gif));base64,(.+)$/i);
+  if (!match) return null;
+
+  const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase();
+  const extension = mimeType === 'image/jpeg' ? 'jpg' : mimeType.split('/')[1];
+  const base64 = match[3] || '';
+  const buffer = Buffer.from(base64, 'base64');
+  if (!buffer.length) return null;
+  return { buffer, mimeType, extension };
+};
+
+const buildServerIconPathForClient = (serverId: string, storageName: string) => {
+  const safeServerId = sanitizeServerIdForPath(serverId);
+  const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
+  return `/server-icons/${safeServerId}/${safeStorageName}`;
+};
+
+const isSafeS3IconKeyForServer = (serverId: string, key: string) => {
+  const trimmed = (key || '').trim();
+  const safeServerId = sanitizeServerIdForPath(serverId);
+  if (!trimmed || !safeServerId) {
+    return false;
+  }
+  if (trimmed.includes('\\') || /[\u0000-\u001F]/.test(trimmed)) {
+    return false;
+  }
+  const segments = trimmed.split('/').filter(Boolean);
+  if (!segments.length || segments.some((segment) => segment === '.' || segment === '..')) {
+    return false;
+  }
+
+  const marker = `server-icons/${safeServerId}/`;
+  return trimmed === `server-icons/${safeServerId}` || trimmed.includes(marker);
+};
+
+const parseSafeLocalServerIconStorageName = (serverId: string, iconPath: string): string | null => {
+  const safeServerId = sanitizeServerIdForPath(serverId);
+  if (!safeServerId) {
+    return null;
+  }
+
+  const normalizedPath = (iconPath || '').trim();
+  const expectedPrefix = `/server-icons/${safeServerId}/`;
+  if (!normalizedPath.startsWith(expectedPrefix)) {
+    return null;
+  }
+
+  const storageName = normalizedPath.slice(expectedPrefix.length).trim();
+  if (!storageName || storageName.includes('/') || storageName.includes('\\')) {
+    return null;
+  }
+
+  const safeStorageName = path.basename(storageName).replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
+  if (!safeStorageName || safeStorageName !== storageName) {
+    return null;
+  }
+
+  return safeStorageName;
+};
+
+const cleanupServerIconReference = async (serverId: string, iconPath: string | null | undefined) => {
+  const trimmed = (iconPath || '').trim();
+  if (!trimmed) {
+    return;
+  }
+
+  if (trimmed.startsWith('s3:')) {
+    const key = trimmed.slice('s3:'.length).trim();
+    if (!isSafeS3IconKeyForServer(serverId, key)) {
+      console.warn('[WS DEBUG] Skipping unsafe server icon S3 cleanup key', { serverId, key });
+      return;
+    }
+
+    const persistedS3Config = await getPersistedS3Config();
+    if (!persistedS3Config) {
+      console.warn('[WS DEBUG] Skipping server icon S3 cleanup because S3 config is unavailable', { serverId, key });
+      return;
+    }
+
+    try {
+      await deleteFileFromS3({ config: persistedS3Config, key });
+    } catch (error) {
+      console.warn('[WS DEBUG] Failed cleaning up old server icon from S3', { serverId, key, error });
+    }
+    return;
+  }
+
+  const storageName = parseSafeLocalServerIconStorageName(serverId, trimmed);
+  if (!storageName) {
+    console.warn('[WS DEBUG] Skipping unsafe server icon local cleanup path', { serverId, iconPath: trimmed });
+    return;
+  }
+
+  try {
+    const localIconPath = getSafeServerIconPath(serverId, storageName);
+    if (!fs.existsSync(localIconPath)) {
+      return;
+    }
+    fs.unlinkSync(localIconPath);
+  } catch (error) {
+    console.warn('[WS DEBUG] Failed cleaning up old local server icon', { serverId, iconPath: trimmed, error });
+  }
+};
+
+const storeServerIcon = async (serverId: string, iconDataUrl: string): Promise<string> => {
+  const parsed = parseServerIconDataUrl(iconDataUrl);
+  if (!parsed) {
+    throw new Error('Invalid icon data. Expected base64 data URL image.');
+  }
+
+  if (parsed.buffer.length > MAX_SERVER_ICON_SIZE_BYTES) {
+    throw new Error('Server icon exceeds 2MB size limit.');
+  }
+
+  const runtimeStorage = await getStorageRuntimeConfig();
+  const storageName = `icon-${Date.now()}-${crypto.randomUUID()}.${parsed.extension}`;
+
+  if (runtimeStorage.storageType === 's3') {
+    if (!runtimeStorage.s3Config) {
+      throw new Error('S3 storage is enabled but configuration is missing');
+    }
+
+    const key = buildS3StorageKey(runtimeStorage.s3Config.prefix, `server-icons/${serverId}`, storageName);
+    await uploadFileToS3({
+      config: runtimeStorage.s3Config,
+      key,
+      buffer: parsed.buffer,
+      mimeType: parsed.mimeType
+    });
+    return `s3:${key}`;
+  }
+
+  const targetPath = getSafeServerIconPath(serverId, storageName);
+  fs.writeFileSync(targetPath, parsed.buffer);
+  return buildServerIconPathForClient(serverId, storageName);
 };
 
 const sanitizeFileName = (name: string) => {
@@ -103,6 +292,206 @@ const resolveSafeStoredFilePath = (channelId: string, storageName: string) => {
 
 const hasFolderManagementAccess = (role: string | null | undefined) => {
   return role === 'admin' || role === 'owner';
+};
+
+const sanitizeStoragePrefix = (prefix: string | null | undefined) => {
+  const trimmed = (prefix || '').trim().replace(/^\/+/, '').replace(/\/+$/, '');
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const sanitizeS3Endpoint = (endpoint: string) => {
+  const trimmed = (endpoint || '').trim();
+  if (!trimmed) {
+    throw new Error('S3 endpoint is required');
+  }
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  const parsed = new URL(withProtocol);
+  return parsed.origin;
+};
+
+const parseHetznerEndpointHost = (endpoint: string): { bucket: string; region: string } | null => {
+  try {
+    const host = new URL(endpoint).hostname.toLowerCase();
+    const labels = host.split('.').filter(Boolean);
+    if (labels.length < 4) {
+      return null;
+    }
+
+    const suffix = labels.slice(-2).join('.');
+    if (suffix !== 'your-objectstorage.com') {
+      return null;
+    }
+
+    const region = labels[labels.length - 3];
+    const bucket = labels.slice(0, labels.length - 3).join('.');
+    if (!region || !bucket) {
+      return null;
+    }
+
+    return { bucket, region };
+  } catch {
+    return null;
+  }
+};
+
+const normalizeS3Config = (input: {
+  endpoint?: string | null;
+  region?: string | null;
+  bucket?: string | null;
+  accessKey?: string | null;
+  secretKey?: string | null;
+  prefix?: string | null;
+}): S3StorageConfig => {
+  const endpoint = sanitizeS3Endpoint(input.endpoint || '');
+  const requestedRegion = (input.region || '').trim();
+  const requestedBucket = (input.bucket || '').trim();
+  const accessKey = (input.accessKey || '').trim();
+  const secretKey = (input.secretKey || '').trim();
+
+  const parsedHetzner = parseHetznerEndpointHost(endpoint);
+  const region = requestedRegion || parsedHetzner?.region || '';
+  const bucket = requestedBucket || parsedHetzner?.bucket || '';
+
+  if ((!requestedRegion || !requestedBucket) && !parsedHetzner) {
+    throw new Error('Hetzner endpoint URL must match https://<bucket-name>.<location>.your-objectstorage.com');
+  }
+
+  if (parsedHetzner) {
+    if (requestedRegion && requestedRegion !== parsedHetzner.region) {
+      throw new Error('S3 region does not match endpoint URL location segment');
+    }
+    if (requestedBucket && requestedBucket !== parsedHetzner.bucket) {
+      throw new Error('S3 bucket does not match endpoint URL bucket segment');
+    }
+  }
+
+  if (!region) {
+    throw new Error('S3 region is required');
+  }
+  if (!bucket) {
+    throw new Error('S3 bucket is required');
+  }
+  if (!accessKey) {
+    throw new Error('S3 access key is required');
+  }
+  if (!secretKey) {
+    throw new Error('S3 secret key is required');
+  }
+
+  return {
+    endpoint,
+    region,
+    bucket,
+    accessKey,
+    secretKey,
+    prefix: sanitizeStoragePrefix(input.prefix)
+  };
+};
+
+const getPersistedS3Config = async (): Promise<S3StorageConfig | null> => {
+  const settings = await getServerStorageSettings();
+  if (!settings || !settings.s3) {
+    return null;
+  }
+
+  try {
+    return normalizeS3Config(settings.s3);
+  } catch {
+    return null;
+  }
+};
+
+const getStorageRuntimeConfig = async (): Promise<{ storageType: 'data_dir' | 's3'; s3Config: S3StorageConfig | null }> => {
+  const settings = await getServerStorageSettings();
+  if (!settings || settings.storageType !== 's3') {
+    return { storageType: 'data_dir', s3Config: null };
+  }
+
+  if (!settings.s3) {
+    throw new Error('S3 storage is enabled but configuration is missing');
+  }
+
+  return {
+    storageType: 's3',
+    s3Config: normalizeS3Config(settings.s3)
+  };
+};
+
+const buildStorageSettingsPayloadForClient = (settings: Awaited<ReturnType<typeof getServerStorageSettings>>) => {
+  return {
+    storageType: settings?.storageType || 'data_dir',
+    storageLastError: settings?.storageLastError || null,
+    s3: settings?.s3
+      ? {
+        endpoint: settings.s3.endpoint,
+        region: settings.s3.region,
+        bucket: settings.s3.bucket,
+        accessKey: settings.s3.accessKey,
+        secretKey: settings.s3.secretKey,
+        prefix: settings.s3.prefix || ''
+      }
+      : {
+        endpoint: '',
+        region: '',
+        bucket: '',
+        accessKey: '',
+        secretKey: '',
+        prefix: ''
+      }
+  };
+};
+
+const migrateDataDirFilesToS3 = async (serverId: string, s3Config: S3StorageConfig) => {
+  const allFiles = await getAllFolderChannelFiles();
+
+  for (const file of allFiles) {
+    if (file.storage_provider === 's3' && file.storage_key) {
+      continue;
+    }
+
+    const legacyPath = resolveSafeStoredFilePath(file.channel_id, file.storage_name);
+    if (!fs.existsSync(legacyPath)) {
+      console.warn('[WS DEBUG] Skipping legacy file migration because source is missing', {
+        channelId: file.channel_id,
+        fileId: file.id
+      });
+      continue;
+    }
+
+    const storageKey = buildS3StorageKey(s3Config.prefix, file.channel_id, file.storage_name);
+    try {
+      const buffer = fs.readFileSync(legacyPath);
+      await uploadFileToS3({
+        config: s3Config,
+        key: storageKey,
+        buffer,
+        mimeType: file.mime_type
+      });
+
+      await updateFolderChannelFileStorage({
+        fileId: file.id,
+        storageProvider: 's3',
+        storageKey,
+        migratedToS3At: new Date().toISOString()
+      });
+
+      try {
+        fs.unlinkSync(legacyPath);
+      } catch {
+        // keep source file when cleanup fails
+      }
+    } catch (error) {
+      console.error('[WS DEBUG] Failed migrating legacy file to S3', {
+        fileId: file.id,
+        channelId: file.channel_id,
+        error
+      });
+      await updateServerStorageLastError({
+        serverId,
+        storageLastError: 'Some legacy files could not be migrated to S3. Check server logs.'
+      });
+    }
+  }
 };
 
 export const handleMessage = async (client: ClientConnection, messageStr: string) => {
@@ -180,6 +569,12 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'update_server_settings':
         await handleUpdateServerSettings(client, payload);
+        break;
+      case 'get_server_storage_settings':
+        await handleGetServerStorageSettings(client);
+        break;
+      case 'test_server_storage_s3':
+        await handleTestServerStorageS3(client, payload);
         break;
       case 'voice_state_update':
         await handleVoiceStateUpdate(client, payload);
@@ -728,15 +1123,34 @@ const handleFolderUploadFile = async (
 
   const ext = path.extname(originalName).slice(0, 20);
   const storageName = `${crypto.randomUUID()}${ext}`;
-  const filePath = resolveSafeStoredFilePath(channelId, storageName);
+  let filePath: string | null = null;
 
   try {
-    ensureChannelFilesDir(channelId);
-    fs.writeFileSync(filePath, fileBuffer);
+    const storageRuntime = await getStorageRuntimeConfig();
+    let storageProvider: 'data_dir' | 's3' = 'data_dir';
+    let storageKey: string | null = null;
+
+    if (storageRuntime.storageType === 's3' && storageRuntime.s3Config) {
+      storageProvider = 's3';
+      storageKey = buildS3StorageKey(storageRuntime.s3Config.prefix, channelId, storageName);
+      await uploadFileToS3({
+        config: storageRuntime.s3Config,
+        key: storageKey,
+        buffer: fileBuffer,
+        mimeType
+      });
+    } else {
+      filePath = resolveSafeStoredFilePath(channelId, storageName);
+      ensureChannelFilesDir(channelId);
+      fs.writeFileSync(filePath, fileBuffer);
+    }
+
     const created = await createFolderChannelFile({
       channelId,
       originalName,
       storageName,
+      storageProvider,
+      storageKey,
       mimeType,
       sizeBytes: fileBuffer.length,
       uploaderUserId: client.userId
@@ -761,7 +1175,7 @@ const handleFolderUploadFile = async (
     }));
   } catch (error) {
     try {
-      if (fs.existsSync(filePath)) {
+      if (filePath && fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
     } catch {
@@ -794,13 +1208,24 @@ const handleFolderDownloadFile = async (
   }
 
   try {
-    const fullPath = resolveSafeStoredFilePath(channelId, file.storage_name);
-    if (!fs.existsSync(fullPath)) {
-      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Stored file is missing' } }));
-      return;
+    let fileBuffer: Buffer;
+    if (file.storage_provider === 's3') {
+      const persistedS3Config = await getPersistedS3Config();
+      if (!persistedS3Config || !file.storage_key) {
+        client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'S3 storage is not configured for this file' } }));
+        return;
+      }
+      fileBuffer = await downloadFileFromS3({ config: persistedS3Config, key: file.storage_key });
+    } else {
+      const fullPath = resolveSafeStoredFilePath(channelId, file.storage_name);
+      if (!fs.existsSync(fullPath)) {
+        client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Stored file is missing' } }));
+        return;
+      }
+      fileBuffer = fs.readFileSync(fullPath);
     }
 
-    const dataBase64 = fs.readFileSync(fullPath).toString('base64');
+    const dataBase64 = fileBuffer.toString('base64');
     client.ws.send(JSON.stringify({
       type: 'folder_file_download',
       payload: {
@@ -852,9 +1277,16 @@ const handleFolderDeleteFile = async (
   }
 
   try {
-    const fullPath = resolveSafeStoredFilePath(channelId, file.storage_name);
-    if (fs.existsSync(fullPath)) {
-      fs.unlinkSync(fullPath);
+    if (file.storage_provider === 's3') {
+      const persistedS3Config = await getPersistedS3Config();
+      if (persistedS3Config && file.storage_key) {
+        await deleteFileFromS3({ config: persistedS3Config, key: file.storage_key });
+      }
+    } else {
+      const fullPath = resolveSafeStoredFilePath(channelId, file.storage_name);
+      if (fs.existsSync(fullPath)) {
+        fs.unlinkSync(fullPath);
+      }
     }
   } catch (error) {
     console.error('[WS DEBUG] Failed to delete stored folder file:', error);
@@ -1233,7 +1665,25 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
     return;
   }
 
-  const { serverId, title, rulesChannelId, welcomeChannelId } = payload;
+  const typedPayload = payload as {
+    serverId: string;
+    title: string;
+    rulesChannelId: string | null;
+    welcomeChannelId: string | null;
+    iconDataUrl?: string | null;
+    removeIcon?: boolean;
+    storage?: {
+      enabled?: boolean;
+      endpoint?: string;
+      region?: string;
+      bucket?: string;
+      accessKey?: string;
+      secretKey?: string;
+      prefix?: string;
+    };
+  };
+
+  const { serverId, title, rulesChannelId, welcomeChannelId } = typedPayload;
   
   if (!serverId) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID is required' } }));
@@ -1247,16 +1697,174 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
   }
 
   try {
-    await updateServerSettings(serverId, normalizedTitle, rulesChannelId, welcomeChannelId);
+    const currentServer = await getServer();
+    const previousIconPath = currentServer?.id === serverId ? currentServer.iconPath || null : null;
+
+    if (typedPayload.storage) {
+      const currentStorage = await getServerStorageSettings();
+      const currentS3 = currentStorage?.s3;
+      const storageInput = typedPayload.storage;
+
+      if (storageInput.enabled) {
+        const mergedS3Config = normalizeS3Config({
+          endpoint: storageInput.endpoint || currentS3?.endpoint || null,
+          region: storageInput.region || currentS3?.region || null,
+          bucket: storageInput.bucket || currentS3?.bucket || null,
+          accessKey: storageInput.accessKey || currentS3?.accessKey || null,
+          secretKey: storageInput.secretKey || currentS3?.secretKey || null,
+          prefix: storageInput.prefix ?? currentS3?.prefix ?? null
+        });
+
+        const validation = await validateS3Configuration(mergedS3Config);
+        if (!validation.ok) {
+          await updateServerStorageLastError({
+            serverId,
+            storageLastError: validation.message
+          });
+          client.ws.send(JSON.stringify({
+            type: 'error',
+            payload: { message: validation.message }
+          }));
+          return;
+        }
+
+        await updateServerStorageSettings({
+          serverId,
+          storageType: 's3',
+          s3Endpoint: mergedS3Config.endpoint,
+          s3Region: mergedS3Config.region,
+          s3Bucket: mergedS3Config.bucket,
+          s3AccessKey: mergedS3Config.accessKey,
+          s3SecretKey: mergedS3Config.secretKey,
+          s3Prefix: mergedS3Config.prefix || null,
+          storageLastError: null
+        });
+
+        migrateDataDirFilesToS3(serverId, mergedS3Config).catch((migrationError) => {
+          console.error('[WS DEBUG] Background migration to S3 failed:', migrationError);
+        });
+      } else {
+        await updateServerStorageSettings({
+          serverId,
+          storageType: 'data_dir',
+          s3Endpoint: currentS3?.endpoint || null,
+          s3Region: currentS3?.region || null,
+          s3Bucket: currentS3?.bucket || null,
+          s3AccessKey: currentS3?.accessKey || null,
+          s3SecretKey: currentS3?.secretKey || null,
+          s3Prefix: currentS3?.prefix || null,
+          storageLastError: null
+        });
+      }
+    }
+
+    let nextIconPath: string | null | undefined = undefined;
+    if (typedPayload.removeIcon === true) {
+      nextIconPath = null;
+    } else if (typeof typedPayload.iconDataUrl === 'string' && typedPayload.iconDataUrl.trim()) {
+      nextIconPath = await storeServerIcon(serverId, typedPayload.iconDataUrl);
+    }
+
+    await updateServerSettings(serverId, normalizedTitle, rulesChannelId, welcomeChannelId, nextIconPath);
+
+    if (typeof nextIconPath !== 'undefined' && previousIconPath && previousIconPath !== nextIconPath) {
+      await cleanupServerIconReference(serverId, previousIconPath);
+    }
+
     const updatedServer = await getServer();
+    const updatedStorageSettings = await getServerStorageSettings();
     
     connectionManager.broadcastToAuthenticated({
       type: 'server_settings_updated',
       payload: { server: updatedServer }
     });
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'SERVER_UPDATED',
+      payload: { server: updatedServer }
+    });
+
+    client.ws.send(JSON.stringify({
+      type: 'server_storage_settings',
+      payload: buildStorageSettingsPayloadForClient(updatedStorageSettings)
+    }));
   } catch (error) {
     console.error('[WS DEBUG] Failed to update server settings:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to update server settings' } }));
+  }
+};
+
+const handleTestServerStorageS3 = async (
+  client: ClientConnection,
+  payload: {
+    storage?: {
+      endpoint?: string;
+      region?: string;
+      bucket?: string;
+      accessKey?: string;
+      secretKey?: string;
+      prefix?: string;
+    };
+  }
+) => {
+  if (!client.userId) return;
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can test storage settings' } }));
+    return;
+  }
+
+  const currentStorage = await getServerStorageSettings();
+  const currentS3 = currentStorage?.s3;
+  const storageInput = payload?.storage || {};
+
+  try {
+    const mergedS3Config = normalizeS3Config({
+      endpoint: storageInput.endpoint || currentS3?.endpoint || null,
+      region: storageInput.region || currentS3?.region || null,
+      bucket: storageInput.bucket || currentS3?.bucket || null,
+      accessKey: storageInput.accessKey || currentS3?.accessKey || null,
+      secretKey: storageInput.secretKey || currentS3?.secretKey || null,
+      prefix: storageInput.prefix ?? currentS3?.prefix ?? null
+    });
+
+    const validation = await validateS3Configuration(mergedS3Config);
+    client.ws.send(JSON.stringify({
+      type: 'server_storage_test_result',
+      payload: validation.ok
+        ? { ok: true, message: 'S3 connection test succeeded.' }
+        : { ok: false, message: validation.message }
+    }));
+  } catch (error) {
+    client.ws.send(JSON.stringify({
+      type: 'server_storage_test_result',
+      payload: {
+        ok: false,
+        message: error instanceof Error ? error.message : 'Invalid S3 configuration'
+      }
+    }));
+  }
+};
+
+const handleGetServerStorageSettings = async (client: ClientConnection) => {
+  if (!client.userId) return;
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can read storage settings' } }));
+    return;
+  }
+
+  try {
+    const settings = await getServerStorageSettings();
+    client.ws.send(JSON.stringify({
+      type: 'server_storage_settings',
+      payload: buildStorageSettingsPayloadForClient(settings)
+    }));
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to read storage settings:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to read storage settings' } }));
   }
 };
 
@@ -1335,40 +1943,7 @@ const handleCreateServer = async (client: ClientConnection, payload: { name: str
 };
 
 const handleUpdateServerSettingsUppercase = async (client: ClientConnection, payload: { serverId: string, title: string, rulesChannelId: string | null, welcomeChannelId: string | null }) => {
-  if (!client.userId) return;
-  
-  const user = await getUserById(client.userId);
-  // Assuming admin is the server owner for now, as there is no ownerId
-  if (!user || user.role !== 'admin') {
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only server owners can update server settings' } }));
-    return;
-  }
-
-  const { serverId, title, rulesChannelId, welcomeChannelId } = payload;
-  
-  if (!serverId) {
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID is required' } }));
-    return;
-  }
-
-  const normalizedTitle = (title || '').trim();
-  if (!normalizedTitle) {
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server title is required' } }));
-    return;
-  }
-
-  try {
-    await updateServerSettings(serverId, normalizedTitle, rulesChannelId, welcomeChannelId);
-    const updatedServer = await getServer();
-    
-    connectionManager.broadcastToAuthenticated({
-      type: 'SERVER_UPDATED',
-      payload: { server: updatedServer }
-    });
-  } catch (error) {
-    console.error('[WS DEBUG] Failed to update server settings:', error);
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to update server settings' } }));
-  }
+  await handleUpdateServerSettings(client, payload);
 };
 
 const handleJoinServer = async (client: ClientConnection, payload: { serverId: string }) => {
