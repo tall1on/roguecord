@@ -29,42 +29,173 @@ export const dbAll = <T>(sql: string, params: any[] = []): Promise<T[]> => {
   });
 };
 
+const isMissingColumnError = (error: unknown, columnName: string): boolean => {
+  if (!error || typeof error !== 'object' || !('message' in error)) return false;
+  const message = String((error as any).message || '').toLowerCase();
+  return message.includes('no such column') && message.includes(columnName.toLowerCase());
+};
+
+const folderFilesLegacySelect = `
+  SELECT
+    id,
+    channel_id,
+    original_name,
+    storage_name,
+    'data_dir' AS storage_provider,
+    NULL AS storage_key,
+    mime_type,
+    size_bytes,
+    uploader_user_id,
+    NULL AS migrated_to_s3_at,
+    created_at,
+    updated_at
+  FROM folder_channel_files
+`;
+
 // --- Servers ---
 export interface Server {
   id: string;
   name: string;
   title: string;
+  iconPath: string | null;
   rulesChannelId?: string;
   welcomeChannelId?: string;
+  storageType: 'data_dir' | 's3';
+  storageLastError?: string | null;
+  storageUpdatedAt?: string | null;
 }
+
+export interface ServerS3Config {
+  endpoint: string;
+  region: string;
+  bucket: string;
+  accessKey: string;
+  secretKey: string;
+  prefix: string | null;
+}
+
+export interface ServerStorageSettings {
+  serverId: string;
+  storageType: 'data_dir' | 's3';
+  s3: ServerS3Config | null;
+  storageLastError: string | null;
+  storageUpdatedAt: string | null;
+}
+
+const mapServerRow = (row: any): Server => ({
+  id: row.id,
+  name: row.name,
+  title: row.title || row.name,
+  iconPath: row.icon_path || null,
+  rulesChannelId: row.rules_channel_id,
+  welcomeChannelId: row.welcome_channel_id,
+  storageType: row.storage_type === 's3' ? 's3' : 'data_dir',
+  storageLastError: row.storage_last_error || null,
+  storageUpdatedAt: row.storage_updated_at || null
+});
+
+const mapServerStorageSettings = (row: any): ServerStorageSettings => ({
+  serverId: row.id,
+  storageType: row.storage_type === 's3' ? 's3' : 'data_dir',
+  s3: row.s3_endpoint && row.s3_region && row.s3_bucket && row.s3_access_key && row.s3_secret_key
+    ? {
+      endpoint: row.s3_endpoint,
+      region: row.s3_region,
+      bucket: row.s3_bucket,
+      accessKey: row.s3_access_key,
+      secretKey: row.s3_secret_key,
+      prefix: row.s3_prefix || null
+    }
+    : null,
+  storageLastError: row.storage_last_error || null,
+  storageUpdatedAt: row.storage_updated_at || null
+});
 
 export const getServer = async (): Promise<Server | undefined> => {
   const row = await dbGet<any>('SELECT * FROM servers LIMIT 1');
   if (!row) return undefined;
-  return {
-    id: row.id,
-    name: row.name,
-    title: row.title || row.name,
-    rulesChannelId: row.rules_channel_id,
-    welcomeChannelId: row.welcome_channel_id
-  };
+  return mapServerRow(row);
 };
 
 export const createServer = async (name: string, welcomeChannelId?: string): Promise<Server> => {
   const id = crypto.randomUUID();
   await dbRun('INSERT INTO servers (id, name, title, welcome_channel_id) VALUES (?, ?, ?, ?)', [id, name, name, welcomeChannelId]);
   const row = await dbGet<any>('SELECT * FROM servers WHERE id = ?', [id]);
-  return {
-    id: row.id,
-    name: row.name,
-    title: row.title || row.name,
-    rulesChannelId: row.rules_channel_id,
-    welcomeChannelId: row.welcome_channel_id
-  };
+  return mapServerRow(row);
 };
 
-export const updateServerSettings = async (id: string, title: string, rulesChannelId: string | null, welcomeChannelId: string | null): Promise<void> => {
-  await dbRun('UPDATE servers SET title = ?, rules_channel_id = ?, welcome_channel_id = ? WHERE id = ?', [title, rulesChannelId, welcomeChannelId, id]);
+export const updateServerSettings = async (
+  id: string,
+  title: string,
+  rulesChannelId: string | null,
+  welcomeChannelId: string | null,
+  iconPath?: string | null
+): Promise<void> => {
+  if (typeof iconPath === 'undefined') {
+    await dbRun('UPDATE servers SET title = ?, rules_channel_id = ?, welcome_channel_id = ? WHERE id = ?', [title, rulesChannelId, welcomeChannelId, id]);
+    return;
+  }
+
+  await dbRun(
+    'UPDATE servers SET title = ?, rules_channel_id = ?, welcome_channel_id = ?, icon_path = ? WHERE id = ?',
+    [title, rulesChannelId, welcomeChannelId, iconPath, id]
+  );
+};
+
+export const getServerStorageSettings = async (): Promise<ServerStorageSettings | undefined> => {
+  const row = await dbGet<any>('SELECT * FROM servers LIMIT 1');
+  if (!row) return undefined;
+  return mapServerStorageSettings(row);
+};
+
+export const updateServerStorageSettings = async (input: {
+  serverId: string;
+  storageType: 'data_dir' | 's3';
+  s3Endpoint: string | null;
+  s3Region: string | null;
+  s3Bucket: string | null;
+  s3AccessKey: string | null;
+  s3SecretKey: string | null;
+  s3Prefix: string | null;
+  storageLastError: string | null;
+}): Promise<void> => {
+  await dbRun(
+    `
+      UPDATE servers
+      SET
+        storage_type = ?,
+        s3_endpoint = ?,
+        s3_region = ?,
+        s3_bucket = ?,
+        s3_access_key = ?,
+        s3_secret_key = ?,
+        s3_prefix = ?,
+        storage_last_error = ?,
+        storage_updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `,
+    [
+      input.storageType,
+      input.s3Endpoint,
+      input.s3Region,
+      input.s3Bucket,
+      input.s3AccessKey,
+      input.s3SecretKey,
+      input.s3Prefix,
+      input.storageLastError,
+      input.serverId
+    ]
+  );
+};
+
+export const updateServerStorageLastError = async (input: {
+  serverId: string;
+  storageLastError: string | null;
+}): Promise<void> => {
+  await dbRun(
+    'UPDATE servers SET storage_last_error = ?, storage_updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    [input.storageLastError, input.serverId]
+  );
 };
 
 // --- Users ---
@@ -208,9 +339,12 @@ export interface FolderChannelFile {
   channel_id: string;
   original_name: string;
   storage_name: string;
+  storage_provider: 'data_dir' | 's3';
+  storage_key: string | null;
   mime_type: string | null;
   size_bytes: number;
   uploader_user_id: string;
+  migrated_to_s3_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -223,58 +357,177 @@ export const createFolderChannelFile = async (input: {
   channelId: string;
   originalName: string;
   storageName: string;
+  storageProvider?: 'data_dir' | 's3';
+  storageKey?: string | null;
   mimeType?: string | null;
   sizeBytes: number;
   uploaderUserId: string;
 }): Promise<FolderChannelFile> => {
   const id = crypto.randomUUID();
-  await dbRun(
-    `
-      INSERT INTO folder_channel_files (
+  try {
+    await dbRun(
+      `
+        INSERT INTO folder_channel_files (
+          id,
+          channel_id,
+          original_name,
+          storage_name,
+          storage_provider,
+          storage_key,
+          mime_type,
+          size_bytes,
+          uploader_user_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
         id,
-        channel_id,
-        original_name,
-        storage_name,
-        mime_type,
-        size_bytes,
-        uploader_user_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `,
-    [
-      id,
-      input.channelId,
-      input.originalName,
-      input.storageName,
-      input.mimeType || null,
-      input.sizeBytes,
-      input.uploaderUserId
-    ]
-  );
+        input.channelId,
+        input.originalName,
+        input.storageName,
+        input.storageProvider || 'data_dir',
+        input.storageKey || null,
+        input.mimeType || null,
+        input.sizeBytes,
+        input.uploaderUserId
+      ]
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key')) {
+      throw error;
+    }
 
-  return (await dbGet<FolderChannelFile>('SELECT * FROM folder_channel_files WHERE id = ?', [id]))!;
+    await dbRun(
+      `
+        INSERT INTO folder_channel_files (
+          id,
+          channel_id,
+          original_name,
+          storage_name,
+          mime_type,
+          size_bytes,
+          uploader_user_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        id,
+        input.channelId,
+        input.originalName,
+        input.storageName,
+        input.mimeType || null,
+        input.sizeBytes,
+        input.uploaderUserId
+      ]
+    );
+  }
+
+  return (await getFolderChannelFileById(id))!;
 };
 
 export const getFolderChannelFiles = async (channelId: string): Promise<FolderChannelFileWithUploader[]> => {
-  return dbAll<FolderChannelFileWithUploader>(
-    `
-      SELECT
-        f.*,
-        u.username AS uploader_username
-      FROM folder_channel_files f
-      INNER JOIN users u ON u.id = f.uploader_user_id
-      WHERE f.channel_id = ?
-      ORDER BY f.created_at DESC, f.id DESC
-    `,
-    [channelId]
-  );
+  try {
+    return await dbAll<FolderChannelFileWithUploader>(
+      `
+        SELECT
+          f.*,
+          u.username AS uploader_username
+        FROM folder_channel_files f
+        INNER JOIN users u ON u.id = f.uploader_user_id
+        WHERE f.channel_id = ?
+        ORDER BY f.created_at DESC, f.id DESC
+      `,
+      [channelId]
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key') && !isMissingColumnError(error, 'migrated_to_s3_at')) {
+      throw error;
+    }
+
+    return dbAll<FolderChannelFileWithUploader>(
+      `
+        SELECT
+          f.id,
+          f.channel_id,
+          f.original_name,
+          f.storage_name,
+          'data_dir' AS storage_provider,
+          NULL AS storage_key,
+          f.mime_type,
+          f.size_bytes,
+          f.uploader_user_id,
+          NULL AS migrated_to_s3_at,
+          f.created_at,
+          f.updated_at,
+          u.username AS uploader_username
+        FROM folder_channel_files f
+        INNER JOIN users u ON u.id = f.uploader_user_id
+        WHERE f.channel_id = ?
+        ORDER BY f.created_at DESC, f.id DESC
+      `,
+      [channelId]
+    );
+  }
 };
 
 export const getFolderChannelFileById = async (fileId: string): Promise<FolderChannelFile | undefined> => {
-  return dbGet<FolderChannelFile>('SELECT * FROM folder_channel_files WHERE id = ?', [fileId]);
+  try {
+    return await dbGet<FolderChannelFile>('SELECT * FROM folder_channel_files WHERE id = ?', [fileId]);
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key') && !isMissingColumnError(error, 'migrated_to_s3_at')) {
+      throw error;
+    }
+
+    return dbGet<FolderChannelFile>(`${folderFilesLegacySelect} WHERE id = ?`, [fileId]);
+  }
+};
+
+export const getAllFolderChannelFiles = async (): Promise<FolderChannelFile[]> => {
+  try {
+    return await dbAll<FolderChannelFile>('SELECT * FROM folder_channel_files ORDER BY created_at ASC, id ASC');
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key') && !isMissingColumnError(error, 'migrated_to_s3_at')) {
+      throw error;
+    }
+
+    return dbAll<FolderChannelFile>(`${folderFilesLegacySelect} ORDER BY created_at ASC, id ASC`);
+  }
 };
 
 export const deleteFolderChannelFileById = async (fileId: string): Promise<void> => {
   await dbRun('DELETE FROM folder_channel_files WHERE id = ?', [fileId]);
+};
+
+export const updateFolderChannelFileStorage = async (input: {
+  fileId: string;
+  storageProvider: 'data_dir' | 's3';
+  storageKey: string | null;
+  migratedToS3At: string | null;
+}): Promise<void> => {
+  try {
+    await dbRun(
+      `
+        UPDATE folder_channel_files
+        SET storage_provider = ?,
+            storage_key = ?,
+            migrated_to_s3_at = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `,
+      [input.storageProvider, input.storageKey, input.migratedToS3At, input.fileId]
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key') && !isMissingColumnError(error, 'migrated_to_s3_at')) {
+      throw error;
+    }
+
+    await dbRun(
+      `
+        UPDATE folder_channel_files
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `,
+      [input.fileId]
+    );
+  }
 };
 
 // --- Messages ---
