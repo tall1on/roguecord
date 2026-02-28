@@ -70,6 +70,7 @@ export interface ServerS3Config {
   bucket: string;
   accessKey: string;
   secretKey: string;
+  apiKey: string | null;
   prefix: string | null;
 }
 
@@ -102,6 +103,7 @@ const mapServerStorageSettings = (row: any): ServerStorageSettings => ({
       bucket: row.s3_bucket,
       accessKey: row.s3_access_key,
       secretKey: row.s3_secret_key,
+      apiKey: row.s3_api_key || null,
       prefix: row.s3_prefix || null
     }
     : null,
@@ -140,6 +142,7 @@ export const updateServerStorageSettings = async (input: {
   s3Bucket: string | null;
   s3AccessKey: string | null;
   s3SecretKey: string | null;
+  s3ApiKey: string | null;
   s3Prefix: string | null;
   storageLastError: string | null;
 }): Promise<void> => {
@@ -153,6 +156,7 @@ export const updateServerStorageSettings = async (input: {
         s3_bucket = ?,
         s3_access_key = ?,
         s3_secret_key = ?,
+        s3_api_key = ?,
         s3_prefix = ?,
         storage_last_error = ?,
         storage_updated_at = CURRENT_TIMESTAMP
@@ -165,6 +169,7 @@ export const updateServerStorageSettings = async (input: {
       input.s3Bucket,
       input.s3AccessKey,
       input.s3SecretKey,
+      input.s3ApiKey,
       input.s3Prefix,
       input.storageLastError,
       input.serverId

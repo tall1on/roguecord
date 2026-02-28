@@ -86,6 +86,7 @@ export interface ServerStorageS3Settings {
   bucket: string;
   accessKey: string;
   secretKey: string;
+  apiKey: string;
   prefix: string;
 }
 
@@ -209,6 +210,7 @@ export const useChatStore = defineStore('chat', () => {
       bucket: '',
       accessKey: '',
       secretKey: '',
+      apiKey: '',
       prefix: ''
     }
   });
@@ -569,6 +571,7 @@ export const useChatStore = defineStore('chat', () => {
         bucket: '',
         accessKey: '',
         secretKey: '',
+        apiKey: '',
         prefix: ''
       }
     };
@@ -784,6 +787,7 @@ export const useChatStore = defineStore('chat', () => {
             bucket: payload?.s3?.bucket || '',
             accessKey: payload?.s3?.accessKey || '',
             secretKey: payload?.s3?.secretKey || '',
+            apiKey: payload?.s3?.apiKey || '',
             prefix: payload?.s3?.prefix || ''
           }
         };
@@ -1092,6 +1096,7 @@ export const useChatStore = defineStore('chat', () => {
       bucket: string;
       accessKey: string;
       secretKey: string;
+      apiKey: string;
       prefix: string;
     }
   ) => {
@@ -1117,6 +1122,7 @@ export const useChatStore = defineStore('chat', () => {
           bucket: storage.bucket,
           accessKey: storage.accessKey,
           secretKey: storage.secretKey,
+          apiKey: storage.apiKey,
           prefix: storage.prefix
         }
         : undefined

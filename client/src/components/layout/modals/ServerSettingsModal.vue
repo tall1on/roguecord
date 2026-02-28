@@ -26,6 +26,7 @@ const form = defineModel<{
     bucket: string
     accessKey: string
     secretKey: string
+    apiKey: string
     prefix: string
     status: 'data_dir' | 's3'
     lastError: string | null
@@ -146,7 +147,7 @@ const storageStatusLabel = computed(() => (form.value.storage.status === 's3' ? 
                 {{ storageStatusLabel }}
               </p>
               <p class="mt-1 text-xs text-gray-400">
-                Default is data-dir. S3 wird nur aktiv, wenn die Konfiguration erfolgreich validiert wurde.
+                Default is data-dir. S3 is only activated after the configuration has been validated successfully.
               </p>
               <p v-if="form.storage.lastError" class="mt-2 text-xs text-rose-300">
                 Last storage error: {{ form.storage.lastError }}
@@ -171,6 +172,9 @@ const storageStatusLabel = computed(() => (form.value.storage.status === 's3' ? 
 
             <div class="rounded border border-[#3f4147] bg-[#2b2d31] px-4 py-3">
               <p class="text-xs font-bold uppercase text-gray-300">Hetzner S3 help</p>
+              <p class="mt-1 text-xs text-gray-400">
+                Required for S3 access: endpoint, region, bucket, access key, and secret key. Hetzner API key is optional and stored for convenience.
+              </p>
               <a
                 href="https://hetzner.cloud/?ref=JmdXQVT3XHM1"
                 target="_blank"
@@ -188,7 +192,7 @@ const storageStatusLabel = computed(() => (form.value.storage.status === 's3' ? 
                   v-model="form.storage.endpoint"
                   type="text"
                   class="w-full bg-[#1e1f22] text-gray-300 rounded p-2 outline-none border border-transparent focus:border-[#5865F2]"
-                  placeholder="https://fsn1.your-objectstorage.com"
+                  placeholder="https://nbg1.your-objectstorage.com"
                 />
               </div>
 
@@ -198,7 +202,7 @@ const storageStatusLabel = computed(() => (form.value.storage.status === 's3' ? 
                   v-model="form.storage.region"
                   type="text"
                   class="w-full bg-[#1e1f22] text-gray-300 rounded p-2 outline-none border border-transparent focus:border-[#5865F2]"
-                  placeholder="fsn1"
+                  placeholder="nbg1"
                 />
               </div>
 
@@ -240,6 +244,17 @@ const storageStatusLabel = computed(() => (form.value.storage.status === 's3' ? 
                   class="w-full bg-[#1e1f22] text-gray-300 rounded p-2 outline-none border border-transparent focus:border-[#5865F2]"
                   autocomplete="new-password"
                 />
+              </div>
+
+              <div class="md:col-span-2">
+                <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Hetzner API Key (optional)</label>
+                <input
+                  v-model="form.storage.apiKey"
+                  type="password"
+                  class="w-full bg-[#1e1f22] text-gray-300 rounded p-2 outline-none border border-transparent focus:border-[#5865F2]"
+                  autocomplete="new-password"
+                />
+                <p class="mt-1 text-xs text-gray-400">Not used for S3-compatible object storage authentication; only kept as additional Hetzner metadata.</p>
               </div>
             </div>
           </div>
