@@ -40,7 +40,18 @@ const adminKeyInput = ref('')
 const serverSettingsForm = ref({
   title: '',
   rulesChannelId: '',
-  welcomeChannelId: ''
+  welcomeChannelId: '',
+  storage: {
+    enabled: false,
+    endpoint: '',
+    region: '',
+    bucket: '',
+    accessKey: '',
+    secretKey: '',
+    prefix: '',
+    status: 'data_dir' as 'data_dir' | 's3',
+    lastError: null as string | null
+  }
 })
 
 const activeServerSettingsSection = ref('general-settings')
@@ -49,7 +60,10 @@ const serverSettingsNavGroups = ref<ServerSettingsNavGroup[]>([
     id: 'server',
     label: 'Server Settings',
     expanded: true,
-    items: [{ id: 'general-settings', label: 'General Settings' }]
+    items: [
+      { id: 'general-settings', label: 'General Settings' },
+      { id: 'storage-settings', label: 'Storage / S3' }
+    ]
   }
 ])
 
@@ -176,7 +190,16 @@ const saveServerSettings = () => {
       chatStore.server.id,
       serverSettingsForm.value.title,
       serverSettingsForm.value.rulesChannelId || null,
-      serverSettingsForm.value.welcomeChannelId || null
+      serverSettingsForm.value.welcomeChannelId || null,
+      {
+        enabled: serverSettingsForm.value.storage.enabled,
+        endpoint: serverSettingsForm.value.storage.endpoint,
+        region: serverSettingsForm.value.storage.region,
+        bucket: serverSettingsForm.value.storage.bucket,
+        accessKey: serverSettingsForm.value.storage.accessKey,
+        secretKey: serverSettingsForm.value.storage.secretKey,
+        prefix: serverSettingsForm.value.storage.prefix
+      }
     )
     showServerSettingsModal.value = false
   }
@@ -185,6 +208,7 @@ const saveServerSettings = () => {
 watch(showServerSettingsModal, (newVal) => {
   if (newVal && chatStore.server) {
     activeServerSettingsSection.value = 'general-settings'
+    chatStore.requestServerStorageSettings()
     serverSettingsNavGroups.value = serverSettingsNavGroups.value.map((group) => ({
       ...group,
       expanded: true
@@ -192,8 +216,36 @@ watch(showServerSettingsModal, (newVal) => {
     serverSettingsForm.value.title = chatStore.server.title || chatStore.server.name || ''
     serverSettingsForm.value.rulesChannelId = chatStore.server.rulesChannelId || ''
     serverSettingsForm.value.welcomeChannelId = chatStore.server.welcomeChannelId || ''
+    serverSettingsForm.value.storage.enabled = chatStore.serverStorageSettings.storageType === 's3'
+    serverSettingsForm.value.storage.endpoint = chatStore.serverStorageSettings.s3.endpoint
+    serverSettingsForm.value.storage.region = chatStore.serverStorageSettings.s3.region
+    serverSettingsForm.value.storage.bucket = chatStore.serverStorageSettings.s3.bucket
+    serverSettingsForm.value.storage.accessKey = chatStore.serverStorageSettings.s3.accessKey
+    serverSettingsForm.value.storage.secretKey = chatStore.serverStorageSettings.s3.secretKey
+    serverSettingsForm.value.storage.prefix = chatStore.serverStorageSettings.s3.prefix
+    serverSettingsForm.value.storage.status = chatStore.serverStorageSettings.storageType
+    serverSettingsForm.value.storage.lastError = chatStore.serverStorageSettings.storageLastError
   }
 })
+
+watch(
+  () => chatStore.serverStorageSettings,
+  (storageSettings) => {
+    if (!showServerSettingsModal.value) {
+      return
+    }
+    serverSettingsForm.value.storage.status = storageSettings.storageType
+    serverSettingsForm.value.storage.lastError = storageSettings.storageLastError
+    serverSettingsForm.value.storage.enabled = storageSettings.storageType === 's3'
+    serverSettingsForm.value.storage.endpoint = storageSettings.s3.endpoint
+    serverSettingsForm.value.storage.region = storageSettings.s3.region
+    serverSettingsForm.value.storage.bucket = storageSettings.s3.bucket
+    serverSettingsForm.value.storage.accessKey = storageSettings.s3.accessKey
+    serverSettingsForm.value.storage.secretKey = storageSettings.s3.secretKey
+    serverSettingsForm.value.storage.prefix = storageSettings.s3.prefix
+  },
+  { deep: true }
+)
 
 watch(
   () => chatStore.moderationNotice,

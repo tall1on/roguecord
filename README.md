@@ -117,6 +117,42 @@ Additional runtime env used by RSS polling:
 - Schema creation/evolution is handled in backend database bootstrap logic (`server/src/db.ts`).
 - Project requirement: when changing SQLite tables/content, provide forward-safe migration logic in the server DB layer so existing server databases can be upgraded without data loss.
 
+## S3 Storage (Hetzner Object Storage)
+
+RogueCord supports two storage backends for folder-channel files:
+
+- `data_dir` (default): files are stored in `server/data/files/...`
+- `s3`: files are stored in a S3-compatible object store (e.g. Hetzner Object Storage)
+
+### Configuration flow
+
+1. Open **Server Settings → Storage / S3** in the client UI.
+   - Need Hetzner Object Storage first? Create an account here: https://hetzner.cloud/?ref=JmdXQVT3XHM1
+2. Enter:
+   - Endpoint (e.g. `https://nbg1.your-objectstorage.com`)
+   - Region (e.g. `nbg1`)
+   - Bucket
+   - Access Key
+   - Secret Key
+   - optional Prefix
+3. Enable S3 and save settings.
+
+On save, the server validates S3 credentials by executing a test upload/delete in the target bucket.
+
+- If validation fails: storage remains on `data_dir` and an explicit error is returned.
+- If validation succeeds: storage switches to `s3` for all **new uploads**.
+
+After successful activation, RogueCord starts a best-effort migration of existing legacy files from `data_dir` to S3 in the background:
+
+- migrated files are marked as S3-backed in SQLite
+- already migrated files are skipped
+- migration errors are logged server-side without stopping runtime operations
+
+### Notes
+
+- Secrets are persisted in SQLite as part of server storage settings and are not printed to logs.
+- `server/.env.example` contains optional S3 default placeholders for deployment templates/documentation only.
+
 ## License
 
 This project is licensed under the GNU AGPL v3. See `LICENSE` for details.
