@@ -48,6 +48,7 @@ const serverSettingsForm = ref({
     bucket: '',
     accessKey: '',
     secretKey: '',
+    apiKey: '',
     prefix: '',
     status: 'data_dir' as 'data_dir' | 's3',
     lastError: null as string | null
@@ -198,6 +199,7 @@ const saveServerSettings = () => {
         bucket: serverSettingsForm.value.storage.bucket,
         accessKey: serverSettingsForm.value.storage.accessKey,
         secretKey: serverSettingsForm.value.storage.secretKey,
+        apiKey: serverSettingsForm.value.storage.apiKey,
         prefix: serverSettingsForm.value.storage.prefix
       }
     )
@@ -222,6 +224,7 @@ watch(showServerSettingsModal, (newVal) => {
     serverSettingsForm.value.storage.bucket = chatStore.serverStorageSettings.s3.bucket
     serverSettingsForm.value.storage.accessKey = chatStore.serverStorageSettings.s3.accessKey
     serverSettingsForm.value.storage.secretKey = chatStore.serverStorageSettings.s3.secretKey
+    serverSettingsForm.value.storage.apiKey = chatStore.serverStorageSettings.s3.apiKey
     serverSettingsForm.value.storage.prefix = chatStore.serverStorageSettings.s3.prefix
     serverSettingsForm.value.storage.status = chatStore.serverStorageSettings.storageType
     serverSettingsForm.value.storage.lastError = chatStore.serverStorageSettings.storageLastError
@@ -242,6 +245,7 @@ watch(
     serverSettingsForm.value.storage.bucket = storageSettings.s3.bucket
     serverSettingsForm.value.storage.accessKey = storageSettings.s3.accessKey
     serverSettingsForm.value.storage.secretKey = storageSettings.s3.secretKey
+    serverSettingsForm.value.storage.apiKey = storageSettings.s3.apiKey
     serverSettingsForm.value.storage.prefix = storageSettings.s3.prefix
   },
   { deep: true }

@@ -11,6 +11,7 @@ export type S3StorageConfig = {
   bucket: string;
   accessKey: string;
   secretKey: string;
+  apiKey?: string | null;
   prefix?: string | null;
 };
 
@@ -38,6 +39,7 @@ const sanitizeConfig = (config: S3StorageConfig): S3StorageConfig => {
   const bucket = (config.bucket || '').trim();
   const accessKey = (config.accessKey || '').trim();
   const secretKey = (config.secretKey || '').trim();
+  const apiKey = (config.apiKey || '').trim();
   const prefix = normalizePrefix(config.prefix);
 
   if (!region) {
@@ -59,6 +61,7 @@ const sanitizeConfig = (config: S3StorageConfig): S3StorageConfig => {
     bucket,
     accessKey,
     secretKey,
+    apiKey: apiKey || null,
     prefix
   };
 };

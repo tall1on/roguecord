@@ -61,6 +61,7 @@ function initializeDatabase() {
         s3_bucket TEXT,
         s3_access_key TEXT,
         s3_secret_key TEXT,
+        s3_api_key TEXT,
         s3_prefix TEXT,
         storage_last_error TEXT,
         storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -503,6 +504,7 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     const hasS3Bucket = columns.some((column) => column.name === 's3_bucket');
     const hasS3AccessKey = columns.some((column) => column.name === 's3_access_key');
     const hasS3SecretKey = columns.some((column) => column.name === 's3_secret_key');
+    const hasS3ApiKey = columns.some((column) => column.name === 's3_api_key');
     const hasS3Prefix = columns.some((column) => column.name === 's3_prefix');
     const hasStorageLastError = columns.some((column) => column.name === 'storage_last_error');
     const hasStorageUpdatedAt = columns.some((column) => column.name === 'storage_updated_at');
@@ -517,6 +519,7 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     if (!hasS3Bucket) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_bucket TEXT');
     if (!hasS3AccessKey) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_access_key TEXT');
     if (!hasS3SecretKey) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_secret_key TEXT');
+    if (!hasS3ApiKey) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_api_key TEXT');
     if (!hasS3Prefix) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_prefix TEXT');
     if (!hasStorageLastError) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_last_error TEXT');
     if (!hasStorageUpdatedAt) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_updated_at DATETIME');
