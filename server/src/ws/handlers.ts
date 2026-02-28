@@ -128,6 +128,93 @@ const buildServerIconPathForClient = (serverId: string, storageName: string) => 
   return `/server-icons/${safeServerId}/${safeStorageName}`;
 };
 
+const isSafeS3IconKeyForServer = (serverId: string, key: string) => {
+  const trimmed = (key || '').trim();
+  const safeServerId = sanitizeServerIdForPath(serverId);
+  if (!trimmed || !safeServerId) {
+    return false;
+  }
+  if (trimmed.includes('\\') || /[\u0000-\u001F]/.test(trimmed)) {
+    return false;
+  }
+  const segments = trimmed.split('/').filter(Boolean);
+  if (!segments.length || segments.some((segment) => segment === '.' || segment === '..')) {
+    return false;
+  }
+
+  const marker = `server-icons/${safeServerId}/`;
+  return trimmed === `server-icons/${safeServerId}` || trimmed.includes(marker);
+};
+
+const parseSafeLocalServerIconStorageName = (serverId: string, iconPath: string): string | null => {
+  const safeServerId = sanitizeServerIdForPath(serverId);
+  if (!safeServerId) {
+    return null;
+  }
+
+  const normalizedPath = (iconPath || '').trim();
+  const expectedPrefix = `/server-icons/${safeServerId}/`;
+  if (!normalizedPath.startsWith(expectedPrefix)) {
+    return null;
+  }
+
+  const storageName = normalizedPath.slice(expectedPrefix.length).trim();
+  if (!storageName || storageName.includes('/') || storageName.includes('\\')) {
+    return null;
+  }
+
+  const safeStorageName = path.basename(storageName).replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
+  if (!safeStorageName || safeStorageName !== storageName) {
+    return null;
+  }
+
+  return safeStorageName;
+};
+
+const cleanupServerIconReference = async (serverId: string, iconPath: string | null | undefined) => {
+  const trimmed = (iconPath || '').trim();
+  if (!trimmed) {
+    return;
+  }
+
+  if (trimmed.startsWith('s3:')) {
+    const key = trimmed.slice('s3:'.length).trim();
+    if (!isSafeS3IconKeyForServer(serverId, key)) {
+      console.warn('[WS DEBUG] Skipping unsafe server icon S3 cleanup key', { serverId, key });
+      return;
+    }
+
+    const persistedS3Config = await getPersistedS3Config();
+    if (!persistedS3Config) {
+      console.warn('[WS DEBUG] Skipping server icon S3 cleanup because S3 config is unavailable', { serverId, key });
+      return;
+    }
+
+    try {
+      await deleteFileFromS3({ config: persistedS3Config, key });
+    } catch (error) {
+      console.warn('[WS DEBUG] Failed cleaning up old server icon from S3', { serverId, key, error });
+    }
+    return;
+  }
+
+  const storageName = parseSafeLocalServerIconStorageName(serverId, trimmed);
+  if (!storageName) {
+    console.warn('[WS DEBUG] Skipping unsafe server icon local cleanup path', { serverId, iconPath: trimmed });
+    return;
+  }
+
+  try {
+    const localIconPath = getSafeServerIconPath(serverId, storageName);
+    if (!fs.existsSync(localIconPath)) {
+      return;
+    }
+    fs.unlinkSync(localIconPath);
+  } catch (error) {
+    console.warn('[WS DEBUG] Failed cleaning up old local server icon', { serverId, iconPath: trimmed, error });
+  }
+};
+
 const storeServerIcon = async (serverId: string, iconDataUrl: string): Promise<string> => {
   const parsed = parseServerIconDataUrl(iconDataUrl);
   if (!parsed) {
@@ -1610,6 +1697,9 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
   }
 
   try {
+    const currentServer = await getServer();
+    const previousIconPath = currentServer?.id === serverId ? currentServer.iconPath || null : null;
+
     if (typedPayload.storage) {
       const currentStorage = await getServerStorageSettings();
       const currentS3 = currentStorage?.s3;
@@ -1676,6 +1766,11 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
     }
 
     await updateServerSettings(serverId, normalizedTitle, rulesChannelId, welcomeChannelId, nextIconPath);
+
+    if (typeof nextIconPath !== 'undefined' && previousIconPath && previousIconPath !== nextIconPath) {
+      await cleanupServerIconReference(serverId, previousIconPath);
+    }
+
     const updatedServer = await getServer();
     const updatedStorageSettings = await getServerStorageSettings();
     
