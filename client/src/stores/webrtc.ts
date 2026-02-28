@@ -3,6 +3,10 @@ import { ref, shallowRef, watch } from 'vue';
 import { Device } from 'mediasoup-client';
 import { useChatStore } from './chat';
 
+type AudioElementWithSinkId = HTMLAudioElement & {
+  setSinkId?: (sinkId: string) => Promise<void>;
+};
+
 type MediaSourceType = 'mic' | 'screen' | 'camera';
 type ScreenStreamFps = 30 | 60;
 type ScreenStreamResolution = 'source' | '1080p' | '720p' | '480p' | '4k' | '8k';
@@ -47,7 +51,6 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const voiceParticipants = ref<any[]>([]);
   const channelParticipants = ref<Map<string, any[]>>(new Map());
   const localStream = shallowRef<MediaStream | null>(null);
-  const audioContext = shallowRef<AudioContext | null>(null);
   const remoteStreams = shallowRef<Map<string, MediaStream>>(new Map());
   const audioElements = new Map<string, HTMLAudioElement>();
   
@@ -590,7 +593,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         producerId: screenProducer.value?.id
       });
 
-      
+
       if (localUserId) {
         setUserScreenStream(localUserId, displayStream);
       }
@@ -627,11 +630,311 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   
   const isMuted = ref(false);
   const isDeafened = ref(false);
-  
+  const availableInputDevices = ref<MediaDeviceInfo[]>([]);
+  const availableOutputDevices = ref<MediaDeviceInfo[]>([]);
+  const selectedInputDeviceId = ref<string>('default');
+  const selectedOutputDeviceId = ref<string>('default');
+  const inputVolume = ref<number>(100);
+  const outputVolume = ref<number>(100);
+  const noiseGateEnabled = ref<boolean>(false);
+  const noiseGateThreshold = ref<number>(35);
+  const micLevel = ref<number>(0);
+  const browserAudioProcessingEnabled = ref<boolean>(true);
+  const echoCancellationEnabled = ref<boolean>(true);
+  const noiseSuppressionEnabled = ref<boolean>(true);
+  const autoGainControlEnabled = ref<boolean>(true);
+  const canSelectOutputDevice = ref<boolean>(
+    typeof HTMLMediaElement !== 'undefined' &&
+    'setSinkId' in HTMLMediaElement.prototype
+  );
+
   let statsInterval: number | null = null;
   let lastBytesSent = 0;
   let lastBytesReceived = 0;
   let lastStatsTime = 0;
+  let rawInputStream: MediaStream | null = null;
+  let processedInputStream: MediaStream | null = null;
+  let audioContext: AudioContext | null = null;
+  let inputGainNode: GainNode | null = null;
+  let gateGainNode: GainNode | null = null;
+  let analyserNode: AnalyserNode | null = null;
+  let meterInterval: number | null = null;
+  let deviceChangeBound = false;
+
+  const applyStoredAudioSettings = () => {
+    browserAudioProcessingEnabled.value = JSON.parse(localStorage.getItem('audio:browser_processing') ?? 'true');
+    echoCancellationEnabled.value = JSON.parse(localStorage.getItem('audio:echo_cancellation') ?? 'true');
+    noiseSuppressionEnabled.value = JSON.parse(localStorage.getItem('audio:noise_suppression') ?? 'true');
+    autoGainControlEnabled.value = JSON.parse(localStorage.getItem('audio:auto_gain_control') ?? 'true');
+  };
+
+  const cleanupAudioGraph = async () => {
+    if (meterInterval) {
+      clearInterval(meterInterval);
+      meterInterval = null;
+    }
+
+    micLevel.value = 0;
+
+    if (audioContext) {
+      try {
+        await audioContext.close();
+      } catch (error) {
+        console.error('Failed to close audio context:', error);
+      }
+    }
+
+    audioContext = null;
+    inputGainNode = null;
+    gateGainNode = null;
+    analyserNode = null;
+  };
+
+  const stopLocalInput = async () => {
+    if (rawInputStream) {
+      rawInputStream.getTracks().forEach(track => track.stop());
+      rawInputStream = null;
+    }
+
+    if (processedInputStream) {
+      processedInputStream.getTracks().forEach(track => track.stop());
+      processedInputStream = null;
+    }
+
+    if (localStream.value) {
+      localStream.value.getTracks().forEach(track => track.stop());
+      localStream.value = null;
+    }
+
+    await cleanupAudioGraph();
+  };
+
+  const gateThresholdToRms = (thresholdPercent: number) => {
+    // Converts 0-100 UI value to a practical RMS threshold.
+    return 0.003 + (Math.max(0, Math.min(100, thresholdPercent)) / 100) * 0.06;
+  };
+
+  const startMicLevelAndGateLoop = () => {
+    if (!audioContext || !analyserNode || !gateGainNode) return;
+
+    if (meterInterval) {
+      clearInterval(meterInterval);
+      meterInterval = null;
+    }
+
+    const samples = new Float32Array(analyserNode.fftSize);
+
+    meterInterval = window.setInterval(() => {
+      if (!audioContext || !analyserNode || !gateGainNode) return;
+
+      analyserNode.getFloatTimeDomainData(samples);
+      let sumSquares = 0;
+      for (let i = 0; i < samples.length; i++) {
+        const sample = samples[i] ?? 0;
+        sumSquares += sample * sample;
+      }
+
+      const rms = Math.sqrt(sumSquares / samples.length);
+      micLevel.value = Math.min(100, Math.round(rms * 380));
+
+      const gateShouldBeOpen =
+        !noiseGateEnabled.value ||
+        isMuted.value ||
+        isDeafened.value ||
+        rms >= gateThresholdToRms(noiseGateThreshold.value);
+
+      gateGainNode.gain.setTargetAtTime(
+        gateShouldBeOpen ? 1 : 0,
+        audioContext.currentTime,
+        gateShouldBeOpen ? 0.015 : 0.08
+      );
+    }, 60);
+  };
+
+  const applyOutputSettingsToAudioElement = async (audio: AudioElementWithSinkId) => {
+    audio.volume = Math.max(0, Math.min(1, outputVolume.value / 100));
+
+    if (canSelectOutputDevice.value && audio.setSinkId && selectedOutputDeviceId.value !== 'default') {
+      try {
+        await audio.setSinkId(selectedOutputDeviceId.value);
+      } catch (error) {
+        console.error('Failed to set audio output device:', error);
+      }
+    }
+  };
+
+  const refreshAudioDevices = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+
+      availableInputDevices.value = devices.filter(device => device.kind === 'audioinput');
+      availableOutputDevices.value = devices.filter(device => device.kind === 'audiooutput');
+
+      if (!availableInputDevices.value.find(device => device.deviceId === selectedInputDeviceId.value)) {
+        selectedInputDeviceId.value = availableInputDevices.value[0]?.deviceId || 'default';
+      }
+
+      if (!availableOutputDevices.value.find(device => device.deviceId === selectedOutputDeviceId.value)) {
+        selectedOutputDeviceId.value = 'default';
+      }
+    } catch (error) {
+      console.error('Failed to enumerate audio devices:', error);
+    }
+  };
+
+  const initAudioSystem = async () => {
+    applyStoredAudioSettings();
+    await refreshAudioDevices();
+
+    if (!deviceChangeBound) {
+      navigator.mediaDevices.addEventListener('devicechange', refreshAudioDevices);
+      deviceChangeBound = true;
+    }
+  };
+
+  const createLocalAudioTrack = async (): Promise<MediaStreamTrack | null> => {
+    await cleanupAudioGraph();
+
+    if (rawInputStream) {
+      rawInputStream.getTracks().forEach(track => track.stop());
+      rawInputStream = null;
+    }
+    if (processedInputStream) {
+      processedInputStream.getTracks().forEach(track => track.stop());
+      processedInputStream = null;
+    }
+
+    const requestedDeviceId = selectedInputDeviceId.value;
+    const audioConstraints: MediaTrackConstraints = {
+      echoCancellation: browserAudioProcessingEnabled.value && echoCancellationEnabled.value,
+      noiseSuppression: browserAudioProcessingEnabled.value && noiseSuppressionEnabled.value,
+      autoGainControl: browserAudioProcessingEnabled.value && autoGainControlEnabled.value
+    };
+
+    if (requestedDeviceId && requestedDeviceId !== 'default') {
+      audioConstraints.deviceId = { exact: requestedDeviceId };
+    }
+
+    rawInputStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+
+    if (!rawInputStream) return null;
+
+    const rawTrack = rawInputStream.getAudioTracks()[0];
+    if (!rawTrack) return null;
+
+    audioContext = new AudioContext();
+    const sourceNode = audioContext.createMediaStreamSource(rawInputStream);
+    inputGainNode = audioContext.createGain();
+    gateGainNode = audioContext.createGain();
+    analyserNode = audioContext.createAnalyser();
+    analyserNode.fftSize = 1024;
+    const destinationNode = audioContext.createMediaStreamDestination();
+
+    inputGainNode.gain.value = Math.max(0, Math.min(2, inputVolume.value / 100));
+    gateGainNode.gain.value = 1;
+
+    sourceNode.connect(inputGainNode);
+    inputGainNode.connect(gateGainNode);
+    gateGainNode.connect(destinationNode);
+    sourceNode.connect(analyserNode);
+
+    processedInputStream = destinationNode.stream;
+    localStream.value = processedInputStream;
+
+    startMicLevelAndGateLoop();
+
+    const processedTrack = processedInputStream.getAudioTracks()[0];
+    if (!processedTrack) return rawTrack;
+
+    if (isMuted.value || isDeafened.value) {
+      processedTrack.enabled = false;
+    }
+
+    return processedTrack;
+  };
+
+  const replaceProducerTrack = async () => {
+    const newTrack = await createLocalAudioTrack();
+    if (!newTrack) return;
+
+    if (producer.value) {
+      try {
+        await producer.value.replaceTrack({ track: newTrack });
+      } catch (error) {
+        console.error('Failed to replace producer track:', error);
+        try {
+          producer.value.close();
+          producer.value = await sendTransport.value?.produce({ track: newTrack });
+        } catch (produceError) {
+          console.error('Failed to recover producer after replaceTrack error:', produceError);
+        }
+      }
+
+      if (isMuted.value || isDeafened.value) {
+        producer.value.pause();
+      } else {
+        producer.value.resume();
+      }
+    }
+  };
+
+  const setInputDevice = async (deviceId: string) => {
+    selectedInputDeviceId.value = deviceId;
+
+    if (activeVoiceChannelId.value && sendTransport.value) {
+      await replaceProducerTrack();
+    }
+  };
+
+  const setOutputDevice = async (deviceId: string) => {
+    selectedOutputDeviceId.value = deviceId;
+    await Promise.all([...audioElements.values()].map(audio => applyOutputSettingsToAudioElement(audio as AudioElementWithSinkId)));
+  };
+
+  const setInputVolume = (value: number) => {
+    inputVolume.value = Math.max(0, Math.min(200, value));
+    if (inputGainNode && audioContext) {
+      inputGainNode.gain.setTargetAtTime(inputVolume.value / 100, audioContext.currentTime, 0.01);
+    }
+  };
+
+  const setOutputVolume = (value: number) => {
+    outputVolume.value = Math.max(0, Math.min(100, value));
+    audioElements.forEach(audio => {
+      audio.volume = outputVolume.value / 100;
+    });
+  };
+
+  const setNoiseGateEnabled = (enabled: boolean) => {
+    noiseGateEnabled.value = enabled;
+    if (!enabled && gateGainNode && audioContext) {
+      gateGainNode.gain.setTargetAtTime(1, audioContext.currentTime, 0.02);
+    }
+  };
+
+  const setNoiseGateThreshold = (value: number) => {
+    noiseGateThreshold.value = Math.max(0, Math.min(100, value));
+  };
+
+  const setBrowserAudioProcessingEnabled = (enabled: boolean) => {
+    browserAudioProcessingEnabled.value = enabled;
+    localStorage.setItem('audio:browser_processing', JSON.stringify(enabled));
+  };
+
+  const setEchoCancellationEnabled = (enabled: boolean) => {
+    echoCancellationEnabled.value = enabled;
+    localStorage.setItem('audio:echo_cancellation', JSON.stringify(enabled));
+  };
+
+  const setNoiseSuppressionEnabled = (enabled: boolean) => {
+    noiseSuppressionEnabled.value = enabled;
+    localStorage.setItem('audio:noise_suppression', JSON.stringify(enabled));
+  };
+
+  const setAutoGainControlEnabled = (enabled: boolean) => {
+    autoGainControlEnabled.value = enabled;
+    localStorage.setItem('audio:auto_gain_control', JSON.stringify(enabled));
+  };
 
   const ensureSpeakingContext = () => {
     if (!speakingContext.value) {
@@ -964,18 +1267,14 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     
     chatStore.send('leave_voice_channel', { channel_id: activeVoiceChannelId.value });
     
+    stopLocalInput();
     cleanupScreenShareProducer();
 
     if (localStream.value) {
       localStream.value.getTracks().forEach(track => track.stop());
       localStream.value = null;
     }
-    
-    if (audioContext.value) {
-      audioContext.value.close();
-      audioContext.value = null;
-    }
-    
+
     if (producer.value) {
       producer.value.close();
       producer.value = null;
@@ -1014,13 +1313,13 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     });
     userScreenStreams.value.clear();
     userScreenStreams.value = new Map(userScreenStreams.value);
-    
+
     remoteStreams.value.clear();
     voiceParticipants.value = [];
     activeVoiceChannelId.value = null;
     device.value = null;
     speakingUserIds.value = new Set();
-    
+
     stopStatsCollection();
     void stopSpeakingDetection();
   };
@@ -1060,7 +1359,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         voiceParticipants.value = payload.users;
 
         speakingUserIds.value = new Set();
-        
+
         // Create send and recv transports
         chatStore.send('create_webrtc_transport', { channel_id: payload.channel_id, direction: 'send' });
         chatStore.send('create_webrtc_transport', { channel_id: payload.channel_id, direction: 'recv' });
@@ -1116,9 +1415,9 @@ export const useWebRtcStore = defineStore('webrtc', () => {
               }
 
               removeSpeakingDetector(consId);
-               
+
               remoteStreams.value.delete(consId);
-               
+
               const audio = audioElements.get(consId);
               if (audio) {
                 audio.pause();
@@ -1142,7 +1441,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           leaveVoiceChannel();
         }
         break;
-        
+
       case 'voice_state_updated':
         if (payload.channel_id === activeVoiceChannelId.value) {
           const user = voiceParticipants.value.find(u => u.id === payload.user_id);
@@ -1252,59 +1551,22 @@ export const useWebRtcStore = defineStore('webrtc', () => {
             });
           });
           
-          // Start producing audio
+          // Start producing audio with the configured device/gain/noise-gate chain.
           try {
-            localStream.value = await navigator.mediaDevices.getUserMedia({
-              audio: {
-                autoGainControl: true,
-                noiseSuppression: true,
-                echoCancellation: true
-              }
-            });
-            
-            // Create Web Audio API context
-            audioContext.value = new AudioContext();
-            
-            // Create source from the raw microphone stream
-            const source = audioContext.value.createMediaStreamSource(localStream.value);
-            
-            // Create a highpass filter to remove low-frequency rumble/background noise
-            const filter = audioContext.value.createBiquadFilter();
-            filter.type = 'highpass';
-            filter.frequency.value = 80; // 80 Hz is a good starting point for voice
-            
-            // Create a compressor for auto level adjustment
-            const compressor = audioContext.value.createDynamicsCompressor();
-            compressor.threshold.value = -50;
-            compressor.knee.value = 40;
-            compressor.ratio.value = 12;
-            compressor.attack.value = 0;
-            compressor.release.value = 0.25;
-            
-            // Create a destination node to get the processed stream
-            const destination = audioContext.value.createMediaStreamDestination();
-            
-            // Connect the nodes: source -> filter -> compressor -> destination
-            source.connect(filter);
-            filter.connect(compressor);
-            compressor.connect(destination);
-            
-            // Get the processed audio track
-            const processedStream = destination.stream;
-            const audioTrack = processedStream.getAudioTracks()[0];
-            
+            const audioTrack = await createLocalAudioTrack();
+
             if (audioTrack) {
               // Apply current mute/deafen state
               if (isMuted.value || isDeafened.value) {
-                localStream.value.getAudioTracks().forEach(track => {
+                localStream.value?.getAudioTracks().forEach(track => {
                   track.enabled = false;
                 });
               }
 
-              if (chatStore.currentUser?.id) {
+              if (chatStore.currentUser?.id && localStream.value) {
                 addSpeakingDetector('local', chatStore.currentUser.id, localStream.value, true);
               }
-               
+
               producer.value = await sendTransport.value.produce({ track: audioTrack });
               
               if (isMuted.value || isDeafened.value) {
@@ -1361,7 +1623,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           consumerToProducer.set(consumer.id, payload.producer_id);
 
           const remoteUserId = producerToUser.get(payload.producer_id);
-          const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind === 'audio' ? 'mic' : 'camera') as MediaSourceType);
+const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind === 'audio' ? 'mic' : 'camera') as MediaSourceType);
 
           if (remoteSource === 'screen' && remoteUserId) {
             for (const [existingConsumerId, existingProducerId] of consumerToProducer.entries()) {
@@ -1370,7 +1632,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
               closeConsumer(existingConsumerId, 'duplicate screen consumer for same producer');
             }
           }
-          
+
           consumer.on('producerclose', () => {
             closeConsumer(consumer.id, 'producerclose event');
             removeUserScreenByProducer(payload.producer_id);
@@ -1427,7 +1689,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
               addSpeakingDetector(consumer.id, remoteUserId, stream);
             }
           }
-          
+
           // Store the stream with the producer ID or user ID
           // We don't have the user ID here easily, so we'll just use consumer ID
           remoteStreams.value.set(consumer.id, stream);
@@ -1437,9 +1699,11 @@ export const useWebRtcStore = defineStore('webrtc', () => {
             const audio = new Audio();
             audio.srcObject = stream;
             audio.autoplay = true;
-            if (isDeafened.value) {
-              audio.muted = true;
-            }
+            audio.volume = outputVolume.value / 100;
+          if (isDeafened.value) {
+            audio.muted = true;
+          }
+          await applyOutputSettingsToAudioElement(audio as AudioElementWithSinkId);
             if (remoteSource === 'screen' && remoteUserId) {
               if (!screenAudioConsumersByUser.has(remoteUserId)) {
                 screenAudioConsumersByUser.set(remoteUserId, new Set());
@@ -1543,6 +1807,20 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     screenStreamMuteState,
     screenStreamPreferenceState,
     screenStreamVolumeState,
+    availableInputDevices,
+    availableOutputDevices,
+    selectedInputDeviceId,
+    selectedOutputDeviceId,
+    inputVolume,
+    outputVolume,
+    noiseGateEnabled,
+    noiseGateThreshold,
+    micLevel,
+    browserAudioProcessingEnabled,
+    echoCancellationEnabled,
+    noiseSuppressionEnabled,
+    autoGainControlEnabled,
+    canSelectOutputDevice,
     joinVoiceChannel,
     leaveVoiceChannel,
     isUserSpeaking,
@@ -1558,6 +1836,18 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     toggleMute,
     toggleDeafen,
     startScreenShare,
-    stopScreenShare
+    stopScreenShare,
+    initAudioSystem,
+    refreshAudioDevices,
+    setInputDevice,
+    setOutputDevice,
+    setInputVolume,
+    setOutputVolume,
+    setNoiseGateEnabled,
+    setNoiseGateThreshold,
+    setBrowserAudioProcessingEnabled,
+    setEchoCancellationEnabled,
+    setNoiseSuppressionEnabled,
+    setAutoGainControlEnabled
   };
 });
