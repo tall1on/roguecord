@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
+import { useWebRtcStore } from './webrtc';
 
 export interface User {
   id: string;
@@ -684,6 +685,11 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const playNewMessageNotificationSound = () => {
+    const webRtcStore = useWebRtcStore();
+    if (webRtcStore.isDeafened) {
+      return;
+    }
+
     const audio = new Audio('/wav/new_notification.mp3');
     void audio.play().catch((error) => {
       console.debug('[Chat][sound] new message notification playback blocked/failed', error);
