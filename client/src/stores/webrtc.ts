@@ -106,6 +106,10 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   };
 
   const playScreenShareNotificationSound = () => {
+    if (isDeafened.value) {
+      return;
+    }
+
     const audio = new Audio('/wav/screenshare.mp3');
     void audio.play().catch((error) => {
       console.debug('[WebRTC][sound] screenshare notification playback blocked/failed', error);
