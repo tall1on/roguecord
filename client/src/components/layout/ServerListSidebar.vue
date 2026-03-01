@@ -2,15 +2,32 @@
 import { Plus } from 'lucide-vue-next'
 import { useChatStore } from '../../stores/chat'
 
+const SERVER_REFRESH_DEBOUNCE_MS = 5000
+
 const emit = defineEmits<{
   (e: 'open-create-server'): void
 }>()
 
 const chatStore = useChatStore()
+let lastServerRefreshAt = 0
+
+const handleServerListOpened = () => {
+  const now = Date.now()
+  if (now - lastServerRefreshAt < SERVER_REFRESH_DEBOUNCE_MS) {
+    return
+  }
+
+  lastServerRefreshAt = now
+  chatStore.requestServerRefresh()
+}
 </script>
 
 <template>
-  <nav class="w-[72px] bg-[#1e1f22] flex flex-col items-center py-3 gap-2 shrink-0 overflow-y-auto no-scrollbar">
+  <nav
+    class="w-[72px] bg-[#1e1f22] flex flex-col items-center py-3 gap-2 shrink-0 overflow-y-auto no-scrollbar"
+    @mouseenter="handleServerListOpened"
+    @focusin="handleServerListOpened"
+  >
     <div class="w-12 h-12 rounded-[24px] hover:rounded-[16px] bg-[#313338] hover:bg-indigo-500 text-white flex items-center justify-center transition-all duration-200 cursor-pointer group">
       <svg class="w-7 h-7 text-gray-300 group-hover:text-white" fill="currentColor" viewBox="0 0 24 24">
         <path d="M19.73 4.87a18.2 18.2 0 0 0-4.6-1.44c-.21.4-.4.8-.58 1.21-1.69-.25-3.4-.25-5.1 0-.18-.41-.37-.82-.59-1.2-1.6.27-3.14.75-4.6 1.43A19.04 19.04 0 0 0 1.96 19.58c2.09 1.52 4.1 2.44 6.09 3.04.5-.66.95-1.36 1.35-2.09-1.08-.4-2.1-.89-3.06-1.46.26-.19.51-.39.75-.6 3.9 1.79 8.18 1.79 12.06 0 .24.21.49.41.75.6-.96.57-1.98 1.06-3.06 1.46.4.73.85 1.43 1.35 2.09 2-.6 4.01-1.52 6.1-3.04a19.02 19.02 0 0 0-2.32-14.71zM8.52 16.28c-1.21 0-2.21-1.08-2.21-2.4 0-1.33.98-2.4 2.21-2.4 1.23 0 2.23 1.07 2.21 2.4 0 1.32-.98 2.4-2.21 2.4zm6.96 0c-1.21 0-2.21-1.08-2.21-2.4 0-1.33.98-2.4 2.21-2.4 1.23 0 2.23 1.07 2.21 2.4 0 1.32-.98 2.4-2.21 2.4z"/>
