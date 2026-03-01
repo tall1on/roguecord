@@ -1028,28 +1028,28 @@ watch(
           </div>
         </div>
 
-        <div v-else class="grid gap-4 grid-cols-[repeat(auto-fill,minmax(180px,1fr))]">
+        <div v-else class="grid gap-4 grid-cols-[repeat(auto-fill,minmax(140px,1fr))]">
           <div
             v-for="file in activeFolderFiles"
             :key="file.id"
-            class="group rounded-xl border border-[#3f4147] bg-[#2b2d31] p-4 flex flex-col aspect-square hover:bg-[#36393f] hover:border-[#4f5157] transition-all duration-200 shadow-sm"
+            class="group relative rounded-xl border border-[#3f4147] bg-[#2b2d31] p-3 flex flex-col items-center justify-center aspect-auto sm:aspect-square hover:bg-[#36393f] hover:border-[#4f5157] transition-all duration-200 shadow-sm overflow-hidden"
           >
-            <div class="flex-1 min-w-0 flex flex-col items-center justify-center text-center gap-3">
+            <div class="w-full flex flex-col items-center justify-center text-center gap-2 transition-transform duration-200 sm:group-hover:-translate-y-4">
               <div class="flex justify-center w-full text-gray-400 group-hover:scale-110 transition-transform duration-200">
                 <component
                   :is="getFolderFileIcon(file.original_name)"
-                  class="w-20 h-20 shrink-0"
+                  class="w-16 h-16 shrink-0"
                   :class="getFolderFileIconClass(file.original_name)"
                 />
               </div>
               <div class="w-full">
                 <p class="w-full truncate text-sm text-white font-medium px-1" :title="file.original_name">{{ file.original_name }}</p>
-                <p class="w-full text-xs text-gray-400 mt-1 truncate px-1" :title="`${file.uploader_username || 'Unknown uploader'} • ${formatTime(file.created_at)}`">
+                <p class="w-full text-xs text-gray-400 mt-0.5 truncate px-1" :title="`${file.uploader_username || 'Unknown uploader'} • ${formatTime(file.created_at)}`">
                   {{ formatFileSize(file.size_bytes) }}
                 </p>
               </div>
             </div>
-            <div class="mt-3 grid gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-200" :class="canManageFolderFiles ? 'grid-cols-2' : 'grid-cols-1'">
+            <div class="mt-3 sm:mt-0 sm:absolute sm:bottom-3 sm:left-3 sm:right-3 w-full sm:w-auto grid gap-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-200" :class="canManageFolderFiles ? 'grid-cols-2' : 'grid-cols-1'">
               <button
                 type="button"
                 class="w-full px-2 py-1.5 text-xs font-medium rounded bg-[#404249] hover:bg-[#4e5058] text-white transition-colors"
