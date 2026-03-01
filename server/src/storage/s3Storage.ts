@@ -2,6 +2,7 @@ import {
   DeleteObjectCommand,
   GetObjectCommand,
   HeadBucketCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client
 } from '@aws-sdk/client-s3';
@@ -517,5 +518,36 @@ export const deleteFileFromS3 = async (input: {
     Bucket: resolved.bucket,
     Key: input.key
   }));
+};
+
+export const listS3KeysByPrefix = async (input: {
+  config: S3StorageConfig;
+  prefix: string;
+}): Promise<string[]> => {
+  const normalized = sanitizeConfig(input.config);
+  const resolved = resolveS3ClientConfig(normalized);
+  const client = createS3Client(resolved);
+
+  const keys: string[] = [];
+  let continuationToken: string | undefined;
+
+  do {
+    const response = await client.send(new ListObjectsV2Command({
+      Bucket: resolved.bucket,
+      Prefix: input.prefix,
+      ContinuationToken: continuationToken
+    }));
+
+    for (const item of response.Contents || []) {
+      const key = (item.Key || '').trim();
+      if (key) {
+        keys.push(key);
+      }
+    }
+
+    continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+  } while (continuationToken);
+
+  return keys;
 };
 
