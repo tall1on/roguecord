@@ -2,6 +2,8 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { useWebRtcStore } from './webrtc';
 
+const NEW_NOTIFICATION_SOUND_DEBOUNCE_MS = 1000;
+
 export interface User {
   id: string;
   username: string;
@@ -38,6 +40,19 @@ export interface FolderChannelFile {
   updated_at: string;
 }
 
+export type MessageEmbedType = 'youtube' | 'twitch' | 'link';
+
+export interface MessageEmbed {
+  type: MessageEmbedType;
+  provider: string;
+  url: string;
+  displayUrl: string;
+  title: string;
+  description: string | null;
+  thumbnailUrl: string | null;
+  embedUrl: string | null;
+}
+
 export interface Message {
   id: string;
   channel_id: string;
@@ -45,6 +60,7 @@ export interface Message {
   content: string;
   created_at: string;
   user?: User;
+  embeds?: MessageEmbed[];
 }
 
 interface ChannelUnreadState {
@@ -76,6 +92,7 @@ export interface Server {
   name: string;
   title: string;
   iconPath?: string | null;
+  updatedAt?: string | null;
   rulesChannelId?: string | null;
   welcomeChannelId?: string | null;
   storageType?: 'data_dir' | 's3';
@@ -201,6 +218,7 @@ const getBlockedFolderUploadExtension = (fileName: string) => {
 };
 
 export const useChatStore = defineStore('chat', () => {
+  let lastNewNotificationSoundAt = 0;
   const ws = ref<WebSocket | null>(null);
   const isConnected = ref(false);
   const currentUser = ref<User | null>(null);
@@ -282,7 +300,17 @@ export const useChatStore = defineStore('chat', () => {
     }
   };
 
-  const resolveServerIconUrl = (iconPath?: string | null, wsAddress?: string | null) => {
+  const appendServerIconVersion = (url: string, version?: string | null) => {
+    const normalizedVersion = (version || '').trim();
+    if (!normalizedVersion) {
+      return url;
+    }
+
+    const separator = url.includes('?') ? '&' : '?';
+    return `${url}${separator}v=${encodeURIComponent(normalizedVersion)}`;
+  };
+
+  const resolveServerIconUrl = (iconPath?: string | null, wsAddress?: string | null, version?: string | null) => {
     const path = (iconPath || '').trim();
     if (!path) {
       return null;
@@ -300,7 +328,7 @@ export const useChatStore = defineStore('chat', () => {
           ? getHttpBaseFromWsAddress(savedConnections.value.find((connection) => connection.id === activeConnectionId.value)?.address || '')
           : window.location.origin);
 
-      return `${baseUrl}/server-icons/s3/${encodeURIComponent(key)}`;
+      return appendServerIconVersion(`${baseUrl}/server-icons/s3/${encodeURIComponent(key)}`, version);
     }
 
     if (/^(data:|blob:|https?:\/\/|\/\/)/i.test(path)) {
@@ -309,7 +337,7 @@ export const useChatStore = defineStore('chat', () => {
 
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
     if (wsAddress) {
-      return `${getHttpBaseFromWsAddress(wsAddress)}${normalizedPath}`;
+      return appendServerIconVersion(`${getHttpBaseFromWsAddress(wsAddress)}${normalizedPath}`, version);
     }
 
     const activeConnection = activeConnectionId.value
@@ -320,7 +348,11 @@ export const useChatStore = defineStore('chat', () => {
       ? getHttpBaseFromWsAddress(activeConnection.address)
       : window.location.origin;
 
-    return `${baseUrl}${normalizedPath}`;
+    return appendServerIconVersion(`${baseUrl}${normalizedPath}`, version);
+  };
+
+  const requestServerRefresh = () => {
+    send('get_server');
   };
 
   const getConnectionNameFromAddress = (address: string) => {
@@ -643,7 +675,7 @@ export const useChatStore = defineStore('chat', () => {
       const currentConnection = savedConnections.value.find((c) => c.id === activeConnectionId.value);
       if (currentConnection) {
         const nextTitle = (nextServer.title || '').trim();
-        const resolvedIconUrl = resolveServerIconUrl(nextServer.iconPath || null, currentConnection.address);
+        const resolvedIconUrl = resolveServerIconUrl(nextServer.iconPath || null, currentConnection.address, nextServer.updatedAt || null);
         let hasChanges = false;
 
         if (nextTitle && currentConnection.name !== nextTitle) {
@@ -809,7 +841,14 @@ export const useChatStore = defineStore('chat', () => {
       return;
     }
 
+    const now = Date.now();
+    if (now - lastNewNotificationSoundAt < NEW_NOTIFICATION_SOUND_DEBOUNCE_MS) {
+      return;
+    }
+    lastNewNotificationSoundAt = now;
+
     const audio = new Audio('/wav/new_notification.mp3');
+    audio.volume = 0.7;
     void audio.play().catch((error) => {
       console.debug('[Chat][sound] new message notification playback blocked/failed', error);
     });
@@ -848,6 +887,12 @@ export const useChatStore = defineStore('chat', () => {
       case 'SERVER_SETTINGS_UPDATED':
       case 'server_settings_updated':
       case 'SERVER_UPDATED':
+        if (payload.server) {
+          applyServerState(payload.server);
+        }
+        break;
+
+      case 'server_state':
         if (payload.server) {
           applyServerState(payload.server);
         }
@@ -1426,12 +1471,21 @@ export const useChatStore = defineStore('chat', () => {
     const dataBase64 = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => {
-        const result = typeof reader.result === 'string' ? reader.result : '';
-        const base64 = result.includes(',') ? result.split(',')[1] : result;
-        if (!base64) {
+        const result = reader.result;
+        if (typeof result !== 'string') {
+          console.error('[FOLDER_UPLOAD] FileReader result was not a string', { channel_id, fileName: file.name });
           reject(new Error('Failed to read file'));
           return;
         }
+
+        const commaIndex = result.indexOf(',');
+        if (commaIndex === -1) {
+          console.error('[FOLDER_UPLOAD] Unexpected FileReader result format', { channel_id, fileName: file.name });
+          reject(new Error('Failed to read file'));
+          return;
+        }
+
+        const base64 = result.slice(commaIndex + 1);
         resolve(base64);
       };
       reader.onerror = () => reject(new Error('Failed to read file'));
@@ -1512,6 +1566,7 @@ export const useChatStore = defineStore('chat', () => {
     updateServerSettings,
     testServerStorageSettings,
     requestServerStorageSettings,
+    requestServerRefresh,
     clearError,
     sendMessage,
     loadOlderMessages,

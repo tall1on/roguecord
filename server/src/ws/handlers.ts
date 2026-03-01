@@ -47,10 +47,12 @@ import {
   buildS3StorageKey,
   deleteFileFromS3,
   downloadFileFromS3,
+  listS3KeysByPrefix,
   type S3StorageConfig,
   uploadFileToS3,
   validateS3Configuration
 } from '../storage/s3Storage';
+import { withMessageEmbeds } from '../messages/embeds';
 
 const filesRootDir = path.join(dataDir, 'files');
 const serverIconsRootDir = path.join(dataDir, 'server-icons');
@@ -126,6 +128,20 @@ const buildServerIconPathForClient = (serverId: string, storageName: string) => 
   const safeServerId = sanitizeServerIdForPath(serverId);
   const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
   return `/server-icons/${safeServerId}/${safeStorageName}`;
+};
+
+const buildServerIconStorageName = (extension: string) => {
+  const safeExtension = (extension || '').trim().replace(/[^a-z0-9]/gi, '').toLowerCase();
+  if (!safeExtension) {
+    throw new Error('Invalid icon extension');
+  }
+  return `icon.${safeExtension}`;
+};
+
+const buildS3ServerIconPrefix = (prefix: string | null | undefined, serverId: string) => {
+  const marker = '__server_icon_marker__';
+  const keyWithMarker = buildS3StorageKey(prefix, `server-icons/${serverId}`, marker);
+  return keyWithMarker.slice(0, -marker.length);
 };
 
 const isSafeS3IconKeyForServer = (serverId: string, key: string) => {
@@ -215,6 +231,54 @@ const cleanupServerIconReference = async (serverId: string, iconPath: string | n
   }
 };
 
+const cleanupStaleS3ServerIcons = async (input: {
+  serverId: string;
+  s3Config: S3StorageConfig;
+  activeKey: string | null;
+}) => {
+  const serverIconPrefix = buildS3ServerIconPrefix(input.s3Config.prefix, input.serverId);
+  const existingKeys = await listS3KeysByPrefix({
+    config: input.s3Config,
+    prefix: serverIconPrefix
+  });
+
+  for (const existingKey of existingKeys) {
+    if (input.activeKey && existingKey === input.activeKey) {
+      continue;
+    }
+    if (!isSafeS3IconKeyForServer(input.serverId, existingKey)) {
+      continue;
+    }
+
+    const currentServer = await getServer();
+    if (currentServer?.id === input.serverId && currentServer.iconPath === `s3:${existingKey}`) {
+      continue;
+    }
+
+    await deleteFileFromS3({
+      config: input.s3Config,
+      key: existingKey
+    });
+  }
+};
+
+const cleanupStaleLocalServerIcons = (serverId: string, activeStorageName: string) => {
+  const activePath = getSafeServerIconPath(serverId, activeStorageName);
+  const iconDir = path.dirname(activePath);
+  const files = fs.readdirSync(iconDir);
+  for (const fileName of files) {
+    const safeName = path.basename(fileName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
+    if (!safeName || safeName !== fileName || safeName === activeStorageName) {
+      continue;
+    }
+    try {
+      fs.unlinkSync(path.join(iconDir, safeName));
+    } catch {
+      // keep stale local icon when cleanup fails
+    }
+  }
+};
+
 const storeServerIcon = async (serverId: string, iconDataUrl: string): Promise<string> => {
   const parsed = parseServerIconDataUrl(iconDataUrl);
   if (!parsed) {
@@ -226,7 +290,7 @@ const storeServerIcon = async (serverId: string, iconDataUrl: string): Promise<s
   }
 
   const runtimeStorage = await getStorageRuntimeConfig();
-  const storageName = `icon-${Date.now()}-${crypto.randomUUID()}.${parsed.extension}`;
+  const storageName = buildServerIconStorageName(parsed.extension);
 
   if (runtimeStorage.storageType === 's3') {
     if (!runtimeStorage.s3Config) {
@@ -245,6 +309,7 @@ const storeServerIcon = async (serverId: string, iconDataUrl: string): Promise<s
 
   const targetPath = getSafeServerIconPath(serverId, storageName);
   fs.writeFileSync(targetPath, parsed.buffer);
+  cleanupStaleLocalServerIcons(serverId, storageName);
   return buildServerIconPathForClient(serverId, storageName);
 };
 
@@ -573,6 +638,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'get_server_storage_settings':
         await handleGetServerStorageSettings(client);
         break;
+      case 'get_server':
+        await handleGetServer(client);
+        break;
       case 'test_server_storage_s3':
         await handleTestServerStorageS3(client, payload);
         break;
@@ -756,7 +824,7 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
             const systemUser = await getOrCreateSystemUser();
             const welcomeContent = `Welcome ${user.username} to the server!`;
             const message = await createMessage(server.welcomeChannelId, systemUser.id, welcomeContent);
-            const messageWithUser = { ...message, user: systemUser };
+            const messageWithUser = withMessageEmbeds({ ...message, user: systemUser });
             
             connectionManager.broadcastToAuthenticated({
               type: 'new_message',
@@ -1035,10 +1103,10 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     messageCreatedAt: message.created_at
   });
   
-  const messageWithUser = {
+  const messageWithUser = withMessageEmbeds({
     ...message,
     user
-  };
+  });
 
   // Broadcast to all authenticated users (for simplicity, as requested)
   // A better approach would be to broadcast only to users in the server
@@ -1074,9 +1142,9 @@ const handleFolderUploadFile = async (
   const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
   const originalName = sanitizeFileName(typeof payload?.file_name === 'string' ? payload.file_name : '');
   const mimeType = typeof payload?.mime_type === 'string' && payload.mime_type.trim() ? payload.mime_type.trim() : null;
-  const dataBase64 = typeof payload?.data_base64 === 'string' ? payload.data_base64 : '';
+  const dataBase64 = payload?.data_base64;
 
-  if (!channelId || !dataBase64) {
+  if (!channelId || typeof dataBase64 !== 'string') {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid upload payload' } }));
     return;
   }
@@ -1101,10 +1169,6 @@ const handleFolderUploadFile = async (
     return;
   }
 
-  if (!fileBuffer.length) {
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Uploaded file is empty' } }));
-    return;
-  }
   if (fileBuffer.length > MAX_FOLDER_FILE_SIZE_BYTES) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Uploaded file exceeds size limit (25 MB)' } }));
     return;
@@ -1771,6 +1835,24 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
       await cleanupServerIconReference(serverId, previousIconPath);
     }
 
+    if (typeof nextIconPath !== 'undefined') {
+      const persistedS3Config = await getPersistedS3Config();
+      if (persistedS3Config) {
+        const activeKey = nextIconPath && nextIconPath.startsWith('s3:')
+          ? nextIconPath.slice('s3:'.length).trim()
+          : null;
+        try {
+          await cleanupStaleS3ServerIcons({
+            serverId,
+            s3Config: persistedS3Config,
+            activeKey: activeKey || null
+          });
+        } catch (error) {
+          console.warn('[WS DEBUG] Failed cleaning up stale S3 server icon objects', { serverId, error });
+        }
+      }
+    }
+
     const updatedServer = await getServer();
     const updatedStorageSettings = await getServerStorageSettings();
     
@@ -1865,6 +1947,21 @@ const handleGetServerStorageSettings = async (client: ClientConnection) => {
   } catch (error) {
     console.error('[WS DEBUG] Failed to read storage settings:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to read storage settings' } }));
+  }
+};
+
+const handleGetServer = async (client: ClientConnection) => {
+  if (!client.userId) return;
+
+  try {
+    const server = await getServer();
+    client.ws.send(JSON.stringify({
+      type: 'server_state',
+      payload: { server }
+    }));
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to read server state:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to read server state' } }));
   }
 };
 
@@ -1973,7 +2070,7 @@ const handleJoinServer = async (client: ClientConnection, payload: { serverId: s
   if (server.welcomeChannelId) {
     const welcomeContent = `Just joined the server!`;
     const message = await createMessage(server.welcomeChannelId, user.id, welcomeContent);
-    const messageWithUser = { ...message, user };
+    const messageWithUser = withMessageEmbeds({ ...message, user });
     
     connectionManager.broadcastToAuthenticated({
       type: 'NEW_MESSAGE',
@@ -2039,6 +2136,16 @@ const canModerate = (role: string): boolean => {
   return role === 'admin' || role === 'owner' || role === 'mod' || role === 'moderator';
 };
 
+const isProtectedSystemOrRssBotUser = (user: { role?: string | null; public_key?: string | null; username?: string | null }): boolean => {
+  const role = (user.role || '').trim().toLowerCase();
+  const publicKey = (user.public_key || '').trim();
+  const username = (user.username || '').trim();
+
+  if (role === 'system') return true;
+  if (publicKey === '__system__' || publicKey === '__rss_bot__') return true;
+  return role === 'bot' && username === 'RSS Bot';
+};
+
 const handleKickMember = async (
   client: ClientConnection,
   payload: {
@@ -2068,6 +2175,11 @@ const handleKickMember = async (
   const targetUser = await getUserById(targetUserId);
   if (!targetUser) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Target user not found' } }));
+    return;
+  }
+
+  if (isProtectedSystemOrRssBotUser(targetUser)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'System and RSS bot users cannot be kicked' } }));
     return;
   }
 
@@ -2172,6 +2284,11 @@ const handleBanMember = async (
   const targetUser = await getUserById(targetUserId);
   if (!targetUser) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Target user not found' } }));
+    return;
+  }
+
+  if (isProtectedSystemOrRssBotUser(targetUser)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'System and RSS bot users cannot be banned' } }));
     return;
   }
 

@@ -8,12 +8,15 @@ import {
   reserveRssItem,
   type Channel
 } from './models';
+import { withMessageEmbeds } from './messages/embeds';
+import { buildRssContentFingerprint, normalizeRssItemUrl } from './rssDedup';
 import { connectionManager } from './ws/connectionManager';
 
 type ParsedFeedItem = {
   key: string;
   title: string;
   link: string | null;
+  normalizedLink: string | null;
   publishedAt: number;
 };
 
@@ -67,6 +70,7 @@ const parseRssItems = (xml: string): ParsedFeedItem[] => {
         key,
         title,
         link,
+        normalizedLink: normalizeRssItemUrl(link),
         publishedAt: toTimestamp(pubDate)
       };
     })
@@ -87,6 +91,7 @@ const parseAtomItems = (xml: string): ParsedFeedItem[] => {
         key,
         title,
         link,
+        normalizedLink: normalizeRssItemUrl(link),
         publishedAt: toTimestamp(updated)
       };
     })
@@ -112,7 +117,11 @@ const formatMessageContent = (item: ParsedFeedItem): string => {
 };
 
 const buildContentFingerprint = (item: ParsedFeedItem): string => {
-  return buildItemKey([item.title, item.link]);
+  return buildRssContentFingerprint({
+    normalizedUrl: item.normalizedLink,
+    title: item.title,
+    publishedAt: item.publishedAt
+  });
 };
 
 const pollChannelFeed = async (channel: Channel) => {
@@ -186,10 +195,10 @@ const pollChannelFeed = async (channel: Channel) => {
       connectionManager.broadcastToAuthenticated({
         type: 'new_message',
         payload: {
-          message: {
+          message: withMessageEmbeds({
             ...message,
             user: rssBotUser
-          }
+          })
         }
       });
     } catch (error) {

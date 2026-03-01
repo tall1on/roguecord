@@ -1,4 +1,4 @@
-import sqlite3 from 'sqlite3';
+﻿import sqlite3 from 'sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
@@ -54,6 +54,7 @@ function initializeDatabase() {
         name TEXT NOT NULL,
         title TEXT NOT NULL DEFAULT 'My Server',
         icon_path TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         rules_channel_id TEXT,
         welcome_channel_id TEXT,
         storage_type TEXT NOT NULL DEFAULT 'data_dir',
@@ -497,6 +498,7 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
 
     const hasTitle = columns.some((column) => column.name === 'title');
     const hasIconPath = columns.some((column) => column.name === 'icon_path');
+    const hasUpdatedAt = columns.some((column) => column.name === 'updated_at');
     const hasRulesChannelId = columns.some((column) => column.name === 'rules_channel_id');
     const hasWelcomeChannelId = columns.some((column) => column.name === 'welcome_channel_id');
     const hasStorageType = columns.some((column) => column.name === 'storage_type');
@@ -513,6 +515,7 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     const pendingAlterStatements: string[] = [];
     if (!hasTitle) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN title TEXT NOT NULL DEFAULT 'My Server'");
     if (!hasIconPath) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN icon_path TEXT');
+    if (!hasUpdatedAt) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN updated_at DATETIME');
     if (!hasRulesChannelId) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN rules_channel_id TEXT');
     if (!hasWelcomeChannelId) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN welcome_channel_id TEXT');
     if (!hasStorageType) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN storage_type TEXT NOT NULL DEFAULT 'data_dir'");
@@ -531,6 +534,7 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
           UPDATE servers
           SET
             title = COALESCE(NULLIF(title, ''), name, 'My Server'),
+            updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP),
             storage_updated_at = COALESCE(storage_updated_at, CURRENT_TIMESTAMP)
         `,
         (updateErr) => {
@@ -559,6 +563,7 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                 name TEXT NOT NULL,
                 title TEXT NOT NULL DEFAULT 'My Server',
                 icon_path TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 rules_channel_id TEXT,
                 welcome_channel_id TEXT,
                 storage_type TEXT NOT NULL DEFAULT 'data_dir',
@@ -585,6 +590,7 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                     name,
                     title,
                     icon_path,
+                    updated_at,
                     rules_channel_id,
                     welcome_channel_id,
                     storage_type,
@@ -602,6 +608,7 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                     name,
                     title,
                     icon_path,
+                    COALESCE(updated_at, CURRENT_TIMESTAMP),
                     rules_channel_id,
                     welcome_channel_id,
                     storage_type,
@@ -685,26 +692,201 @@ function migrateRssChannelItemsForContentDedupe(done: (error?: Error) => void) {
 
     const hasContentFingerprint = columns.some((column) => column.name === 'content_fingerprint');
 
+    const normalizeUrlForRssDedupe = (rawUrl: string | null | undefined): string | null => {
+      const value = (rawUrl || '').trim();
+      if (!value) return null;
+
+      try {
+        const url = new URL(value);
+        url.hash = '';
+        url.hostname = url.hostname.toLowerCase();
+
+        const protocol = url.protocol.toLowerCase();
+        if ((protocol === 'https:' && url.port === '443') || (protocol === 'http:' && url.port === '80')) {
+          url.port = '';
+        }
+
+        const trackingParams = new Set([
+          'fbclid',
+          'gclid',
+          'dclid',
+          'mc_cid',
+          'mc_eid',
+          '_hsenc',
+          '_hsmi',
+          'mkt_tok',
+          'igshid'
+        ]);
+
+        const keptParams = [...url.searchParams.entries()]
+          .filter(([key]) => {
+            const lowered = key.toLowerCase();
+            if (lowered.startsWith('utm_')) return false;
+            return !trackingParams.has(lowered);
+          })
+          .sort((a, b) => {
+            if (a[0] === b[0]) return a[1].localeCompare(b[1]);
+            return a[0].localeCompare(b[0]);
+          });
+
+        url.search = '';
+        for (const [key, paramValue] of keptParams) {
+          url.searchParams.append(key, paramValue);
+        }
+
+        if (url.pathname.length > 1) {
+          url.pathname = url.pathname.replace(/\/+$/g, '') || '/';
+        }
+
+        return url.toString();
+      } catch {
+        return value;
+      }
+    };
+
+    const extractNormalizedUrlFromMessage = (content: string | null | undefined): string | null => {
+      const value = (content || '').trim();
+      if (!value) return null;
+
+      const lines = value
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+      for (let i = lines.length - 1; i >= 0; i -= 1) {
+        const maybeUrl = lines[i];
+        if (!/^https?:\/\//i.test(maybeUrl)) continue;
+        return normalizeUrlForRssDedupe(maybeUrl);
+      }
+
+      return null;
+    };
+
+    const makeUrlFingerprint = (normalizedUrl: string): string => `url:${normalizedUrl}`;
+
     const ensureUniqueIndex = () => {
-      db.run(
+      db.run('DROP INDEX IF EXISTS idx_rss_channel_items_channel_content_fingerprint', (dropErr) => {
+        if (dropErr) {
+          done(dropErr);
+          return;
+        }
+
+        db.run(
+          `
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_channel_items_channel_content_fingerprint
+          ON rss_channel_items(channel_id, content_fingerprint)
+          WHERE content_fingerprint IS NOT NULL
+          `,
+          (indexErr) => {
+            if (indexErr) {
+              done(indexErr);
+              return;
+            }
+
+            done();
+          }
+        );
+      });
+    };
+
+    const backfillUrlFingerprints = () => {
+      db.all(
         `
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_channel_items_channel_content_fingerprint
-        ON rss_channel_items(channel_id, content_fingerprint)
-        WHERE content_fingerprint IS NOT NULL
+        SELECT
+          r.rowid AS rowid,
+          r.channel_id,
+          m.content AS message_content
+        FROM rss_channel_items r
+        LEFT JOIN messages m ON m.id = r.message_id
+        ORDER BY r.created_at ASC, r.rowid ASC
         `,
-        (indexErr) => {
-          if (indexErr) {
-            done(indexErr);
+        (rowsErr, rows: Array<{ rowid: number; channel_id: string; message_content: string | null }>) => {
+          if (rowsErr) {
+            done(rowsErr);
             return;
           }
 
-          done();
+          const updates: Array<{ rowid: number; fingerprint: string }> = [];
+          for (const row of rows || []) {
+            const normalizedUrl = extractNormalizedUrlFromMessage(row.message_content);
+            if (!normalizedUrl) continue;
+            updates.push({ rowid: row.rowid, fingerprint: makeUrlFingerprint(normalizedUrl) });
+          }
+
+          const applyUpdate = (index: number) => {
+            if (index >= updates.length) {
+              removeDuplicateUrlRows();
+              return;
+            }
+
+            const current = updates[index];
+            db.run(
+              'UPDATE rss_channel_items SET content_fingerprint = ? WHERE rowid = ?',
+              [current.fingerprint, current.rowid],
+              (updateErr) => {
+                if (updateErr) {
+                  done(updateErr);
+                  return;
+                }
+
+                applyUpdate(index + 1);
+              }
+            );
+          };
+
+          const removeDuplicateUrlRows = () => {
+            db.all(
+              `
+              SELECT rowid, channel_id, content_fingerprint
+              FROM rss_channel_items
+              WHERE content_fingerprint LIKE 'url:%'
+              ORDER BY created_at ASC, rowid ASC
+              `,
+              (dupeErr, dupeRows: Array<{ rowid: number; channel_id: string; content_fingerprint: string }>) => {
+                if (dupeErr) {
+                  done(dupeErr);
+                  return;
+                }
+
+                const seen = new Set<string>();
+                const toDelete: number[] = [];
+                for (const row of dupeRows || []) {
+                  const identity = `${row.channel_id}|${row.content_fingerprint}`;
+                  if (seen.has(identity)) {
+                    toDelete.push(row.rowid);
+                    continue;
+                  }
+                  seen.add(identity);
+                }
+
+                const applyDelete = (index: number) => {
+                  if (index >= toDelete.length) {
+                    ensureUniqueIndex();
+                    return;
+                  }
+
+                  db.run('DELETE FROM rss_channel_items WHERE rowid = ?', [toDelete[index]], (deleteErr) => {
+                    if (deleteErr) {
+                      done(deleteErr);
+                      return;
+                    }
+
+                    applyDelete(index + 1);
+                  });
+                };
+
+                applyDelete(0);
+              }
+            );
+          };
+
+          applyUpdate(0);
         }
       );
     };
 
     if (hasContentFingerprint) {
-      ensureUniqueIndex();
+      backfillUrlFingerprints();
       return;
     }
 
@@ -714,7 +896,7 @@ function migrateRssChannelItemsForContentDedupe(done: (error?: Error) => void) {
         return;
       }
 
-      ensureUniqueIndex();
+      backfillUrlFingerprints();
     });
   });
 }
