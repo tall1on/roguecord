@@ -650,6 +650,19 @@ const getMessageDayKey = (dateString: string) => {
   return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
 }
 
+const resolveMessageAvatarUrl = (message: Message) => {
+  const user = message.user
+  if (!user) {
+    return null
+  }
+
+  if (user.role === 'system') {
+    return chatStore.resolveServerIconUrl(chatStore.server?.iconPath || null, undefined, chatStore.server?.updatedAt || null) || user.avatar_url
+  }
+
+  return user.avatar_url
+}
+
 type RenderEntry =
   | { type: 'divider'; key: string; label: string }
   | { type: 'message'; key: string; message: Message }
@@ -807,8 +820,9 @@ watch(
             v-else
             class="flex items-start gap-4 hover:bg-[#2e3035] p-1 -mx-1 rounded transition-colors"
           >
-            <div class="w-10 h-10 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mt-0.5">
-              {{ entry.message.user?.username.charAt(0).toUpperCase() || '?' }}
+            <div class="w-10 h-10 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mt-0.5 overflow-hidden">
+              <img v-if="resolveMessageAvatarUrl(entry.message)" :src="resolveMessageAvatarUrl(entry.message) || ''" alt="Avatar" class="w-full h-full object-cover" />
+              <span v-else>{{ entry.message.user?.username.charAt(0).toUpperCase() || '?' }}</span>
             </div>
             <div>
               <div class="flex items-baseline gap-2">
