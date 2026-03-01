@@ -40,6 +40,19 @@ export interface FolderChannelFile {
   updated_at: string;
 }
 
+export type MessageEmbedType = 'youtube' | 'twitch' | 'link';
+
+export interface MessageEmbed {
+  type: MessageEmbedType;
+  provider: string;
+  url: string;
+  displayUrl: string;
+  title: string;
+  description: string | null;
+  thumbnailUrl: string | null;
+  embedUrl: string | null;
+}
+
 export interface Message {
   id: string;
   channel_id: string;
@@ -47,6 +60,7 @@ export interface Message {
   content: string;
   created_at: string;
   user?: User;
+  embeds?: MessageEmbed[];
 }
 
 interface ChannelUnreadState {

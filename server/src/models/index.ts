@@ -1,5 +1,6 @@
 import { db } from '../db';
 import crypto from 'node:crypto';
+import { type MessageWithUserAndEmbeds, withMessageEmbeds } from '../messages/embeds';
 
 // Helper functions to wrap sqlite3 in Promises
 export const dbRun = (sql: string, params: any[] = []): Promise<void> => {
@@ -545,13 +546,17 @@ export interface MessageWithUser extends Message {
   user: User;
 }
 
+export interface MessageWithUserAndEmbedData extends MessageWithUser {
+  embeds: MessageWithUserAndEmbeds['embeds'];
+}
+
 export interface MessagePageCursor {
   createdAt: string;
   id: string;
 }
 
 export interface MessagePage {
-  messages: MessageWithUser[];
+  messages: MessageWithUserAndEmbedData[];
   hasMore: boolean;
 }
 
@@ -938,11 +943,11 @@ export const getChannelMessages = async (
   const pageMessages = hasMore ? messages.slice(0, normalizedLimit) : messages;
   
   // Fetch users for messages (could be done with a JOIN, but this is fine for now)
-  const messagesWithUsers: MessageWithUser[] = [];
+  const messagesWithUsers: MessageWithUserAndEmbedData[] = [];
   for (const msg of pageMessages) {
     const user = await getUserById(msg.user_id);
     if (user) {
-      messagesWithUsers.push({ ...msg, user });
+      messagesWithUsers.push(withMessageEmbeds({ ...msg, user }));
     }
   }
 

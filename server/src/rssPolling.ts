@@ -8,6 +8,7 @@ import {
   reserveRssItem,
   type Channel
 } from './models';
+import { withMessageEmbeds } from './messages/embeds';
 import { buildRssContentFingerprint, normalizeRssItemUrl } from './rssDedup';
 import { connectionManager } from './ws/connectionManager';
 
@@ -194,10 +195,10 @@ const pollChannelFeed = async (channel: Channel) => {
       connectionManager.broadcastToAuthenticated({
         type: 'new_message',
         payload: {
-          message: {
+          message: withMessageEmbeds({
             ...message,
             user: rssBotUser
-          }
+          })
         }
       });
     } catch (error) {
