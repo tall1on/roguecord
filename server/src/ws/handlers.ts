@@ -47,6 +47,7 @@ import {
   buildS3StorageKey,
   deleteFileFromS3,
   downloadFileFromS3,
+  listS3KeysByPrefix,
   type S3StorageConfig,
   uploadFileToS3,
   validateS3Configuration
@@ -126,6 +127,20 @@ const buildServerIconPathForClient = (serverId: string, storageName: string) => 
   const safeServerId = sanitizeServerIdForPath(serverId);
   const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
   return `/server-icons/${safeServerId}/${safeStorageName}`;
+};
+
+const buildServerIconStorageName = (extension: string) => {
+  const safeExtension = (extension || '').trim().replace(/[^a-z0-9]/gi, '').toLowerCase();
+  if (!safeExtension) {
+    throw new Error('Invalid icon extension');
+  }
+  return `icon.${safeExtension}`;
+};
+
+const buildS3ServerIconPrefix = (prefix: string | null | undefined, serverId: string) => {
+  const marker = '__server_icon_marker__';
+  const keyWithMarker = buildS3StorageKey(prefix, `server-icons/${serverId}`, marker);
+  return keyWithMarker.slice(0, -marker.length);
 };
 
 const isSafeS3IconKeyForServer = (serverId: string, key: string) => {
@@ -215,6 +230,54 @@ const cleanupServerIconReference = async (serverId: string, iconPath: string | n
   }
 };
 
+const cleanupStaleS3ServerIcons = async (input: {
+  serverId: string;
+  s3Config: S3StorageConfig;
+  activeKey: string | null;
+}) => {
+  const serverIconPrefix = buildS3ServerIconPrefix(input.s3Config.prefix, input.serverId);
+  const existingKeys = await listS3KeysByPrefix({
+    config: input.s3Config,
+    prefix: serverIconPrefix
+  });
+
+  for (const existingKey of existingKeys) {
+    if (input.activeKey && existingKey === input.activeKey) {
+      continue;
+    }
+    if (!isSafeS3IconKeyForServer(input.serverId, existingKey)) {
+      continue;
+    }
+
+    const currentServer = await getServer();
+    if (currentServer?.id === input.serverId && currentServer.iconPath === `s3:${existingKey}`) {
+      continue;
+    }
+
+    await deleteFileFromS3({
+      config: input.s3Config,
+      key: existingKey
+    });
+  }
+};
+
+const cleanupStaleLocalServerIcons = (serverId: string, activeStorageName: string) => {
+  const activePath = getSafeServerIconPath(serverId, activeStorageName);
+  const iconDir = path.dirname(activePath);
+  const files = fs.readdirSync(iconDir);
+  for (const fileName of files) {
+    const safeName = path.basename(fileName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
+    if (!safeName || safeName !== fileName || safeName === activeStorageName) {
+      continue;
+    }
+    try {
+      fs.unlinkSync(path.join(iconDir, safeName));
+    } catch {
+      // keep stale local icon when cleanup fails
+    }
+  }
+};
+
 const storeServerIcon = async (serverId: string, iconDataUrl: string): Promise<string> => {
   const parsed = parseServerIconDataUrl(iconDataUrl);
   if (!parsed) {
@@ -226,7 +289,7 @@ const storeServerIcon = async (serverId: string, iconDataUrl: string): Promise<s
   }
 
   const runtimeStorage = await getStorageRuntimeConfig();
-  const storageName = `icon-${Date.now()}-${crypto.randomUUID()}.${parsed.extension}`;
+  const storageName = buildServerIconStorageName(parsed.extension);
 
   if (runtimeStorage.storageType === 's3') {
     if (!runtimeStorage.s3Config) {
@@ -245,6 +308,7 @@ const storeServerIcon = async (serverId: string, iconDataUrl: string): Promise<s
 
   const targetPath = getSafeServerIconPath(serverId, storageName);
   fs.writeFileSync(targetPath, parsed.buffer);
+  cleanupStaleLocalServerIcons(serverId, storageName);
   return buildServerIconPathForClient(serverId, storageName);
 };
 
@@ -1769,6 +1833,24 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
 
     if (typeof nextIconPath !== 'undefined' && previousIconPath && previousIconPath !== nextIconPath) {
       await cleanupServerIconReference(serverId, previousIconPath);
+    }
+
+    if (typeof nextIconPath !== 'undefined') {
+      const persistedS3Config = await getPersistedS3Config();
+      if (persistedS3Config) {
+        const activeKey = nextIconPath && nextIconPath.startsWith('s3:')
+          ? nextIconPath.slice('s3:'.length).trim()
+          : null;
+        try {
+          await cleanupStaleS3ServerIcons({
+            serverId,
+            s3Config: persistedS3Config,
+            activeKey: activeKey || null
+          });
+        } catch (error) {
+          console.warn('[WS DEBUG] Failed cleaning up stale S3 server icon objects', { serverId, error });
+        }
+      }
     }
 
     const updatedServer = await getServer();
