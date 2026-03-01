@@ -52,6 +52,7 @@ import {
   uploadFileToS3,
   validateS3Configuration
 } from '../storage/s3Storage';
+import { withMessageEmbeds } from '../messages/embeds';
 
 const filesRootDir = path.join(dataDir, 'files');
 const serverIconsRootDir = path.join(dataDir, 'server-icons');
@@ -823,7 +824,7 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
             const systemUser = await getOrCreateSystemUser();
             const welcomeContent = `Welcome ${user.username} to the server!`;
             const message = await createMessage(server.welcomeChannelId, systemUser.id, welcomeContent);
-            const messageWithUser = { ...message, user: systemUser };
+            const messageWithUser = withMessageEmbeds({ ...message, user: systemUser });
             
             connectionManager.broadcastToAuthenticated({
               type: 'new_message',
@@ -1102,10 +1103,10 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     messageCreatedAt: message.created_at
   });
   
-  const messageWithUser = {
+  const messageWithUser = withMessageEmbeds({
     ...message,
     user
-  };
+  });
 
   // Broadcast to all authenticated users (for simplicity, as requested)
   // A better approach would be to broadcast only to users in the server
@@ -2069,7 +2070,7 @@ const handleJoinServer = async (client: ClientConnection, payload: { serverId: s
   if (server.welcomeChannelId) {
     const welcomeContent = `Just joined the server!`;
     const message = await createMessage(server.welcomeChannelId, user.id, welcomeContent);
-    const messageWithUser = { ...message, user };
+    const messageWithUser = withMessageEmbeds({ ...message, user });
     
     connectionManager.broadcastToAuthenticated({
       type: 'NEW_MESSAGE',
