@@ -2135,6 +2135,16 @@ const canModerate = (role: string): boolean => {
   return role === 'admin' || role === 'owner' || role === 'mod' || role === 'moderator';
 };
 
+const isProtectedSystemOrRssBotUser = (user: { role?: string | null; public_key?: string | null; username?: string | null }): boolean => {
+  const role = (user.role || '').trim().toLowerCase();
+  const publicKey = (user.public_key || '').trim();
+  const username = (user.username || '').trim();
+
+  if (role === 'system') return true;
+  if (publicKey === '__system__' || publicKey === '__rss_bot__') return true;
+  return role === 'bot' && username === 'RSS Bot';
+};
+
 const handleKickMember = async (
   client: ClientConnection,
   payload: {
@@ -2164,6 +2174,11 @@ const handleKickMember = async (
   const targetUser = await getUserById(targetUserId);
   if (!targetUser) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Target user not found' } }));
+    return;
+  }
+
+  if (isProtectedSystemOrRssBotUser(targetUser)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'System and RSS bot users cannot be kicked' } }));
     return;
   }
 
@@ -2268,6 +2283,11 @@ const handleBanMember = async (
   const targetUser = await getUserById(targetUserId);
   if (!targetUser) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Target user not found' } }));
+    return;
+  }
+
+  if (isProtectedSystemOrRssBotUser(targetUser)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'System and RSS bot users cannot be banned' } }));
     return;
   }
 
