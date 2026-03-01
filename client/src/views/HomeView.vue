@@ -1028,13 +1028,13 @@ watch(
           </div>
         </div>
 
-        <div v-else class="grid gap-4 grid-cols-[repeat(auto-fill,minmax(140px,1fr))]">
+        <div v-else class="grid gap-4 grid-cols-[repeat(auto-fill,minmax(160px,1fr))]">
           <div
             v-for="file in activeFolderFiles"
             :key="file.id"
             class="group relative rounded-xl border border-[#3f4147] bg-[#2b2d31] p-3 flex flex-col items-center justify-center aspect-auto sm:aspect-square hover:bg-[#36393f] hover:border-[#4f5157] transition-all duration-200 shadow-sm overflow-hidden"
           >
-            <div class="w-full flex flex-col items-center justify-center text-center gap-2 transition-transform duration-200 sm:group-hover:-translate-y-4">
+            <div class="w-full flex flex-col items-center justify-center text-center gap-2 transition-transform duration-200">
               <div class="flex justify-center w-full text-gray-400 group-hover:scale-110 transition-transform duration-200">
                 <component
                   :is="getFolderFileIcon(file.original_name)"
@@ -1049,10 +1049,10 @@ watch(
                 </p>
               </div>
             </div>
-            <div class="mt-3 sm:mt-0 sm:absolute sm:bottom-3 sm:left-3 sm:right-3 w-full sm:w-auto grid gap-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-200" :class="canManageFolderFiles ? 'grid-cols-2' : 'grid-cols-1'">
+            <div class="mt-3 sm:mt-0 sm:absolute sm:bottom-0 sm:left-0 sm:right-0 sm:p-3 sm:pt-8 w-full sm:w-auto grid gap-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-200 sm:bg-gradient-to-t sm:from-[#36393f] sm:from-60% sm:to-transparent" :class="canManageFolderFiles ? 'grid-cols-2' : 'grid-cols-1'">
               <button
                 type="button"
-                class="w-full px-2 py-1.5 text-xs font-medium rounded bg-[#404249] hover:bg-[#4e5058] text-white transition-colors"
+                class="w-full px-2 py-1.5 text-xs font-medium rounded bg-[#404249] hover:bg-[#4e5058] text-white transition-colors shadow-sm"
                 @click="requestFolderFileDownload(file.id)"
                 title="Download"
               >
@@ -1061,7 +1061,7 @@ watch(
               <button
                 v-if="canManageFolderFiles"
                 type="button"
-                class="w-full px-2 py-1.5 text-xs font-medium rounded bg-[#DA373C]/80 hover:bg-[#DA373C] text-white transition-colors"
+                class="w-full px-2 py-1.5 text-xs font-medium rounded bg-[#DA373C]/80 hover:bg-[#DA373C] text-white transition-colors shadow-sm"
                 @click="requestFolderFileDelete(file.id, file.original_name)"
                 title="Delete"
               >
