@@ -1,5 +1,6 @@
 import { db } from '../db';
 import crypto from 'node:crypto';
+import { type MessageWithUserAndEmbeds, withMessageEmbeds } from '../messages/embeds';
 
 // Helper functions to wrap sqlite3 in Promises
 export const dbRun = (sql: string, params: any[] = []): Promise<void> => {
@@ -58,6 +59,7 @@ export interface Server {
   name: string;
   title: string;
   iconPath: string | null;
+  updatedAt?: string | null;
   rulesChannelId?: string;
   welcomeChannelId?: string;
   storageType: 'data_dir' | 's3';
@@ -87,6 +89,7 @@ const mapServerRow = (row: any): Server => ({
   name: row.name,
   title: row.title || row.name,
   iconPath: row.icon_path || null,
+  updatedAt: row.updated_at || null,
   rulesChannelId: row.rules_channel_id,
   welcomeChannelId: row.welcome_channel_id,
   storageType: row.storage_type === 's3' ? 's3' : 'data_dir',
@@ -132,12 +135,12 @@ export const updateServerSettings = async (
   iconPath?: string | null
 ): Promise<void> => {
   if (typeof iconPath === 'undefined') {
-    await dbRun('UPDATE servers SET title = ?, rules_channel_id = ?, welcome_channel_id = ? WHERE id = ?', [title, rulesChannelId, welcomeChannelId, id]);
+    await dbRun('UPDATE servers SET title = ?, rules_channel_id = ?, welcome_channel_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [title, rulesChannelId, welcomeChannelId, id]);
     return;
   }
 
   await dbRun(
-    'UPDATE servers SET title = ?, rules_channel_id = ?, welcome_channel_id = ?, icon_path = ? WHERE id = ?',
+    'UPDATE servers SET title = ?, rules_channel_id = ?, welcome_channel_id = ?, icon_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
     [title, rulesChannelId, welcomeChannelId, iconPath, id]
   );
 };
@@ -543,13 +546,17 @@ export interface MessageWithUser extends Message {
   user: User;
 }
 
+export interface MessageWithUserAndEmbedData extends MessageWithUser {
+  embeds: MessageWithUserAndEmbeds['embeds'];
+}
+
 export interface MessagePageCursor {
   createdAt: string;
   id: string;
 }
 
 export interface MessagePage {
-  messages: MessageWithUser[];
+  messages: MessageWithUserAndEmbedData[];
   hasMore: boolean;
 }
 
@@ -936,11 +943,11 @@ export const getChannelMessages = async (
   const pageMessages = hasMore ? messages.slice(0, normalizedLimit) : messages;
   
   // Fetch users for messages (could be done with a JOIN, but this is fine for now)
-  const messagesWithUsers: MessageWithUser[] = [];
+  const messagesWithUsers: MessageWithUserAndEmbedData[] = [];
   for (const msg of pageMessages) {
     const user = await getUserById(msg.user_id);
     if (user) {
-      messagesWithUsers.push({ ...msg, user });
+      messagesWithUsers.push(withMessageEmbeds({ ...msg, user }));
     }
   }
 

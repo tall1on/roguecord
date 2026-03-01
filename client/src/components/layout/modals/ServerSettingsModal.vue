@@ -235,7 +235,7 @@ const onIconInputChange = (event: Event) => {
               </label>
             </div>
 
-            <div class="rounded border border-[#3f4147] bg-[#2b2d31] px-4 py-3">
+            <div v-show="form.storage.enabled" class="rounded border border-[#3f4147] bg-[#2b2d31] px-4 py-3">
               <p class="text-xs font-bold uppercase text-gray-300">Hetzner S3 help</p>
               <p class="mt-1 text-xs text-gray-400">
                 Use Hetzner endpoint format: https://&lt;bucket-name&gt;.&lt;location&gt;.your-objectstorage.com. Bucket and location are parsed from the endpoint URL.
@@ -250,7 +250,7 @@ const onIconInputChange = (event: Event) => {
               </a>
             </div>
 
-            <div class="grid gap-4 md:grid-cols-2">
+            <div v-show="form.storage.enabled" class="grid gap-4 md:grid-cols-2">
               <div>
                 <label class="block text-xs font-bold text-gray-300 uppercase mb-2">Endpoint URL</label>
                 <input

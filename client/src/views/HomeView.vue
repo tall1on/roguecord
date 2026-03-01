@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
 import { Archive, Code2, File, FileText, Film, Image, Music2 } from 'lucide-vue-next'
-import { useChatStore, type Message, type FolderChannelFile } from '../stores/chat'
+import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 
 const chatStore = useChatStore()
@@ -498,6 +498,47 @@ const formatMessageContentWithLinks = (content: string) => {
   })
 }
 
+const normalizeHost = (host: string) => host.toLowerCase().replace(/^www\./, '').replace(/^m\./, '')
+
+const getMessageEmbeds = (message: Message): MessageEmbed[] => {
+  return Array.isArray(message.embeds) ? message.embeds : []
+}
+
+const getTrustedEmbedIframeSrc = (embed: MessageEmbed): string | null => {
+  if (!embed.embedUrl || typeof embed.embedUrl !== 'string') {
+    return null
+  }
+
+  try {
+    const parsed = new URL(embed.embedUrl)
+    if (parsed.protocol !== 'https:') {
+      return null
+    }
+
+    const host = normalizeHost(parsed.hostname)
+    if (embed.type === 'youtube') {
+      if (host !== 'youtube.com' || !parsed.pathname.startsWith('/embed/')) {
+        return null
+      }
+      return parsed.toString()
+    }
+
+    if (embed.type === 'twitch') {
+      if (host !== 'player.twitch.tv' && host !== 'clips.twitch.tv') {
+        return null
+      }
+
+      const parentHost = (window.location.hostname || 'localhost').toLowerCase()
+      parsed.searchParams.set('parent', parentHost)
+      return parsed.toString()
+    }
+
+    return null
+  } catch {
+    return null
+  }
+}
+
 const sendMessage = () => {
   if (isReadOnlyRssChannel.value) {
     return
@@ -648,6 +689,19 @@ const formatDateDivider = (dateString: string) => {
 const getMessageDayKey = (dateString: string) => {
   const date = new Date(dateString)
   return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
+}
+
+const resolveMessageAvatarUrl = (message: Message) => {
+  const user = message.user
+  if (!user) {
+    return null
+  }
+
+  if (user.role === 'system') {
+    return chatStore.resolveServerIconUrl(chatStore.server?.iconPath || null, undefined, chatStore.server?.updatedAt || null) || user.avatar_url
+  }
+
+  return user.avatar_url
 }
 
 type RenderEntry =
@@ -807,8 +861,9 @@ watch(
             v-else
             class="flex items-start gap-4 hover:bg-[#2e3035] p-1 -mx-1 rounded transition-colors"
           >
-            <div class="w-10 h-10 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mt-0.5">
-              {{ entry.message.user?.username.charAt(0).toUpperCase() || '?' }}
+            <div class="w-10 h-10 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mt-0.5 overflow-hidden">
+              <img v-if="resolveMessageAvatarUrl(entry.message)" :src="resolveMessageAvatarUrl(entry.message) || ''" alt="Avatar" class="w-full h-full object-cover" />
+              <span v-else>{{ entry.message.user?.username.charAt(0).toUpperCase() || '?' }}</span>
             </div>
             <div>
               <div class="flex items-baseline gap-2">
@@ -816,6 +871,45 @@ watch(
                 <span class="text-xs text-gray-400">{{ formatTime(entry.message.created_at) }}</span>
               </div>
               <p class="text-gray-300 whitespace-pre-wrap break-words" v-html="formatMessageContentWithLinks(entry.message.content)"></p>
+              <div v-if="getMessageEmbeds(entry.message).length > 0" class="mt-2 space-y-2">
+                <div
+                  v-for="(embed, embedIndex) in getMessageEmbeds(entry.message)"
+                  :key="`${entry.message.id}-embed-${embedIndex}`"
+                  class="max-w-[560px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]"
+                >
+                  <iframe
+                    v-if="getTrustedEmbedIframeSrc(embed)"
+                    :src="getTrustedEmbedIframeSrc(embed) || ''"
+                    class="w-full aspect-video border-b border-[#3f4147]"
+                    loading="lazy"
+                    referrerpolicy="strict-origin-when-cross-origin"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    allowfullscreen
+                    sandbox="allow-same-origin allow-scripts allow-popups allow-presentation"
+                  />
+
+                  <a
+                    :href="embed.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="flex items-stretch gap-3 p-3 hover:bg-[#30343b] transition-colors"
+                  >
+                    <img
+                      v-if="embed.thumbnailUrl"
+                      :src="embed.thumbnailUrl"
+                      :alt="embed.title"
+                      class="w-20 h-20 object-cover rounded-md shrink-0"
+                      loading="lazy"
+                    />
+                    <div class="min-w-0 flex-1">
+                      <p class="text-xs uppercase tracking-wide text-gray-400">{{ embed.provider }}</p>
+                      <p class="text-sm font-medium text-white truncate">{{ embed.title }}</p>
+                      <p v-if="embed.description" class="text-xs text-gray-300 line-clamp-2 mt-1">{{ embed.description }}</p>
+                      <p class="text-xs text-blue-300 truncate mt-1">{{ embed.displayUrl }}</p>
+                    </div>
+                  </a>
+                </div>
+              </div>
             </div>
           </div>
         </template>
