@@ -685,26 +685,201 @@ function migrateRssChannelItemsForContentDedupe(done: (error?: Error) => void) {
 
     const hasContentFingerprint = columns.some((column) => column.name === 'content_fingerprint');
 
+    const normalizeUrlForRssDedupe = (rawUrl: string | null | undefined): string | null => {
+      const value = (rawUrl || '').trim();
+      if (!value) return null;
+
+      try {
+        const url = new URL(value);
+        url.hash = '';
+        url.hostname = url.hostname.toLowerCase();
+
+        const protocol = url.protocol.toLowerCase();
+        if ((protocol === 'https:' && url.port === '443') || (protocol === 'http:' && url.port === '80')) {
+          url.port = '';
+        }
+
+        const trackingParams = new Set([
+          'fbclid',
+          'gclid',
+          'dclid',
+          'mc_cid',
+          'mc_eid',
+          '_hsenc',
+          '_hsmi',
+          'mkt_tok',
+          'igshid'
+        ]);
+
+        const keptParams = [...url.searchParams.entries()]
+          .filter(([key]) => {
+            const lowered = key.toLowerCase();
+            if (lowered.startsWith('utm_')) return false;
+            return !trackingParams.has(lowered);
+          })
+          .sort((a, b) => {
+            if (a[0] === b[0]) return a[1].localeCompare(b[1]);
+            return a[0].localeCompare(b[0]);
+          });
+
+        url.search = '';
+        for (const [key, paramValue] of keptParams) {
+          url.searchParams.append(key, paramValue);
+        }
+
+        if (url.pathname.length > 1) {
+          url.pathname = url.pathname.replace(/\/+$/g, '') || '/';
+        }
+
+        return url.toString();
+      } catch {
+        return value;
+      }
+    };
+
+    const extractNormalizedUrlFromMessage = (content: string | null | undefined): string | null => {
+      const value = (content || '').trim();
+      if (!value) return null;
+
+      const lines = value
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+      for (let i = lines.length - 1; i >= 0; i -= 1) {
+        const maybeUrl = lines[i];
+        if (!/^https?:\/\//i.test(maybeUrl)) continue;
+        return normalizeUrlForRssDedupe(maybeUrl);
+      }
+
+      return null;
+    };
+
+    const makeUrlFingerprint = (normalizedUrl: string): string => `url:${normalizedUrl}`;
+
     const ensureUniqueIndex = () => {
-      db.run(
+      db.run('DROP INDEX IF EXISTS idx_rss_channel_items_channel_content_fingerprint', (dropErr) => {
+        if (dropErr) {
+          done(dropErr);
+          return;
+        }
+
+        db.run(
+          `
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_channel_items_channel_content_fingerprint
+          ON rss_channel_items(channel_id, content_fingerprint)
+          WHERE content_fingerprint IS NOT NULL
+          `,
+          (indexErr) => {
+            if (indexErr) {
+              done(indexErr);
+              return;
+            }
+
+            done();
+          }
+        );
+      });
+    };
+
+    const backfillUrlFingerprints = () => {
+      db.all(
         `
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_channel_items_channel_content_fingerprint
-        ON rss_channel_items(channel_id, content_fingerprint)
-        WHERE content_fingerprint IS NOT NULL
+        SELECT
+          r.rowid AS rowid,
+          r.channel_id,
+          m.content AS message_content
+        FROM rss_channel_items r
+        LEFT JOIN messages m ON m.id = r.message_id
+        ORDER BY r.created_at ASC, r.rowid ASC
         `,
-        (indexErr) => {
-          if (indexErr) {
-            done(indexErr);
+        (rowsErr, rows: Array<{ rowid: number; channel_id: string; message_content: string | null }>) => {
+          if (rowsErr) {
+            done(rowsErr);
             return;
           }
 
-          done();
+          const updates: Array<{ rowid: number; fingerprint: string }> = [];
+          for (const row of rows || []) {
+            const normalizedUrl = extractNormalizedUrlFromMessage(row.message_content);
+            if (!normalizedUrl) continue;
+            updates.push({ rowid: row.rowid, fingerprint: makeUrlFingerprint(normalizedUrl) });
+          }
+
+          const applyUpdate = (index: number) => {
+            if (index >= updates.length) {
+              removeDuplicateUrlRows();
+              return;
+            }
+
+            const current = updates[index];
+            db.run(
+              'UPDATE rss_channel_items SET content_fingerprint = ? WHERE rowid = ?',
+              [current.fingerprint, current.rowid],
+              (updateErr) => {
+                if (updateErr) {
+                  done(updateErr);
+                  return;
+                }
+
+                applyUpdate(index + 1);
+              }
+            );
+          };
+
+          const removeDuplicateUrlRows = () => {
+            db.all(
+              `
+              SELECT rowid, channel_id, content_fingerprint
+              FROM rss_channel_items
+              WHERE content_fingerprint LIKE 'url:%'
+              ORDER BY created_at ASC, rowid ASC
+              `,
+              (dupeErr, dupeRows: Array<{ rowid: number; channel_id: string; content_fingerprint: string }>) => {
+                if (dupeErr) {
+                  done(dupeErr);
+                  return;
+                }
+
+                const seen = new Set<string>();
+                const toDelete: number[] = [];
+                for (const row of dupeRows || []) {
+                  const identity = `${row.channel_id}|${row.content_fingerprint}`;
+                  if (seen.has(identity)) {
+                    toDelete.push(row.rowid);
+                    continue;
+                  }
+                  seen.add(identity);
+                }
+
+                const applyDelete = (index: number) => {
+                  if (index >= toDelete.length) {
+                    ensureUniqueIndex();
+                    return;
+                  }
+
+                  db.run('DELETE FROM rss_channel_items WHERE rowid = ?', [toDelete[index]], (deleteErr) => {
+                    if (deleteErr) {
+                      done(deleteErr);
+                      return;
+                    }
+
+                    applyDelete(index + 1);
+                  });
+                };
+
+                applyDelete(0);
+              }
+            );
+          };
+
+          applyUpdate(0);
         }
       );
     };
 
     if (hasContentFingerprint) {
-      ensureUniqueIndex();
+      backfillUrlFingerprints();
       return;
     }
 
@@ -714,7 +889,7 @@ function migrateRssChannelItemsForContentDedupe(done: (error?: Error) => void) {
         return;
       }
 
-      ensureUniqueIndex();
+      backfillUrlFingerprints();
     });
   });
 }
@@ -888,3 +1063,496 @@ function migrateFolderChannelFilesStorageSchema(done: (error?: Error) => void) {
     runNextAlter(0);
   });
 }
+    db.run('ALTER TABLE rss_channel_items ADD COLUMN content_fingerprint TEXT', (alterErr) => {
+      if (alterErr) {
+        done(alterErr);
+        return;
+      }
+
+      backfillUrlFingerprints();
+    });
+  });
+}
+
+function migrateModerationActionsTable(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(moderation_actions)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasDeleteMode = columns.some((column) => column.name === 'delete_mode');
+    const hasDeleteHours = columns.some((column) => column.name === 'delete_hours');
+    const hasBlacklistIdentity = columns.some((column) => column.name === 'blacklist_identity');
+    const hasBlacklistIp = columns.some((column) => column.name === 'blacklist_ip');
+    const hasTargetIp = columns.some((column) => column.name === 'target_ip');
+    const hasEnforced = columns.some((column) => column.name === 'enforced');
+    const hasEnforcedAt = columns.some((column) => column.name === 'enforced_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasDeleteMode) pendingAlterStatements.push("ALTER TABLE moderation_actions ADD COLUMN delete_mode TEXT NOT NULL DEFAULT 'none'");
+    if (!hasDeleteHours) pendingAlterStatements.push('ALTER TABLE moderation_actions ADD COLUMN delete_hours INTEGER');
+    if (!hasBlacklistIdentity) pendingAlterStatements.push('ALTER TABLE moderation_actions ADD COLUMN blacklist_identity INTEGER NOT NULL DEFAULT 0');
+    if (!hasBlacklistIp) pendingAlterStatements.push('ALTER TABLE moderation_actions ADD COLUMN blacklist_ip INTEGER NOT NULL DEFAULT 0');
+    if (!hasTargetIp) pendingAlterStatements.push('ALTER TABLE moderation_actions ADD COLUMN target_ip TEXT');
+    if (!hasEnforced) pendingAlterStatements.push('ALTER TABLE moderation_actions ADD COLUMN enforced INTEGER NOT NULL DEFAULT 0');
+    if (!hasEnforcedAt) pendingAlterStatements.push('ALTER TABLE moderation_actions ADD COLUMN enforced_at DATETIME');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        db.run('CREATE INDEX IF NOT EXISTS idx_moderation_actions_target_enforced ON moderation_actions(target_user_id, enforced)', (indexErr) => {
+          if (indexErr) {
+            done(indexErr);
+            return;
+          }
+          done();
+        });
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function migrateBanRulesTable(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(ban_rules)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasTargetUserId = columns.some((column) => column.name === 'target_user_id');
+    const hasTargetPublicKey = columns.some((column) => column.name === 'target_public_key');
+    const hasTargetIp = columns.some((column) => column.name === 'target_ip');
+    const hasBlacklistIdentity = columns.some((column) => column.name === 'blacklist_identity');
+    const hasBlacklistIp = columns.some((column) => column.name === 'blacklist_ip');
+    const hasActive = columns.some((column) => column.name === 'active');
+    const hasRevokedAt = columns.some((column) => column.name === 'revoked_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasTargetUserId) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN target_user_id TEXT');
+    if (!hasTargetPublicKey) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN target_public_key TEXT');
+    if (!hasTargetIp) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN target_ip TEXT');
+    if (!hasBlacklistIdentity) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN blacklist_identity INTEGER NOT NULL DEFAULT 1');
+    if (!hasBlacklistIp) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN blacklist_ip INTEGER NOT NULL DEFAULT 0');
+    if (!hasActive) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+    if (!hasRevokedAt) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN revoked_at DATETIME');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_ban_rules_identity ON ban_rules(target_user_id, target_public_key, active)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_ban_rules_ip ON ban_rules(target_ip, active)');
+        });
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function migrateChannelReadStatesTable(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(channel_read_states)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasLastReadMessageId = columns.some((column) => column.name === 'last_read_message_id');
+    const hasLastReadMessageCreatedAt = columns.some((column) => column.name === 'last_read_message_created_at');
+    const hasUpdatedAt = columns.some((column) => column.name === 'updated_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasLastReadMessageId) pendingAlterStatements.push('ALTER TABLE channel_read_states ADD COLUMN last_read_message_id TEXT');
+    if (!hasLastReadMessageCreatedAt) pendingAlterStatements.push('ALTER TABLE channel_read_states ADD COLUMN last_read_message_created_at DATETIME');
+    if (!hasUpdatedAt) pendingAlterStatements.push('ALTER TABLE channel_read_states ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_channel_read_states_user ON channel_read_states(user_id)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_channel_read_states_channel ON channel_read_states(channel_id)');
+        });
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function migrateFolderChannelFilesStorageSchema(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(folder_channel_files)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasStorageProvider = columns.some((column) => column.name === 'storage_provider');
+    const hasStorageKey = columns.some((column) => column.name === 'storage_key');
+    const hasMigratedToS3At = columns.some((column) => column.name === 'migrated_to_s3_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasStorageProvider) pendingAlterStatements.push("ALTER TABLE folder_channel_files ADD COLUMN storage_provider TEXT NOT NULL DEFAULT 'data_dir'");
+    if (!hasStorageKey) pendingAlterStatements.push('ALTER TABLE folder_channel_files ADD COLUMN storage_key TEXT');
+    if (!hasMigratedToS3At) pendingAlterStatements.push('ALTER TABLE folder_channel_files ADD COLUMN migrated_to_s3_at DATETIME');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_channel_read_states_user ON channel_read_states(user_id)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_channel_read_states_channel ON channel_read_states(channel_id)');
+        });
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function migrateFolderChannelFilesStorageSchema(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(folder_channel_files)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasStorageProvider = columns.some((column) => column.name === 'storage_provider');
+    const hasStorageKey = columns.some((column) => column.name === 'storage_key');
+    const hasMigratedToS3At = columns.some((column) => column.name === 'migrated_to_s3_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasStorageProvider) pendingAlterStatements.push("ALTER TABLE folder_channel_files ADD COLUMN storage_provider TEXT NOT NULL DEFAULT 'data_dir'");
+    if (!hasStorageKey) pendingAlterStatements.push('ALTER TABLE folder_channel_files ADD COLUMN storage_key TEXT');
+    if (!hasMigratedToS3At) pendingAlterStatements.push('ALTER TABLE folder_channel_files ADD COLUMN migrated_to_s3_at DATETIME');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+      done(pragmaErr);
+      return;
+    }
+
+    const hasTargetUserId = columns.some((column) => column.name === 'target_user_id');
+    const hasTargetPublicKey = columns.some((column) => column.name === 'target_public_key');
+    const hasTargetIp = columns.some((column) => column.name === 'target_ip');
+    const hasBlacklistIdentity = columns.some((column) => column.name === 'blacklist_identity');
+    const hasBlacklistIp = columns.some((column) => column.name === 'blacklist_ip');
+    const hasActive = columns.some((column) => column.name === 'active');
+    const hasRevokedAt = columns.some((column) => column.name === 'revoked_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasTargetUserId) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN target_user_id TEXT');
+    if (!hasTargetPublicKey) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN target_public_key TEXT');
+    if (!hasTargetIp) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN target_ip TEXT');
+    if (!hasBlacklistIdentity) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN blacklist_identity INTEGER NOT NULL DEFAULT 1');
+    if (!hasBlacklistIp) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN blacklist_ip INTEGER NOT NULL DEFAULT 0');
+    if (!hasActive) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+    if (!hasRevokedAt) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN revoked_at DATETIME');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_ban_rules_identity ON ban_rules(target_user_id, target_public_key, active)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_ban_rules_ip ON ban_rules(target_ip, active)');
+        });
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function migrateChannelReadStatesTable(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(channel_read_states)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasLastReadMessageId = columns.some((column) => column.name === 'last_read_message_id');
+    const hasLastReadMessageCreatedAt = columns.some((column) => column.name === 'last_read_message_created_at');
+    const hasUpdatedAt = columns.some((column) => column.name === 'updated_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasLastReadMessageId) pendingAlterStatements.push('ALTER TABLE channel_read_states ADD COLUMN last_read_message_id TEXT');
+    if (!hasLastReadMessageCreatedAt) pendingAlterStatements.push('ALTER TABLE channel_read_states ADD COLUMN last_read_message_created_at DATETIME');
+    if (!hasUpdatedAt) pendingAlterStatements.push('ALTER TABLE channel_read_states ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_channel_read_states_user ON channel_read_states(user_id)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_channel_read_states_channel ON channel_read_states(channel_id)');
+        });
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function migrateFolderChannelFilesStorageSchema(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(folder_channel_files)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasStorageProvider = columns.some((column) => column.name === 'storage_provider');
+    const hasStorageKey = columns.some((column) => column.name === 'storage_key');
+    const hasMigratedToS3At = columns.some((column) => column.name === 'migrated_to_s3_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasStorageProvider) pendingAlterStatements.push("ALTER TABLE folder_channel_files ADD COLUMN storage_provider TEXT NOT NULL DEFAULT 'data_dir'");
+    if (!hasStorageKey) pendingAlterStatements.push('ALTER TABLE folder_channel_files ADD COLUMN storage_key TEXT');
+    if (!hasMigratedToS3At) pendingAlterStatements.push('ALTER TABLE folder_channel_files ADD COLUMN migrated_to_s3_at DATETIME');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function migrateBanRulesTable(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(ban_rules)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasTargetUserId = columns.some((column) => column.name === 'target_user_id');
+    const hasTargetPublicKey = columns.some((column) => column.name === 'target_public_key');
+    const hasTargetIp = columns.some((column) => column.name === 'target_ip');
+    const hasBlacklistIdentity = columns.some((column) => column.name === 'blacklist_identity');
+    const hasBlacklistIp = columns.some((column) => column.name === 'blacklist_ip');
+    const hasActive = columns.some((column) => column.name === 'active');
+    const hasRevokedAt = columns.some((column) => column.name === 'revoked_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasTargetUserId) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN target_user_id TEXT');
+    if (!hasTargetPublicKey) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN target_public_key TEXT');
+    if (!hasTargetIp) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN target_ip TEXT');
+    if (!hasBlacklistIdentity) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN blacklist_identity INTEGER NOT NULL DEFAULT 1');
+    if (!hasBlacklistIp) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN blacklist_ip INTEGER NOT NULL DEFAULT 0');
+    if (!hasActive) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+    if (!hasRevokedAt) pendingAlterStatements.push('ALTER TABLE ban_rules ADD COLUMN revoked_at DATETIME');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_ban_rules_identity ON ban_rules(target_user_id, target_public_key, active)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_ban_rules_ip ON ban_rules(target_ip, active)');
+        });
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function migrateChannelReadStatesTable(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(channel_read_states)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasLastReadMessageId = columns.some((column) => column.name === 'last_read_message_id');
+    const hasLastReadMessageCreatedAt = columns.some((column) => column.name === 'last_read_message_created_at');
+    const hasUpdatedAt = columns.some((column) => column.name === 'updated_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasLastReadMessageId) pendingAlterStatements.push('ALTER TABLE channel_read_states ADD COLUMN last_read_message_id TEXT');
+    if (!hasLastReadMessageCreatedAt) pendingAlterStatements.push('ALTER TABLE channel_read_states ADD COLUMN last_read_message_created_at DATETIME');
+    if (!hasUpdatedAt) pendingAlterStatements.push('ALTER TABLE channel_read_states ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_channel_read_states_user ON channel_read_states(user_id)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_channel_read_states_channel ON channel_read_states(channel_id)');
+        });
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function migrateFolderChannelFilesStorageSchema(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(folder_channel_files)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasStorageProvider = columns.some((column) => column.name === 'storage_provider');
+    const hasStorageKey = columns.some((column) => column.name === 'storage_key');
+    const hasMigratedToS3At = columns.some((column) => column.name === 'migrated_to_s3_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasStorageProvider) pendingAlterStatements.push("ALTER TABLE folder_channel_files ADD COLUMN storage_provider TEXT NOT NULL DEFAULT 'data_dir'");
+    if (!hasStorageKey) pendingAlterStatements.push('ALTER TABLE folder_channel_files ADD COLUMN storage_key TEXT');
+    if (!hasMigratedToS3At) pendingAlterStatements.push('ALTER TABLE folder_channel_files ADD COLUMN migrated_to_s3_at DATETIME');
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        done();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+

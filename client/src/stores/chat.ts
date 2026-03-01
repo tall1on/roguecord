@@ -2,6 +2,8 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { useWebRtcStore } from './webrtc';
 
+const NEW_NOTIFICATION_SOUND_DEBOUNCE_MS = 1000;
+
 export interface User {
   id: string;
   username: string;
@@ -201,6 +203,7 @@ const getBlockedFolderUploadExtension = (fileName: string) => {
 };
 
 export const useChatStore = defineStore('chat', () => {
+  let lastNewNotificationSoundAt = 0;
   const ws = ref<WebSocket | null>(null);
   const isConnected = ref(false);
   const currentUser = ref<User | null>(null);
@@ -809,7 +812,14 @@ export const useChatStore = defineStore('chat', () => {
       return;
     }
 
+    const now = Date.now();
+    if (now - lastNewNotificationSoundAt < NEW_NOTIFICATION_SOUND_DEBOUNCE_MS) {
+      return;
+    }
+    lastNewNotificationSoundAt = now;
+
     const audio = new Audio('/wav/new_notification.mp3');
+    audio.volume = 0.7;
     void audio.play().catch((error) => {
       console.debug('[Chat][sound] new message notification playback blocked/failed', error);
     });
