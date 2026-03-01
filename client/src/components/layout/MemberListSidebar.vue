@@ -21,6 +21,10 @@ const blacklistIp = ref(false)
 
 const isAdmin = computed(() => chatStore.currentUserRole === 'admin')
 
+const isHiddenSystemMember = (user: User) => {
+  return user.role === 'system' || (user.role === 'bot' && user.username === 'RSS Bot')
+}
+
 const canModerate = (user: User) => {
   if (!isAdmin.value || !chatStore.currentUser) return false
   if (chatStore.currentUser.id === user.id) return false
@@ -116,8 +120,9 @@ const submitModeration = () => {
 }
 
 const groupedMembers = computed(() => {
-  const online = chatStore.users.filter((u) => chatStore.onlineUserIds.has(u.id))
-  const offline = chatStore.users.filter((u) => !chatStore.onlineUserIds.has(u.id))
+  const visibleUsers = chatStore.users.filter((u) => !isHiddenSystemMember(u))
+  const online = visibleUsers.filter((u) => chatStore.onlineUserIds.has(u.id))
+  const offline = visibleUsers.filter((u) => !chatStore.onlineUserIds.has(u.id))
 
   const onlineByRole: Record<string, typeof online> = {}
   online.forEach((u) => {
