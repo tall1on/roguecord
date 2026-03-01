@@ -1028,42 +1028,42 @@ watch(
           </div>
         </div>
 
-        <div v-else class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div v-else class="grid gap-4 grid-cols-[repeat(auto-fill,minmax(180px,1fr))]">
           <div
             v-for="file in activeFolderFiles"
             :key="file.id"
-            class="rounded-md border border-[#3f4147] bg-[#2b2d31] p-4 flex flex-col aspect-square"
+            class="group rounded-xl border border-[#3f4147] bg-[#2b2d31] p-4 flex flex-col aspect-square hover:bg-[#36393f] hover:border-[#4f5157] transition-all duration-200 shadow-sm"
           >
-            <div class="min-w-0 flex flex-col items-center text-center gap-2">
-              <div class="flex justify-center w-full">
+            <div class="flex-1 min-w-0 flex flex-col items-center justify-center text-center gap-3">
+              <div class="flex justify-center w-full text-gray-400 group-hover:scale-110 transition-transform duration-200">
                 <component
                   :is="getFolderFileIcon(file.original_name)"
-                  class="w-12 h-12 shrink-0"
+                  class="w-20 h-20 shrink-0"
                   :class="getFolderFileIconClass(file.original_name)"
                 />
               </div>
-              <p class="w-full truncate text-sm text-white font-medium">{{ file.original_name }}</p>
-              <p class="w-full text-xs text-gray-400 mt-1 min-w-0 flex items-center justify-center gap-1.5 whitespace-nowrap overflow-hidden">
-                <span class="shrink-0">{{ formatFileSize(file.size_bytes) }}</span>
-                <span class="text-gray-500 shrink-0">·</span>
-                <span class="truncate min-w-0">{{ file.uploader_username || 'Unknown uploader' }}</span>
-                <span class="text-gray-500 shrink-0">·</span>
-                <span class="shrink-0">{{ formatTime(file.created_at) }}</span>
-              </p>
+              <div class="w-full">
+                <p class="w-full truncate text-sm text-white font-medium px-1" :title="file.original_name">{{ file.original_name }}</p>
+                <p class="w-full text-xs text-gray-400 mt-1 truncate px-1" :title="`${file.uploader_username || 'Unknown uploader'} • ${formatTime(file.created_at)}`">
+                  {{ formatFileSize(file.size_bytes) }}
+                </p>
+              </div>
             </div>
-            <div class="mt-auto grid gap-2" :class="canManageFolderFiles ? 'grid-cols-2' : 'grid-cols-1'">
+            <div class="mt-3 grid gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-200" :class="canManageFolderFiles ? 'grid-cols-2' : 'grid-cols-1'">
               <button
                 type="button"
-                class="w-full px-3 py-1.5 text-sm rounded bg-[#404249] hover:bg-[#4e5058] text-white"
+                class="w-full px-2 py-1.5 text-xs font-medium rounded bg-[#404249] hover:bg-[#4e5058] text-white transition-colors"
                 @click="requestFolderFileDownload(file.id)"
+                title="Download"
               >
                 Download
               </button>
               <button
                 v-if="canManageFolderFiles"
                 type="button"
-                class="w-full px-3 py-1.5 text-sm rounded bg-[#5b2d31] hover:bg-[#6a3136] text-white"
+                class="w-full px-2 py-1.5 text-xs font-medium rounded bg-[#DA373C]/80 hover:bg-[#DA373C] text-white transition-colors"
                 @click="requestFolderFileDelete(file.id, file.original_name)"
+                title="Delete"
               >
                 Delete
               </button>
