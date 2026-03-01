@@ -78,6 +78,7 @@ export interface Server {
   name: string;
   title: string;
   iconPath?: string | null;
+  updatedAt?: string | null;
   rulesChannelId?: string | null;
   welcomeChannelId?: string | null;
   storageType?: 'data_dir' | 's3';
@@ -285,7 +286,17 @@ export const useChatStore = defineStore('chat', () => {
     }
   };
 
-  const resolveServerIconUrl = (iconPath?: string | null, wsAddress?: string | null) => {
+  const appendServerIconVersion = (url: string, version?: string | null) => {
+    const normalizedVersion = (version || '').trim();
+    if (!normalizedVersion) {
+      return url;
+    }
+
+    const separator = url.includes('?') ? '&' : '?';
+    return `${url}${separator}v=${encodeURIComponent(normalizedVersion)}`;
+  };
+
+  const resolveServerIconUrl = (iconPath?: string | null, wsAddress?: string | null, version?: string | null) => {
     const path = (iconPath || '').trim();
     if (!path) {
       return null;
@@ -303,7 +314,7 @@ export const useChatStore = defineStore('chat', () => {
           ? getHttpBaseFromWsAddress(savedConnections.value.find((connection) => connection.id === activeConnectionId.value)?.address || '')
           : window.location.origin);
 
-      return `${baseUrl}/server-icons/s3/${encodeURIComponent(key)}`;
+      return appendServerIconVersion(`${baseUrl}/server-icons/s3/${encodeURIComponent(key)}`, version);
     }
 
     if (/^(data:|blob:|https?:\/\/|\/\/)/i.test(path)) {
@@ -312,7 +323,7 @@ export const useChatStore = defineStore('chat', () => {
 
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
     if (wsAddress) {
-      return `${getHttpBaseFromWsAddress(wsAddress)}${normalizedPath}`;
+      return appendServerIconVersion(`${getHttpBaseFromWsAddress(wsAddress)}${normalizedPath}`, version);
     }
 
     const activeConnection = activeConnectionId.value
@@ -323,7 +334,11 @@ export const useChatStore = defineStore('chat', () => {
       ? getHttpBaseFromWsAddress(activeConnection.address)
       : window.location.origin;
 
-    return `${baseUrl}${normalizedPath}`;
+    return appendServerIconVersion(`${baseUrl}${normalizedPath}`, version);
+  };
+
+  const requestServerRefresh = () => {
+    send('get_server');
   };
 
   const getConnectionNameFromAddress = (address: string) => {
@@ -646,7 +661,7 @@ export const useChatStore = defineStore('chat', () => {
       const currentConnection = savedConnections.value.find((c) => c.id === activeConnectionId.value);
       if (currentConnection) {
         const nextTitle = (nextServer.title || '').trim();
-        const resolvedIconUrl = resolveServerIconUrl(nextServer.iconPath || null, currentConnection.address);
+        const resolvedIconUrl = resolveServerIconUrl(nextServer.iconPath || null, currentConnection.address, nextServer.updatedAt || null);
         let hasChanges = false;
 
         if (nextTitle && currentConnection.name !== nextTitle) {
@@ -858,6 +873,12 @@ export const useChatStore = defineStore('chat', () => {
       case 'SERVER_SETTINGS_UPDATED':
       case 'server_settings_updated':
       case 'SERVER_UPDATED':
+        if (payload.server) {
+          applyServerState(payload.server);
+        }
+        break;
+
+      case 'server_state':
         if (payload.server) {
           applyServerState(payload.server);
         }
@@ -1531,6 +1552,7 @@ export const useChatStore = defineStore('chat', () => {
     updateServerSettings,
     testServerStorageSettings,
     requestServerStorageSettings,
+    requestServerRefresh,
     clearError,
     sendMessage,
     loadOlderMessages,

@@ -637,6 +637,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'get_server_storage_settings':
         await handleGetServerStorageSettings(client);
         break;
+      case 'get_server':
+        await handleGetServer(client);
+        break;
       case 'test_server_storage_s3':
         await handleTestServerStorageS3(client, payload);
         break;
@@ -1943,6 +1946,21 @@ const handleGetServerStorageSettings = async (client: ClientConnection) => {
   } catch (error) {
     console.error('[WS DEBUG] Failed to read storage settings:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to read storage settings' } }));
+  }
+};
+
+const handleGetServer = async (client: ClientConnection) => {
+  if (!client.userId) return;
+
+  try {
+    const server = await getServer();
+    client.ws.send(JSON.stringify({
+      type: 'server_state',
+      payload: { server }
+    }));
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to read server state:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to read server state' } }));
   }
 };
 
