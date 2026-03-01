@@ -1433,21 +1433,24 @@ export const useChatStore = defineStore('chat', () => {
       throw new Error(`Upload blocked: .${blockedExtension} files are not allowed in folder channels.`);
     }
 
-    if (file.size === 0) {
-      console.debug('[FOLDER_UPLOAD] Rejected empty file before encoding', { channel_id, fileName: file.name });
-      throw new Error('Uploaded file is empty');
-    }
-
     const dataBase64 = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => {
-        const result = typeof reader.result === 'string' ? reader.result : '';
-        if (!result.includes(',')) {
+        const result = reader.result;
+        if (typeof result !== 'string') {
+          console.error('[FOLDER_UPLOAD] FileReader result was not a string', { channel_id, fileName: file.name });
+          reject(new Error('Failed to read file'));
+          return;
+        }
+
+        const commaIndex = result.indexOf(',');
+        if (commaIndex === -1) {
           console.error('[FOLDER_UPLOAD] Unexpected FileReader result format', { channel_id, fileName: file.name });
           reject(new Error('Failed to read file'));
           return;
         }
-        const base64 = result.split(',')[1] ?? '';
+
+        const base64 = result.slice(commaIndex + 1);
         resolve(base64);
       };
       reader.onerror = () => reject(new Error('Failed to read file'));

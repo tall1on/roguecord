@@ -1138,9 +1138,9 @@ const handleFolderUploadFile = async (
   const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
   const originalName = sanitizeFileName(typeof payload?.file_name === 'string' ? payload.file_name : '');
   const mimeType = typeof payload?.mime_type === 'string' && payload.mime_type.trim() ? payload.mime_type.trim() : null;
-  const dataBase64 = typeof payload?.data_base64 === 'string' ? payload.data_base64 : '';
+  const dataBase64 = payload?.data_base64;
 
-  if (!channelId || !dataBase64) {
+  if (!channelId || typeof dataBase64 !== 'string') {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid upload payload' } }));
     return;
   }
@@ -1165,10 +1165,6 @@ const handleFolderUploadFile = async (
     return;
   }
 
-  if (!fileBuffer.length) {
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Uploaded file is empty' } }));
-    return;
-  }
   if (fileBuffer.length > MAX_FOLDER_FILE_SIZE_BYTES) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Uploaded file exceeds size limit (25 MB)' } }));
     return;
