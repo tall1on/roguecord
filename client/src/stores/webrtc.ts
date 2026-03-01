@@ -29,8 +29,11 @@ const DEFAULT_SCREEN_STREAM_VOLUME_PREFERENCE: ScreenStreamVolumePreference = {
   lastNonZeroVolume: 1
 };
 
+const SCREENSHARE_NOTIFICATION_SOUND_DEBOUNCE_MS = 1000;
+
 export const useWebRtcStore = defineStore('webrtc', () => {
   const chatStore = useChatStore();
+  let lastScreenshareNotificationSoundAt = 0;
   
   const device = shallowRef<Device | null>(null);
   const sendTransport = shallowRef<any | null>(null);
@@ -110,7 +113,14 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       return;
     }
 
+    const now = Date.now();
+    if (now - lastScreenshareNotificationSoundAt < SCREENSHARE_NOTIFICATION_SOUND_DEBOUNCE_MS) {
+      return;
+    }
+    lastScreenshareNotificationSoundAt = now;
+
     const audio = new Audio('/wav/screenshare.mp3');
+    audio.volume = 0.7;
     void audio.play().catch((error) => {
       console.debug('[WebRTC][sound] screenshare notification playback blocked/failed', error);
     });
