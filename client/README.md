@@ -1,5 +1,39 @@
-# Vue 3 + TypeScript + Vite
+# Client (Vue 3 + Vite + TypeScript + Tauri)
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+## Install
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+```bash
+npm install
+```
+
+## Web development
+
+```bash
+npm run dev
+```
+
+## Desktop development (Tauri)
+
+```bash
+npm run tauri:dev
+```
+
+## Production builds
+
+Build web assets:
+
+```bash
+npm run build
+```
+
+Build desktop app bundles with Tauri:
+
+```bash
+npm run tauri:build
+```
+
+## Prerequisites for Tauri builds
+
+- Node.js and npm
+- Rust toolchain (`rustup` + stable toolchain)
+- Platform-specific native build dependencies required by Tauri v2 (for Windows, Visual Studio C++ build tools and WebView2 runtime)
