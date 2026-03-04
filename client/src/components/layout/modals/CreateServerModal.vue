@@ -12,26 +12,28 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div v-if="visible" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
-    <div class="bg-[#313338] p-6 rounded-lg shadow-xl w-96">
-      <h2 class="text-2xl font-bold text-white mb-4 text-center">Add a Connection</h2>
-      <p class="text-gray-400 mb-6 text-center text-sm">Connect to a new server.</p>
+  <div v-if="visible" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+    <div class="bg-zinc-950 border border-white/10 p-6 rounded-xl shadow-2xl w-[400px]">
+      <h2 class="text-xl font-bold text-white mb-2 text-center">Add a Connection</h2>
+      <p class="text-zinc-400 mb-6 text-center text-sm">Connect to a new server.</p>
 
       <div class="mb-6">
-        <label class="block text-xs font-bold text-gray-300 uppercase mb-2">WebSocket Address</label>
-        <input
-          v-model="serverAddress"
-          type="text"
-          class="w-full bg-[#1e1f22] text-white p-2.5 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          placeholder="wss://localhost:3000"
-          @keyup.enter="emit('create')"
-        />
-        <p v-if="errorMessage" class="mt-2 text-sm text-red-400">{{ errorMessage }}</p>
+        <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">WebSocket Address</label>
+        <div class="flex bg-zinc-900 border border-white/5 rounded-lg p-1 focus-within:ring-1 focus-within:ring-indigo-500 transition-all">
+          <input
+            v-model="serverAddress"
+            type="text"
+            class="w-full bg-transparent text-white p-2 focus:outline-none text-sm placeholder:text-zinc-600 font-mono"
+            placeholder="wss://localhost:3000"
+            @keyup.enter="emit('create')"
+          />
+        </div>
+        <p v-if="errorMessage" class="mt-2 text-xs font-medium text-red-400">{{ errorMessage }}</p>
       </div>
 
-      <div class="flex justify-between items-center">
-        <button class="text-gray-400 hover:text-white text-sm" @click="visible = false">Back</button>
-        <button class="bg-indigo-500 hover:bg-indigo-600 text-white px-6 py-2 rounded font-medium" @click="emit('create')">Add</button>
+      <div class="flex justify-between items-center pt-2 border-t border-white/5 mt-4">
+        <button class="text-zinc-400 hover:text-white text-sm font-medium transition-colors duration-200" @click="visible = false">Cancel</button>
+        <button class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors duration-200 shadow-sm" @click="emit('create')">Connect</button>
       </div>
     </div>
   </div>
