@@ -6,6 +6,6 @@ html, body, #app {
   height: 100%;
   margin: 0;
   padding: 0;
-  background-color: #313338; /* Discord dark theme background */
-  color: #dbdee1; /* Discord text color */
+  background-color: #20252b;
+  color: #d8dde3;
 }
