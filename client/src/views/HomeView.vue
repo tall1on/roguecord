@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
 import { Archive, Code2, File, FileText, Film, Image, Music2, Reply, Trash2, X } from 'lucide-vue-next'
-import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, type MessageAttachment, type MessageReaction } from '../stores/chat'
+import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, type MessageAttachment, type MessageReaction, type MessageReplyReference } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
 import { openExternalUrl } from '../utils/openExternalUrl'
@@ -699,9 +699,9 @@ const submitMessage = async () => {
   }
 }
 
-const getReplyAuthorName = (message: Message | null | undefined) => message?.user?.username || 'Unknown User'
+const getReplyAuthorName = (message: Message | MessageReplyReference | null | undefined) => message?.user?.username || 'Unknown User'
 
-const getReplyPreviewText = (message: Message | null | undefined) => {
+const getReplyPreviewText = (message: Message | MessageReplyReference | null | undefined) => {
   if (!message) return ''
   const content = message.content.trim()
   if (content) return content
