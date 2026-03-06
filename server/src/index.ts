@@ -17,6 +17,7 @@ dotenv.config();
 const PORT = process.env.PORT ? ~~process.env.PORT : 1337;
 const HOST = process.env.LISTEN_IP || '0.0.0.0';
 const serverIconsRootDir = path.resolve(dataDir, 'server-icons');
+const filesRootDir = path.resolve(dataDir, 'files');
 
 const getIconContentType = (filePath: string) => {
     const ext = path.extname(filePath).toLowerCase();
@@ -30,6 +31,35 @@ const getIconContentType = (filePath: string) => {
             return 'image/webp';
         case '.gif':
             return 'image/gif';
+        default:
+            return 'application/octet-stream';
+    }
+};
+
+const getFileContentType = (filePath: string, fallback: string | null = null) => {
+    if (fallback && fallback.trim()) {
+        return fallback;
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    switch (ext) {
+        case '.png':
+            return 'image/png';
+        case '.jpg':
+        case '.jpeg':
+            return 'image/jpeg';
+        case '.webp':
+            return 'image/webp';
+        case '.gif':
+            return 'image/gif';
+        case '.svg':
+            return 'image/svg+xml';
+        case '.txt':
+            return 'text/plain; charset=utf-8';
+        case '.pdf':
+            return 'application/pdf';
+        case '.json':
+            return 'application/json; charset=utf-8';
         default:
             return 'application/octet-stream';
     }
@@ -52,6 +82,40 @@ const isSafeStorageName = (value: string) => {
     if (value !== path.basename(value)) return false;
     if (value.includes('..')) return false;
     return true;
+};
+
+const isSafeChannelId = (value: string) => /^[a-zA-Z0-9-]+$/.test(value);
+
+const isSafeS3Key = (value: string) => {
+    const trimmed = (value || '').trim();
+    if (!trimmed) return false;
+    if (trimmed.includes('\\') || /[\u0000-\u001F]/.test(trimmed)) return false;
+    const segments = trimmed.split('/').filter(Boolean);
+    if (!segments.length) return false;
+    return segments.every((segment) => segment !== '.' && segment !== '..');
+};
+
+const getSafeChannelFilesDir = (channelId: string) => {
+    const safeChannelId = (channelId || '').replace(/[^a-zA-Z0-9-]/g, '');
+    const dir = path.resolve(filesRootDir, safeChannelId);
+    const root = path.resolve(filesRootDir);
+    if (!dir.startsWith(root)) {
+        throw new Error('Unsafe channel path');
+    }
+    return dir;
+};
+
+const resolveSafeStoredFilePath = (channelId: string, storageName: string) => {
+    const channelDir = getSafeChannelFilesDir(channelId);
+    const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
+    if (!safeStorageName) {
+        throw new Error('Invalid storage name');
+    }
+    const fullPath = path.resolve(channelDir, safeStorageName);
+    if (!fullPath.startsWith(channelDir)) {
+        throw new Error('Unsafe file path');
+    }
+    return fullPath;
 };
 
 async function startServer() {
@@ -128,6 +192,69 @@ async function startServer() {
                 return;
             } catch (error) {
                 console.error('Failed to serve server icon:', error);
+                sendServerError(res);
+                return;
+            }
+        }
+
+        if (req.method === 'GET' && requestUrl.pathname.startsWith('/files/')) {
+            try {
+                if (requestUrl.pathname.startsWith('/files/s3/')) {
+                    const encodedKey = requestUrl.pathname.slice('/files/s3/'.length);
+                    const key = decodeURIComponent(encodedKey || '');
+                    if (!isSafeS3Key(key)) {
+                        sendNotFound(res);
+                        return;
+                    }
+
+                    const storageSettings = await getServerStorageSettings();
+                    if (!storageSettings?.s3) {
+                        sendServerError(res);
+                        return;
+                    }
+
+                    const fileBuffer = await downloadFileFromS3({
+                        config: storageSettings.s3,
+                        key
+                    });
+
+                    res.writeHead(200, {
+                        'Content-Type': getFileContentType(key),
+                        'Cache-Control': 'public, max-age=300'
+                    });
+                    res.end(fileBuffer);
+                    return;
+                }
+
+                const segments = requestUrl.pathname.split('/').filter(Boolean);
+                if (segments.length !== 3) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const channelId = segments[1] || '';
+                const storageName = segments[2] || '';
+
+                if (!isSafeChannelId(channelId) || !isSafeStorageName(storageName)) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const filePath = resolveSafeStoredFilePath(channelId, storageName);
+                if (!filePath.startsWith(filesRootDir) || !fs.existsSync(filePath)) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const fileBuffer = fs.readFileSync(filePath);
+                res.writeHead(200, {
+                    'Content-Type': getFileContentType(filePath),
+                    'Cache-Control': 'public, max-age=300'
+                });
+                res.end(fileBuffer);
+                return;
+            } catch (error) {
+                console.error('Failed to serve stored file:', error);
                 sendServerError(res);
                 return;
             }
