@@ -21,17 +21,19 @@ export const channelsSchemaReady = new Promise<void>((resolve, reject) => {
 let serversSchemaMigrated = false;
 let channelsSchemaMigrated = false;
 let folderFilesSchemaMigrated = false;
+let messageAttachmentsSchemaMigrated = false;
 
 function failSchemaInitialization(error: Error) {
   rejectChannelsSchemaReady?.(error);
 }
 
-function markSchemaStepDone(step: 'servers' | 'channels' | 'folder_files') {
+function markSchemaStepDone(step: 'servers' | 'channels' | 'folder_files' | 'message_attachments') {
   if (step === 'servers') serversSchemaMigrated = true;
   if (step === 'channels') channelsSchemaMigrated = true;
   if (step === 'folder_files') folderFilesSchemaMigrated = true;
+  if (step === 'message_attachments') messageAttachmentsSchemaMigrated = true;
 
-  if (serversSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated) {
+  if (serversSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated) {
     resolveChannelsSchemaReady?.();
   }
 }
@@ -221,6 +223,43 @@ function initializeDatabase() {
         FOREIGN KEY (user_id) REFERENCES users(id)
       )
     `);
+
+    // Message attachments table
+    db.run(`
+      CREATE TABLE IF NOT EXISTS message_attachments (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        original_name TEXT NOT NULL,
+        storage_name TEXT NOT NULL,
+        storage_provider TEXT NOT NULL DEFAULT 'data_dir',
+        storage_key TEXT,
+        mime_type TEXT,
+        size_bytes INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (message_id) REFERENCES messages(id)
+      )
+    `, (err) => {
+      if (err) {
+        console.error('Error creating message_attachments table:', err.message);
+        failSchemaInitialization(err);
+        return;
+      }
+
+      migrateMessageAttachmentsTableSchema((migrationErr) => {
+        if (migrationErr) {
+          console.error('Error migrating message_attachments table:', migrationErr.message);
+          failSchemaInitialization(migrationErr);
+          return;
+        }
+
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_message_attachments_message_id ON message_attachments(message_id)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_message_attachments_storage_provider ON message_attachments(storage_provider)');
+        });
+
+        markSchemaStepDone('message_attachments');
+      });
+    });
 
     // Per-user channel read state (used for persistent unread indicators)
     db.run(`
@@ -1063,6 +1102,54 @@ function migrateFolderChannelFilesStorageSchema(done: (error?: Error) => void) {
           done(alterErr);
           return;
         }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function migrateMessageAttachmentsTableSchema(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(message_attachments)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasStorageProvider = columns.some((column) => column.name === 'storage_provider');
+    const hasStorageKey = columns.some((column) => column.name === 'storage_key');
+    const hasCreatedAt = columns.some((column) => column.name === 'created_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasStorageProvider) pendingAlterStatements.push("ALTER TABLE message_attachments ADD COLUMN storage_provider TEXT NOT NULL DEFAULT 'data_dir'");
+    if (!hasStorageKey) pendingAlterStatements.push('ALTER TABLE message_attachments ADD COLUMN storage_key TEXT');
+    if (!hasCreatedAt) pendingAlterStatements.push('ALTER TABLE message_attachments ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP');
+
+    const finalizeMigration = () => {
+      db.run(
+        `
+          UPDATE message_attachments
+          SET
+            storage_provider = COALESCE(NULLIF(storage_provider, ''), 'data_dir'),
+            created_at = COALESCE(created_at, CURRENT_TIMESTAMP)
+        `,
+        (updateErr) => done(updateErr || undefined)
+      );
+    };
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        finalizeMigration();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+
         runNextAlter(index + 1);
       });
     };
