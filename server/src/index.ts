@@ -392,7 +392,7 @@ async function startServer() {
     });
 
     // Set up WebSocket server attached to the HTTP server
-    const wss = new WebSocketServer({server});
+    const wss = new WebSocketServer({server, maxPayload: 16 * 1024 * 1024});
 
     const interval = setInterval(() => {
         for (const client of connectionManager.getClients()) {
