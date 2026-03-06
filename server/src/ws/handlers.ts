@@ -1123,10 +1123,10 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
   for (const attachment of attachments) {
     const originalName = sanitizeFileName(typeof attachment?.file_name === 'string' ? attachment.file_name : 'attachment');
     const mimeType = typeof attachment?.mime_type === 'string' && attachment.mime_type.trim() ? attachment.mime_type.trim() : null;
-    const dataBase64 = typeof attachment?.data_base64 === 'string' ? attachment.data_base64 : '';
-    if (!dataBase64) {
+    if (typeof attachment?.data_base64 !== 'string') {
       continue;
     }
+    const dataBase64 = attachment.data_base64;
 
     let fileBuffer: Buffer;
     try {
@@ -1134,7 +1134,11 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     } catch {
       continue;
     }
-    if (!fileBuffer.length || fileBuffer.length > MAX_FOLDER_FILE_SIZE_BYTES) {
+    const normalizedBase64 = dataBase64.replace(/\s+/g, '');
+    const canonicalBase64 = fileBuffer.toString('base64');
+    const isValidBase64 = normalizedBase64 === canonicalBase64
+      || normalizedBase64 === canonicalBase64.replace(/=+$/, '');
+    if (!isValidBase64 || fileBuffer.length > MAX_FOLDER_FILE_SIZE_BYTES) {
       continue;
     }
 
