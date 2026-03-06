@@ -8,6 +8,10 @@ By submitting a contribution to this project, you agree that:
 
 If your contribution is accepted, it will become part of the project.
 
+Unless explicitly stated otherwise, any contribution intentionally submitted
+for inclusion in this project shall be licensed under the same license
+as the project without additional terms or conditions.
+
 ## Pull Request Guidelines
 - Keep pull requests small and focused
 - Include a clear description
