@@ -36,7 +36,7 @@ const emit = defineEmits<{
             <Volume2 class="w-5 h-5 text-zinc-400 mr-3 mt-0.5" :class="channelType === 'voice' ? 'text-indigo-400' : ''" />
             <div>
               <div class="text-white font-medium">Voice</div>
-              <div class="text-xs text-gray-400">Hang out together with voice, video, and screen share</div>
+              <div class="text-xs text-zinc-400">Hang out together with voice, video, and screen share</div>
             </div>
           </label>
           <label class="flex items-center p-4 bg-zinc-900 border border-white/5 rounded-xl cursor-pointer hover:bg-zinc-800/80 hover:border-white/10 transition-all" :class="channelType === 'rss' ? 'ring-1 ring-indigo-500/50 bg-zinc-800/50' : ''">

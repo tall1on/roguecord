@@ -94,7 +94,7 @@ watch(() => chatStore.localUsername, (value) => {
 <template>
   <div v-if="visible" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-[2px] flex items-center justify-center p-4">
     <div class="w-full max-w-5xl h-[min(760px,94vh)] bg-zinc-950 border border-white/5 rounded-2xl shadow-2xl overflow-hidden flex">
-      <aside class="w-64 bg-zinc-900 border-r border-white/5 p-3 flex flex-col gap-1">
+      <aside class="w-64 bg-zinc-900 border-r border-white/5 p-3 flex flex-col gap-1 overflow-y-auto custom-scrollbar">
         <div class="px-3 py-2 text-xs font-bold text-zinc-400 uppercase tracking-widest mb-1">User Settings</div>
         
         <button 
