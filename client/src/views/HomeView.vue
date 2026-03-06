@@ -865,7 +865,7 @@ const folderFileCategoryIconClasses: Record<FolderFileCategory, string> = {
   code: 'text-sky-400',
   text: 'text-cyan-400',
   pdf: 'text-red-400',
-  generic: 'text-gray-400'
+  generic: 'text-zinc-400'
 }
 
 const getFileExtension = (fileName: string) => {
@@ -1099,7 +1099,7 @@ watch(
 
       <!-- Chat Messages Area -->
       <main ref="messagesContainer" class="flex-1 overflow-y-auto p-4 sm:p-5 space-y-1.5 custom-scrollbar bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-zinc-900/40 via-zinc-950 to-zinc-950" @scroll.passive="onMessagesScroll">
-          <div v-if="isFetchingOlderMessages" class="text-center text-xs text-gray-400 py-1">Loading older messages...</div>
+          <div v-if="isFetchingOlderMessages" class="text-center text-xs text-zinc-400 py-1 font-medium">Loading older messages...</div>
           <div v-if="chatStore.activeChannelMessages.length === 0" class="flex flex-col justify-end h-full pb-6">
             <div class="w-14 h-14 rounded-2xl bg-zinc-900 border border-white/5 flex items-center justify-center mb-4 shadow-sm">
               <span class="text-2xl text-zinc-400 font-medium">#</span>
@@ -1411,8 +1411,9 @@ watch(
         <p v-if="folderUploadError" class="mb-3 text-sm text-red-400">{{ folderUploadError }}</p>
         <p v-if="chatStore.lastError && chatStore.activeMainPanel.type === 'folder'" class="mb-3 text-sm text-red-400">{{ chatStore.lastError }}</p>
 
-        <div v-if="activeFolderFiles.length === 0" class="h-full flex items-center justify-center text-gray-400">
-          No files in this folder yet.
+        <div v-if="activeFolderFiles.length === 0" class="h-full flex flex-col items-center justify-center text-zinc-500">
+          <Folder class="w-16 h-16 mb-4 opacity-20" />
+          <p class="text-sm font-medium">No files in this folder yet.</p>
         </div>
 
         <div v-else-if="folderViewMode === 'list'" class="space-y-2">
@@ -1421,17 +1422,23 @@ watch(
             :key="file.id"
             class="flex items-center justify-between gap-4 rounded-xl border border-white/5 bg-zinc-900/60 px-4 py-3 hover:bg-zinc-900/80 transition-colors"
           >
-            <div class="min-w-0 flex items-center gap-3">
-              <component
-                :is="getFolderFileIcon(file.original_name)"
-                class="w-5 h-5 shrink-0"
-                :class="getFolderFileIconClass(file.original_name)"
-              />
+            <div class="min-w-0 flex items-center gap-4">
+              <div class="w-10 h-10 rounded-lg bg-zinc-800 border border-white/5 flex items-center justify-center shrink-0 shadow-sm group-hover:bg-zinc-700 transition-colors">
+                <component
+                  :is="getFolderFileIcon(file.original_name)"
+                  class="w-5 h-5"
+                  :class="getFolderFileIconClass(file.original_name)"
+                />
+              </div>
               <div class="min-w-0">
-                <p class="truncate text-sm text-zinc-100 font-medium">{{ file.original_name }}</p>
-                <p class="text-[11px] font-medium text-zinc-500 truncate mt-0.5">
-                  {{ formatFileSize(file.size_bytes) }} · {{ file.uploader_username || 'Unknown uploader' }} · {{ formatTime(file.created_at) }}
-                </p>
+                <p class="truncate text-[13px] text-zinc-200 font-bold group-hover:text-white transition-colors">{{ file.original_name }}</p>
+                <div class="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 mt-0.5">
+                  <span class="bg-zinc-800 px-1.5 py-0.5 border border-white/5 rounded text-zinc-400">{{ formatFileSize(file.size_bytes) }}</span>
+                  <span>•</span>
+                  <span>{{ file.uploader_username || 'Unknown uploader' }}</span>
+                  <span>•</span>
+                  <span>{{ formatTime(file.created_at) }}</span>
+                </div>
               </div>
             </div>
             <div class="shrink-0 flex items-center gap-2">
@@ -1454,31 +1461,32 @@ watch(
           </div>
         </div>
 
-        <div v-else class="grid gap-4 grid-cols-[repeat(auto-fill,minmax(160px,1fr))]">
+        <div v-else class="grid gap-4 grid-cols-[repeat(auto-fill,minmax(180px,1fr))] p-2">
           <div
             v-for="file in activeFolderFiles"
             :key="file.id"
-            class="group relative rounded-xl border border-[#3f4147] bg-[#2b2d31] p-3 flex flex-col items-center justify-center aspect-auto sm:aspect-square hover:bg-[#36393f] hover:border-[#4f5157] transition-all duration-200 shadow-sm overflow-hidden"
+            class="group relative rounded-xl border border-white/5 bg-zinc-900/60 p-4 flex flex-col items-center justify-center hover:bg-zinc-800/80 hover:border-white/10 transition-all duration-300 shadow-sm overflow-hidden min-h-[160px]"
           >
-            <div class="w-full flex flex-col items-center justify-center text-center gap-2 transition-transform duration-200">
-              <div class="flex justify-center w-full text-gray-400 group-hover:scale-110 transition-transform duration-200">
+            <div class="w-full flex flex-col items-center justify-center text-center gap-3 transition-transform duration-300 group-hover:-translate-y-2">
+              <div class="flex justify-center items-center w-16 h-16 rounded-2xl bg-zinc-800 border border-white/5 shadow-sm text-zinc-400 group-hover:scale-110 group-hover:bg-zinc-700 transition-all duration-300">
                 <component
                   :is="getFolderFileIcon(file.original_name)"
-                  class="w-16 h-16 shrink-0"
+                  class="w-8 h-8 shrink-0"
                   :class="getFolderFileIconClass(file.original_name)"
                 />
               </div>
               <div class="w-full">
-                <p class="w-full truncate text-sm text-zinc-100 font-medium px-1" :title="file.original_name">{{ file.original_name }}</p>
-                <p class="w-full text-xs text-gray-400 mt-0.5 truncate px-1" :title="`${file.uploader_username || 'Unknown uploader'} • ${formatTime(file.created_at)}`">
+                <p class="w-full truncate text-[13px] text-zinc-200 font-bold px-1 group-hover:text-white transition-colors" :title="file.original_name">{{ file.original_name }}</p>
+                <p class="w-full text-[11px] font-medium text-zinc-500 mt-1 truncate px-1" :title="`${file.uploader_username || 'Unknown uploader'} • ${formatTime(file.created_at)}`">
                   {{ formatFileSize(file.size_bytes) }}
                 </p>
               </div>
             </div>
-            <div class="mt-3 sm:mt-0 sm:absolute sm:bottom-0 sm:left-0 sm:right-0 sm:p-3 sm:pt-8 w-full sm:w-auto grid gap-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-200 sm:bg-gradient-to-t sm:from-[#36393f] sm:from-60% sm:to-transparent" :class="canManageFolderFiles ? 'grid-cols-2' : 'grid-cols-1'">
+            
+            <div class="absolute inset-x-0 bottom-0 p-3 pt-6 w-full flex gap-1.5 opacity-0 group-hover:opacity-100 transition-all duration-300 bg-gradient-to-t from-zinc-950 via-zinc-900/90 to-transparent translate-y-2 group-hover:translate-y-0" :class="canManageFolderFiles ? 'grid grid-cols-2' : 'flex justify-center'">
               <button
                 type="button"
-                class="w-full px-2 py-1.5 text-xs font-medium rounded bg-[#404249] hover:bg-[#4e5058] text-white transition-colors shadow-sm"
+                class="w-full flex justify-center items-center py-1.5 text-xs font-bold rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white transition-colors shadow-sm"
                 @click="requestFolderFileDownload(file.id)"
                 title="Download"
               >
@@ -1487,7 +1495,7 @@ watch(
               <button
                 v-if="canManageFolderFiles"
                 type="button"
-                class="w-full px-2 py-1.5 text-xs font-medium rounded bg-[#DA373C]/80 hover:bg-[#DA373C] text-white transition-colors shadow-sm"
+                class="w-full flex justify-center items-center py-1.5 text-xs font-bold rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors shadow-sm"
                 @click="requestFolderFileDelete(file.id, file.original_name)"
                 title="Delete"
               >
@@ -1643,15 +1651,23 @@ watch(
 <style scoped>
 .screen-stream-wrapper:fullscreen,
 .screen-stream-wrapper:-webkit-full-screen {
-  width: 100%;
-  height: 100%;
+  width: 100vw;
+  height: 100vh;
   background: #000;
+  border-radius: 0 !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .screen-stream-wrapper:fullscreen .screen-stream-video,
 .screen-stream-wrapper:-webkit-full-screen .screen-stream-video {
   width: 100%;
   height: 100%;
+  max-width: 100vw;
+  max-height: 100vh;
+  border-radius: 0 !important;
+  object-fit: contain;
 }
 
 .screen-stream-overlay {
@@ -1666,5 +1682,11 @@ watch(
 .screen-stream-wrapper:fullscreen .screen-stream-overlay,
 .screen-stream-wrapper:-webkit-full-screen .screen-stream-overlay {
   opacity: 1;
+  bottom: 32px;
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 90vw;
 }
 </style>
