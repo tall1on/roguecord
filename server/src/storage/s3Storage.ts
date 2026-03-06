@@ -507,6 +507,39 @@ export const downloadFileFromS3 = async (input: {
   return Buffer.concat(chunks);
 };
 
+export const getFileStreamFromS3 = async (input: {
+  config: S3StorageConfig;
+  key: string;
+  range?: string | null;
+}): Promise<{
+  body: AsyncIterable<Uint8Array>;
+  contentLength: number | null;
+  contentRange: string | null;
+  acceptRanges: string | null;
+  contentType: string | null;
+}> => {
+  const normalized = sanitizeConfig(input.config);
+  const resolved = resolveS3ClientConfig(normalized);
+  const client = createS3Client(resolved);
+  const response = await client.send(new GetObjectCommand({
+    Bucket: resolved.bucket,
+    Key: input.key,
+    Range: input.range?.trim() || undefined
+  }));
+
+  if (!response.Body) {
+    throw new Error('S3 object is empty');
+  }
+
+  return {
+    body: response.Body as AsyncIterable<Uint8Array>,
+    contentLength: typeof response.ContentLength === 'number' ? response.ContentLength : null,
+    contentRange: typeof response.ContentRange === 'string' ? response.ContentRange : null,
+    acceptRanges: typeof response.AcceptRanges === 'string' ? response.AcceptRanges : null,
+    contentType: typeof response.ContentType === 'string' ? response.ContentType : null
+  };
+};
+
 export const deleteFileFromS3 = async (input: {
   config: S3StorageConfig;
   key: string;
