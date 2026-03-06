@@ -40,7 +40,9 @@ import {
   getMessageAttachments,
   getMessageById,
   deleteMessageAttachmentById,
-  deleteMessageById
+  deleteMessageById,
+  toggleMessageReaction,
+  getMessageReactionSummary
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -361,7 +363,16 @@ const enrichMessageAttachmentsForClient = async <T extends { id: string; channel
     attachments: (attachmentMap[message.id] || []).map((attachment) => ({
       ...attachment,
       url: buildStoredFileUrl(attachment.storage_provider, message.channel_id, attachment.storage_name, attachment.storage_key)
-    }))
+    })),
+    reply_to_message: (message as T & { reply_to_message?: any }).reply_to_message
+      ? {
+          ...(message as T & { reply_to_message: any }).reply_to_message,
+          attachments: (((message as T & { reply_to_message: any }).reply_to_message.attachments) || []).map((attachment: any) => ({
+            ...attachment,
+            url: buildStoredFileUrl(attachment.storage_provider, (message as T & { reply_to_message: any }).reply_to_message.channel_id, attachment.storage_name, attachment.storage_key)
+          }))
+        }
+      : null
   }));
 };
 
@@ -644,6 +655,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'delete_message':
         await handleDeleteMessage(client, payload);
+        break;
+      case 'toggle_message_reaction':
+        await handleToggleMessageReaction(client, payload);
         break;
       case 'folder_list_files':
         await handleFolderListFiles(client, payload);
@@ -1127,9 +1141,12 @@ const handleGetMessages = async (
   }));
 };
 
-const handleSendMessage = async (client: ClientConnection, payload: { channel_id: string, content: string, attachments?: Array<{ file_name?: string; mime_type?: string; data_base64?: string }> }) => {
+const handleSendMessage = async (client: ClientConnection, payload: { channel_id: string, content: string, reply_to_message_id?: string | null, attachments?: Array<{ file_name?: string; mime_type?: string; data_base64?: string }> }) => {
   if (!client.userId) return;
   const { channel_id, content } = payload;
+  const replyToMessageId = typeof payload.reply_to_message_id === 'string' && payload.reply_to_message_id.trim()
+    ? payload.reply_to_message_id.trim()
+    : null;
   const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
   if (!channel_id || (!content && attachments.length === 0)) return;
 
@@ -1151,7 +1168,16 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     return;
   }
 
-  const message = await createMessage(channel_id, client.userId, content || '');
+  let replyToMessage = null;
+  if (replyToMessageId) {
+    replyToMessage = await getMessageById(replyToMessageId);
+    if (!replyToMessage || replyToMessage.channel_id !== channel_id) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Reply target not found' } }));
+      return;
+    }
+  }
+
+  const message = await createMessage(channel_id, client.userId, content || '', replyToMessageId);
 
   const createdAttachments: Array<Record<string, unknown>> = [];
 
@@ -1226,10 +1252,21 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     messageCreatedAt: message.created_at
   });
   
+  const replyAttachmentMap = replyToMessage ? await getMessageAttachments([replyToMessage.id]) : {};
+  const replyUser = replyToMessage ? await getUserById(replyToMessage.user_id) : null;
+
   const messageWithUser = withMessageEmbeds({
     ...message,
     user,
-    attachments: createdAttachments
+    attachments: createdAttachments,
+    reactions: message.reactions || [],
+    reply_to_message: replyToMessage && replyUser
+      ? {
+          ...replyToMessage,
+          user: replyUser,
+          attachments: replyAttachmentMap[replyToMessage.id] || []
+        }
+      : null
   });
 
   // Broadcast to all authenticated users (for simplicity, as requested)
@@ -1238,6 +1275,54 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     type: 'new_message',
     payload: { message: messageWithUser }
   });
+};
+
+const handleToggleMessageReaction = async (
+  client: ClientConnection,
+  payload: { channel_id?: string; message_id?: string; emoji?: string }
+) => {
+  if (!client.userId) return;
+
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  const messageId = typeof payload?.message_id === 'string' ? payload.message_id : '';
+  const emoji = typeof payload?.emoji === 'string' ? payload.emoji.trim() : '';
+  if (!channelId || !messageId || !emoji) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid reaction payload' } }));
+    return;
+  }
+
+  const channel = await getChannelById(channelId);
+  if (!channel || (channel.type !== 'text' && channel.type !== 'rss')) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Message channel not found' } }));
+    return;
+  }
+
+  const message = await getMessageById(messageId);
+  if (!message || message.channel_id !== channelId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Message not found' } }));
+    return;
+  }
+
+  await toggleMessageReaction(messageId, client.userId, emoji);
+  const reactions = await getMessageReactionSummary(messageId);
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'message_reactions_updated',
+    payload: {
+      channel_id: channelId,
+      message_id: messageId,
+      reactions
+    }
+  });
+
+  client.ws.send(JSON.stringify({
+    type: 'message_reaction_toggled',
+    payload: {
+      channel_id: channelId,
+      message_id: messageId,
+      reactions
+    }
+  }));
 };
 
 const handleFolderListFiles = async (client: ClientConnection, payload: { channel_id?: string }) => {

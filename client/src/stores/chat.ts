@@ -53,6 +53,12 @@ export interface MessageEmbed {
   embedUrl: string | null;
 }
 
+export interface MessageReaction {
+  emoji: string;
+  count: number;
+  reacted_by_current_user: boolean;
+}
+
 export interface Message {
   id: string;
   channel_id: string;
@@ -62,6 +68,20 @@ export interface Message {
   user?: User;
   embeds?: MessageEmbed[];
   attachments?: MessageAttachment[];
+  reply_to_message_id?: string | null;
+  reply_to_message?: MessageReplyReference | null;
+  reactions: MessageReaction[];
+}
+
+export interface MessageReplyReference {
+  id: string;
+  channel_id: string;
+  user_id: string;
+  content: string;
+  created_at: string;
+  user?: User;
+  attachments?: MessageAttachment[];
+  reactions?: MessageReaction[];
 }
 
 export interface MessageAttachment {
@@ -391,8 +411,57 @@ export const useChatStore = defineStore('chat', () => {
     };
   };
 
+  const normalizeMessageReactions = (reactions: unknown): MessageReaction[] => {
+    if (!Array.isArray(reactions)) {
+      return [];
+    }
+
+    return reactions
+      .map((reaction): MessageReaction | null => {
+        if (!reaction || typeof reaction !== 'object') {
+          return null;
+        }
+
+        const emoji = typeof (reaction as { emoji?: unknown }).emoji === 'string'
+          ? (reaction as { emoji: string }).emoji.trim()
+          : '';
+        const rawCount = (reaction as { count?: unknown }).count;
+        const count = typeof rawCount === 'number' && Number.isFinite(rawCount)
+          ? Math.max(0, Math.floor(rawCount))
+          : 0;
+
+        if (!emoji || count <= 0) {
+          return null;
+        }
+
+        return {
+          emoji,
+          count,
+          reacted_by_current_user: (reaction as { reacted_by_current_user?: unknown }).reacted_by_current_user === true
+        };
+      })
+      .filter((reaction): reaction is MessageReaction => Boolean(reaction))
+      .sort((a, b) => a.emoji.localeCompare(b.emoji));
+  };
+
+  const normalizeMessageShape = <T extends Message | MessageReplyReference>(message: T): T => {
+    return {
+      ...message,
+      reactions: normalizeMessageReactions((message as { reactions?: unknown }).reactions)
+    } as T;
+  };
+
   const normalizeIncomingMessage = (message: Message, wsAddress?: string | null) => {
-    return normalizeMessageAttachments(message, wsAddress);
+    const normalizedMessage = normalizeMessageShape(normalizeMessageAttachments(message, wsAddress));
+
+    if (!normalizedMessage.reply_to_message) {
+      return normalizedMessage;
+    }
+
+    return {
+      ...normalizedMessage,
+      reply_to_message: normalizeMessageShape(normalizeMessageAttachments(normalizedMessage.reply_to_message as Message, wsAddress))
+    };
   };
 
   const normalizeIncomingMessages = (incomingMessages: Message[], wsAddress?: string | null) => {
@@ -862,6 +931,31 @@ export const useChatStore = defineStore('chat', () => {
     markActiveChannelReadFromMessages(channelId);
   };
 
+  const updateMessageInChannel = (channelId: string, messageId: string, updater: (message: Message) => Message) => {
+    if (!channelId || !messageId) {
+      return;
+    }
+
+    const existingMessages = messages.value[channelId];
+    if (!existingMessages?.length) {
+      return;
+    }
+
+    let didUpdate = false;
+    messages.value[channelId] = existingMessages.map((message) => {
+      if (message.id !== messageId) {
+        return message;
+      }
+
+      didUpdate = true;
+      return updater(message);
+    });
+
+    if (!didUpdate) {
+      return;
+    }
+  };
+
   const markChannelReadOnServer = (channelId: string, message: Message | null | undefined) => {
     if (!message?.id || !message?.created_at) {
       return;
@@ -1248,6 +1342,17 @@ export const useChatStore = defineStore('chat', () => {
         removeMessageFromChannel(channelId, messageId);
         break;
       }
+
+      case 'message_reactions_updated': {
+        const channelId = payload.channel_id as string;
+        const messageId = payload.message_id as string;
+        const reactions = normalizeMessageReactions(payload.reactions);
+        updateMessageInChannel(channelId, messageId, (existingMessage) => ({
+          ...existingMessage,
+          reactions
+        }));
+        break;
+      }
         
       case 'error':
         lastError.value = payload.message;
@@ -1448,8 +1553,8 @@ export const useChatStore = defineStore('chat', () => {
     send('submit_admin_key', { key });
   };
 
-  const sendMessage = (channel_id: string, content: string) => {
-    send('send_message', { channel_id, content });
+  const sendMessage = (channel_id: string, content: string, reply_to_message_id?: string | null) => {
+    send('send_message', { channel_id, content, reply_to_message_id: reply_to_message_id || null });
   };
 
   const deleteMessage = (channel_id: string, message_id: string) => {
@@ -1461,7 +1566,17 @@ export const useChatStore = defineStore('chat', () => {
     send('delete_message', { channel_id, message_id });
   };
 
-  const sendMessageWithAttachments = async (channel_id: string, content: string, files: File[]) => {
+  const toggleMessageReaction = (channel_id: string, message_id: string, emoji: string) => {
+    const normalizedEmoji = emoji.trim();
+    if (!channel_id || !message_id || !normalizedEmoji) {
+      lastError.value = 'Channel ID, message ID, and emoji are required';
+      return;
+    }
+
+    send('toggle_message_reaction', { channel_id, message_id, emoji: normalizedEmoji });
+  };
+
+  const sendMessageWithAttachments = async (channel_id: string, content: string, files: File[], reply_to_message_id?: string | null) => {
     const attachments = await Promise.all(files.map(async (file) => {
       const dataBase64 = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
@@ -1491,7 +1606,7 @@ export const useChatStore = defineStore('chat', () => {
       };
     }));
 
-    send('send_message', { channel_id, content, attachments });
+    send('send_message', { channel_id, content, attachments, reply_to_message_id: reply_to_message_id || null });
   };
 
   const kickMember = (targetUserId: string, options: { reason?: string; deleteMode?: ModerationDeleteMode; deleteHours?: number }) => {
@@ -1705,6 +1820,7 @@ export const useChatStore = defineStore('chat', () => {
     clearError,
     sendMessage,
     deleteMessage,
+    toggleMessageReaction,
     sendMessageWithAttachments,
     loadOlderMessages,
     isLoadingMessagesForChannel,
