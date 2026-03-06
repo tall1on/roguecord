@@ -349,6 +349,56 @@ export const useChatStore = defineStore('chat', () => {
     return `${url}${separator}v=${encodeURIComponent(normalizedVersion)}`;
   };
 
+  const resolveConnectedServerBaseUrl = (wsAddress?: string | null) => {
+    if (wsAddress) {
+      return getHttpBaseFromWsAddress(wsAddress);
+    }
+
+    const activeConnection = activeConnectionId.value
+      ? savedConnections.value.find((connection) => connection.id === activeConnectionId.value)
+      : null;
+
+    return activeConnection
+      ? getHttpBaseFromWsAddress(activeConnection.address)
+      : window.location.origin;
+  };
+
+  const resolveAttachmentUrl = (attachmentUrl?: string | null, wsAddress?: string | null) => {
+    const url = (attachmentUrl || '').trim();
+    if (!url) {
+      return null;
+    }
+
+    if (/^(data:|blob:|https?:\/\/|\/\/)/i.test(url)) {
+      return url;
+    }
+
+    const normalizedPath = url.startsWith('/') ? url : `/${url}`;
+    return `${resolveConnectedServerBaseUrl(wsAddress)}${normalizedPath}`;
+  };
+
+  const normalizeMessageAttachments = (message: Message, wsAddress?: string | null): Message => {
+    if (!Array.isArray(message.attachments) || message.attachments.length === 0) {
+      return message;
+    }
+
+    return {
+      ...message,
+      attachments: message.attachments.map((attachment) => ({
+        ...attachment,
+        url: resolveAttachmentUrl(attachment.url, wsAddress)
+      }))
+    };
+  };
+
+  const normalizeIncomingMessage = (message: Message, wsAddress?: string | null) => {
+    return normalizeMessageAttachments(message, wsAddress);
+  };
+
+  const normalizeIncomingMessages = (incomingMessages: Message[], wsAddress?: string | null) => {
+    return incomingMessages.map((message) => normalizeIncomingMessage(message, wsAddress));
+  };
+
   const resolveServerIconUrl = (iconPath?: string | null, wsAddress?: string | null, version?: string | null) => {
     const path = (iconPath || '').trim();
     if (!path) {
@@ -361,13 +411,7 @@ export const useChatStore = defineStore('chat', () => {
         return null;
       }
 
-      const baseUrl = wsAddress
-        ? getHttpBaseFromWsAddress(wsAddress)
-        : (activeConnectionId.value
-          ? getHttpBaseFromWsAddress(savedConnections.value.find((connection) => connection.id === activeConnectionId.value)?.address || '')
-          : window.location.origin);
-
-      return appendServerIconVersion(`${baseUrl}/server-icons/s3/${encodeURIComponent(key)}`, version);
+      return appendServerIconVersion(`${resolveConnectedServerBaseUrl(wsAddress)}/server-icons/s3/${encodeURIComponent(key)}`, version);
     }
 
     if (/^(data:|blob:|https?:\/\/|\/\/)/i.test(path)) {
@@ -375,19 +419,7 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-    if (wsAddress) {
-      return appendServerIconVersion(`${getHttpBaseFromWsAddress(wsAddress)}${normalizedPath}`, version);
-    }
-
-    const activeConnection = activeConnectionId.value
-      ? savedConnections.value.find((connection) => connection.id === activeConnectionId.value)
-      : null;
-
-    const baseUrl = activeConnection
-      ? getHttpBaseFromWsAddress(activeConnection.address)
-      : window.location.origin;
-
-    return appendServerIconVersion(`${baseUrl}${normalizedPath}`, version);
+    return appendServerIconVersion(`${resolveConnectedServerBaseUrl(wsAddress)}${normalizedPath}`, version);
   };
 
   const requestServerRefresh = () => {
@@ -1142,7 +1174,7 @@ export const useChatStore = defineStore('chat', () => {
       case 'messages_list': {
         const channelId = payload.channel_id as string;
         const pageState = ensureMessagePageState(channelId);
-        const incomingMessages = (payload.messages || []) as Message[];
+        const incomingMessages = normalizeIncomingMessages((payload.messages || []) as Message[]);
         const isOlderPage = payload.is_older_page === true;
 
         if (isOlderPage) {
@@ -1173,7 +1205,7 @@ export const useChatStore = defineStore('chat', () => {
       }
         
       case 'new_message':
-        const msg = payload.message;
+        const msg = normalizeIncomingMessage(payload.message as Message);
         const pageState = ensureMessagePageState(msg.channel_id);
         const alreadyPresent = Boolean(messages.value[msg.channel_id]?.some((existing) => existing.id === msg.id));
         if (!messages.value[msg.channel_id]) {
