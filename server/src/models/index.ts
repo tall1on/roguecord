@@ -540,6 +540,17 @@ export interface Message {
   user_id: string;
   content: string;
   created_at: string;
+  reply_to_message_id?: string | null;
+  attachments?: MessageAttachment[];
+}
+
+export interface MessageReplyReference {
+  id: string;
+  channel_id: string;
+  user_id: string;
+  content: string;
+  created_at: string;
+  user: User;
   attachments?: MessageAttachment[];
 }
 
@@ -575,6 +586,7 @@ export interface MessagePage {
 
 export interface MessageWithUserAndAttachmentData extends MessageWithUserAndEmbedData {
   attachments?: MessageAttachment[];
+  reply_to_message?: MessageReplyReference | null;
 }
 
 export interface ChannelReadState {
@@ -627,10 +639,72 @@ export interface BanRule {
   revoked_at: string | null;
 }
 
-export const createMessage = async (channel_id: string, user_id: string, content: string): Promise<Message> => {
+export const createMessage = async (channel_id: string, user_id: string, content: string, replyToMessageId: string | null = null): Promise<Message> => {
   const id = crypto.randomUUID();
-  await dbRun('INSERT INTO messages (id, channel_id, user_id, content) VALUES (?, ?, ?, ?)', [id, channel_id, user_id, content]);
+  await dbRun('INSERT INTO messages (id, channel_id, user_id, content, reply_to_message_id) VALUES (?, ?, ?, ?, ?)', [id, channel_id, user_id, content, replyToMessageId]);
   return (await dbGet<Message>('SELECT * FROM messages WHERE id = ?', [id]))!;
+};
+
+export const getMessageReplyReferences = async (messageIds: string[]): Promise<Record<string, MessageReplyReference | null>> => {
+  if (messageIds.length === 0) {
+    return {};
+  }
+
+  const placeholders = messageIds.map(() => '?').join(', ');
+  const rows = await dbAll<any>(
+    `
+      SELECT
+        m.id AS message_id,
+        r.id AS reply_id,
+        r.channel_id AS reply_channel_id,
+        r.user_id AS reply_user_id,
+        r.content AS reply_content,
+        r.created_at AS reply_created_at,
+        u.id AS reply_user_join_id,
+        u.username AS reply_username,
+        u.avatar_url AS reply_avatar_url,
+        u.public_key AS reply_public_key,
+        u.last_ip AS reply_last_ip,
+        u.role AS reply_role,
+        u.created_at AS reply_user_created_at
+      FROM messages m
+      LEFT JOIN messages r ON r.id = m.reply_to_message_id
+      LEFT JOIN users u ON u.id = r.user_id
+      WHERE m.id IN (${placeholders})
+    `,
+    messageIds
+  );
+
+  const replyIds = rows
+    .map((row) => row.reply_id as string | null)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+  const attachmentMap = await getMessageAttachments(replyIds);
+
+  return rows.reduce<Record<string, MessageReplyReference | null>>((acc, row) => {
+    if (!row.reply_id || !row.reply_user_join_id) {
+      acc[row.message_id] = null;
+      return acc;
+    }
+
+    acc[row.message_id] = {
+      id: row.reply_id,
+      channel_id: row.reply_channel_id,
+      user_id: row.reply_user_id,
+      content: row.reply_content,
+      created_at: row.reply_created_at,
+      user: {
+        id: row.reply_user_join_id,
+        username: row.reply_username,
+        avatar_url: row.reply_avatar_url,
+        public_key: row.reply_public_key,
+        last_ip: row.reply_last_ip,
+        role: row.reply_role,
+        created_at: row.reply_user_created_at
+      },
+      attachments: attachmentMap[row.reply_id] || []
+    };
+    return acc;
+  }, {});
 };
 
 export const createMessageAttachment = async (input: {
@@ -1080,13 +1154,14 @@ export const getChannelMessages = async (
 
   const hasMore = messages.length > normalizedLimit;
   const pageMessages = hasMore ? messages.slice(0, normalizedLimit) : messages;
+  const replyMap = await getMessageReplyReferences(pageMessages.map((message) => message.id));
   
   // Fetch users for messages (could be done with a JOIN, but this is fine for now)
   const messagesWithUsers: MessageWithUserAndEmbedData[] = [];
   for (const msg of pageMessages) {
     const user = await getUserById(msg.user_id);
     if (user) {
-      messagesWithUsers.push(withMessageEmbeds({ ...msg, user }));
+      messagesWithUsers.push(withMessageEmbeds({ ...msg, user, reply_to_message: replyMap[msg.id] || null }));
     }
   }
 

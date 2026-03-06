@@ -62,6 +62,18 @@ export interface Message {
   user?: User;
   embeds?: MessageEmbed[];
   attachments?: MessageAttachment[];
+  reply_to_message_id?: string | null;
+  reply_to_message?: MessageReplyReference | null;
+}
+
+export interface MessageReplyReference {
+  id: string;
+  channel_id: string;
+  user_id: string;
+  content: string;
+  created_at: string;
+  user?: User;
+  attachments?: MessageAttachment[];
 }
 
 export interface MessageAttachment {
@@ -392,7 +404,16 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const normalizeIncomingMessage = (message: Message, wsAddress?: string | null) => {
-    return normalizeMessageAttachments(message, wsAddress);
+    const normalizedMessage = normalizeMessageAttachments(message, wsAddress);
+
+    if (!normalizedMessage.reply_to_message) {
+      return normalizedMessage;
+    }
+
+    return {
+      ...normalizedMessage,
+      reply_to_message: normalizeMessageAttachments(normalizedMessage.reply_to_message, wsAddress)
+    };
   };
 
   const normalizeIncomingMessages = (incomingMessages: Message[], wsAddress?: string | null) => {
@@ -1448,8 +1469,8 @@ export const useChatStore = defineStore('chat', () => {
     send('submit_admin_key', { key });
   };
 
-  const sendMessage = (channel_id: string, content: string) => {
-    send('send_message', { channel_id, content });
+  const sendMessage = (channel_id: string, content: string, reply_to_message_id?: string | null) => {
+    send('send_message', { channel_id, content, reply_to_message_id: reply_to_message_id || null });
   };
 
   const deleteMessage = (channel_id: string, message_id: string) => {
@@ -1461,7 +1482,7 @@ export const useChatStore = defineStore('chat', () => {
     send('delete_message', { channel_id, message_id });
   };
 
-  const sendMessageWithAttachments = async (channel_id: string, content: string, files: File[]) => {
+  const sendMessageWithAttachments = async (channel_id: string, content: string, files: File[], reply_to_message_id?: string | null) => {
     const attachments = await Promise.all(files.map(async (file) => {
       const dataBase64 = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
@@ -1491,7 +1512,7 @@ export const useChatStore = defineStore('chat', () => {
       };
     }));
 
-    send('send_message', { channel_id, content, attachments });
+    send('send_message', { channel_id, content, attachments, reply_to_message_id: reply_to_message_id || null });
   };
 
   const kickMember = (targetUserId: string, options: { reason?: string; deleteMode?: ModerationDeleteMode; deleteHours?: number }) => {

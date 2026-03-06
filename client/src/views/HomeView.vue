@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
-import { Archive, Code2, File, FileText, Film, Image, Music2, Trash2 } from 'lucide-vue-next'
+import { Archive, Code2, File, FileText, Film, Image, Music2, Reply, Trash2, X } from 'lucide-vue-next'
 import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, type MessageAttachment } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
@@ -20,6 +20,7 @@ const folderUploadError = ref<string | null>(null)
 const folderViewMode = ref<'list' | 'tiles'>('list')
 const pendingMessageAttachments = ref<File[]>([])
 const isSendingMessage = ref(false)
+const replyDraftMessage = ref<Message | null>(null)
 
 const TOP_SCROLL_THRESHOLD_PX = 120
 const BOTTOM_SCROLL_THRESHOLD_PX = 120
@@ -213,8 +214,12 @@ const canDeleteMessage = (message: Message) => {
   return message.user_id === currentUserId || currentRole === 'admin' || currentRole === 'owner'
 }
 
+const canReplyToMessage = (message: Message) => {
+  return Boolean(activeTextChannel.value) && !isReadOnlyRssChannel.value && message.channel_id === activeTextChannel.value?.id
+}
+
 const openMessageContextMenu = (event: MouseEvent, message: Message) => {
-  if (!canDeleteMessage(message)) {
+  if (!canDeleteMessage(message) && !canReplyToMessage(message)) {
     closeMessageContextMenu()
     return
   }
@@ -223,7 +228,7 @@ const openMessageContextMenu = (event: MouseEvent, message: Message) => {
   event.stopPropagation()
 
   const estimatedWidth = 224
-  const estimatedHeight = 52
+  const estimatedHeight = (canReplyToMessage(message) ? 52 : 0) + (canDeleteMessage(message) ? 52 : 0)
   const maxX = Math.max(8, window.innerWidth - estimatedWidth - 8)
   const maxY = Math.max(8, window.innerHeight - estimatedHeight - 8)
 
@@ -233,6 +238,17 @@ const openMessageContextMenu = (event: MouseEvent, message: Message) => {
     y: Math.min(event.clientY, maxY),
     message
   }
+}
+
+const startReplyFromContextMenu = () => {
+  const message = messageContextMenu.value.message
+  if (!message || !canReplyToMessage(message)) return
+  replyDraftMessage.value = message
+  closeMessageContextMenu()
+}
+
+const clearReplyDraft = () => {
+  replyDraftMessage.value = null
 }
 
 const deleteMessageFromContextMenu = () => {
@@ -650,15 +666,28 @@ const submitMessage = async () => {
   isSendingMessage.value = true
   try {
     if (pendingMessageAttachments.value.length > 0) {
-      await chatStore.sendMessageWithAttachments(activeTextChannel.value.id, trimmedMessage, pendingMessageAttachments.value)
+      await chatStore.sendMessageWithAttachments(activeTextChannel.value.id, trimmedMessage, pendingMessageAttachments.value, replyDraftMessage.value?.id || null)
     } else {
-      chatStore.sendMessage(activeTextChannel.value.id, trimmedMessage)
+      chatStore.sendMessage(activeTextChannel.value.id, trimmedMessage, replyDraftMessage.value?.id || null)
     }
     messageInput.value = ''
     pendingMessageAttachments.value = []
+    clearReplyDraft()
   } finally {
     isSendingMessage.value = false
   }
+}
+
+const getReplyAuthorName = (message: Message | null | undefined) => message?.user?.username || 'Unknown User'
+
+const getReplyPreviewText = (message: Message | null | undefined) => {
+  if (!message) return ''
+  const content = message.content.trim()
+  if (content) return content
+  if (message.attachments?.length) {
+    return message.attachments.length === 1 ? '1 attachment' : `${message.attachments.length} attachments`
+  }
+  return 'Message'
 }
 
 const getAttachmentDisplayLabel = (attachment: MessageAttachment) => attachment.original_name
@@ -905,6 +934,7 @@ watch(
     isFetchingOlderMessages.value = false
     messageInput.value = ''
     pendingMessageAttachments.value = []
+    clearReplyDraft()
     await nextTick()
     scrollToBottom()
   }
@@ -1010,6 +1040,13 @@ watch(
                 <span class="font-semibold text-[14px] cursor-pointer transition-colors" :class="entry.message.user?.role === 'admin' ? 'text-red-400 hover:text-red-300' : 'text-zinc-200 hover:text-white'">{{ entry.message.user?.username || 'Unknown User' }}</span>
                 <span class="text-[10px] font-medium text-zinc-500 group-hover:text-zinc-400">{{ formatTime(entry.message.created_at) }}</span>
               </div>
+              <div v-if="entry.message.reply_to_message" class="mb-1 flex max-w-[420px] items-center gap-2 rounded-md border border-white/5 bg-zinc-900/50 px-2.5 py-1.5">
+                <Reply class="w-3.5 h-3.5 shrink-0 text-zinc-500" />
+                <div class="min-w-0">
+                  <p class="text-[11px] font-medium text-zinc-400 truncate">{{ getReplyAuthorName(entry.message.reply_to_message) }}</p>
+                  <p class="text-[12px] text-zinc-500 truncate">{{ getReplyPreviewText(entry.message.reply_to_message) }}</p>
+                </div>
+              </div>
               <p v-if="entry.message.content" class="text-zinc-300 whitespace-pre-wrap break-words leading-[1.35] text-[14px]" v-html="formatMessageContentWithLinks(entry.message.content)"></p>
               <div v-if="entry.message.attachments?.length" class="mt-2 space-y-2">
                 <a
@@ -1082,6 +1119,17 @@ watch(
         @contextmenu.stop
       >
         <button
+          v-if="messageContextMenu.message && canReplyToMessage(messageContextMenu.message)"
+          type="button"
+          class="w-full px-3 py-2 text-left text-sm text-zinc-200 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors"
+          role="menuitem"
+          @click="startReplyFromContextMenu"
+        >
+          <Reply class="w-4 h-4" />
+          Reply
+        </button>
+        <button
+          v-if="messageContextMenu.message && canDeleteMessage(messageContextMenu.message)"
           type="button"
           class="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors"
           role="menuitem"
@@ -1101,6 +1149,19 @@ watch(
           class="hidden"
           @change="onMessageAttachmentPicked"
         />
+        <div v-if="replyDraftMessage" class="mb-2 flex items-start justify-between gap-3 rounded-lg border border-indigo-500/20 bg-indigo-500/5 p-2.5">
+          <div class="min-w-0">
+            <p class="text-xs font-semibold text-indigo-300">Replying to {{ getReplyAuthorName(replyDraftMessage) }}</p>
+            <p class="text-xs text-zinc-400 truncate">{{ getReplyPreviewText(replyDraftMessage) }}</p>
+          </div>
+          <button
+            type="button"
+            class="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors"
+            @click="clearReplyDraft"
+          >
+            <X class="w-4 h-4" />
+          </button>
+        </div>
         <div v-if="pendingMessageAttachments.length > 0" class="mb-2 space-y-2 rounded-lg border border-white/5 bg-zinc-900/40 p-2.5">
           <div
             v-for="(attachment, attachmentIndex) in pendingMessageAttachments"
