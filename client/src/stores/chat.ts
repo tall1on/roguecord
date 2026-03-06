@@ -275,18 +275,45 @@ export const useChatStore = defineStore('chat', () => {
     localStorage.setItem('username', username);
   };
 
+  const DEFAULT_SERVER_PORT = '1337';
+  const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+
+  const isLocalServerHostname = (hostname: string) => {
+    const normalizedHostname = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
+    return LOCALHOST_HOSTNAMES.has(normalizedHostname);
+  };
+
   const normalizeServerAddress = (address: string) => {
-    let wsUrl = address.trim();
+    const wsUrl = address.trim();
     if (!wsUrl) return wsUrl;
 
-    if (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://')) {
-      const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
-      wsUrl = `${protocol}${wsUrl}`;
-    } else if (wsUrl.startsWith('ws://') && window.location.protocol === 'https:') {
-      wsUrl = wsUrl.replace(/^ws:\/\//i, 'wss://');
-    }
+    const hasProtocol = /^wss?:\/\//i.test(wsUrl);
+    const rawAddress = hasProtocol ? wsUrl.replace(/^wss?:\/\//i, '') : wsUrl;
+    const [rawHostAndPort = '', ...pathParts] = rawAddress.split('/');
+    const normalizedHostAndPort = rawHostAndPort.replace(/^0\.0\.0\.0(?=[:$])/i, 'localhost');
+    const hostMatch = normalizedHostAndPort.match(/^\[([^\]]+)\](?::(\d+))?$/);
+    const hostForProtocol = hostMatch
+      ? hostMatch[1] || ''
+      : normalizedHostAndPort.replace(/:(\d+)$/, '');
+    const protocol = hasProtocol
+      ? (wsUrl.toLowerCase().startsWith('wss://') ? 'wss://' : 'ws://')
+      : (isLocalServerHostname(hostForProtocol) ? 'ws://' : 'wss://');
+    const hasPort = hostMatch ? Boolean(hostMatch[2]) : /:\d+$/.test(normalizedHostAndPort);
+    const normalizedPath = pathParts.length > 0 ? `/${pathParts.join('/')}` : '';
 
-    return wsUrl.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`);
+    console.log('[DEBUG] normalizeServerAddress', {
+      input: address,
+      trimmedInput: wsUrl,
+      hasProtocol,
+      rawHostAndPort,
+      normalizedHostAndPort,
+      hostForProtocol,
+      selectedProtocol: protocol,
+      hasPort,
+      normalizedPath,
+    });
+
+    return `${protocol}${normalizedHostAndPort}${hasPort ? '' : `:${DEFAULT_SERVER_PORT}`}${normalizedPath}`;
   };
 
   const getHttpBaseFromWsAddress = (address: string) => {
@@ -513,15 +540,16 @@ export const useChatStore = defineStore('chat', () => {
       if (host === '0.0.0.0') {
         host = 'localhost';
       }
-      const port = '1337'; // Assuming server is on 1337
+      const port = DEFAULT_SERVER_PORT; // Assuming server is on 1337
       // Use wss:// if the page is loaded over https, otherwise ws://
       const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
       wsUrl = `${protocol}${host}:${port}`;
     } else if (wsUrl.startsWith('ws://') && window.location.protocol === 'https:') {
-      wsUrl = wsUrl.replace(/^ws:\/\//i, 'wss://');
+      console.log('[DEBUG] Preserving explicit ws:// address on https page', { input: wsUrl });
     }
 
-    // Replace 0.0.0.0 with localhost in the final URL to prevent browser connection errors
+    console.log('[DEBUG] connect pre-normalize wsUrl', { inputAddress: address, preNormalizedWsUrl: wsUrl });
+
     wsUrl = normalizeServerAddress(wsUrl);
 
     console.log(`[DEBUG] Final wsUrl: ${wsUrl}`);

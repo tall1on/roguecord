@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { RouterView } from 'vue-router'
 import { useRouter } from 'vue-router'
+import { Minus, Square, X } from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import LoginModal from '../components/layout/modals/LoginModal.vue'
@@ -13,6 +14,7 @@ import InviteModal from '../components/layout/modals/InviteModal.vue'
 import ServerListSidebar from '../components/layout/ServerListSidebar.vue'
 import ChannelListSidebar from '../components/layout/ChannelListSidebar.vue'
 import MemberListSidebar from '../components/layout/MemberListSidebar.vue'
+import { isTauri } from '../utils/isTauri'
 
 type ServerSettingsNavGroup = {
   id: string
@@ -26,10 +28,14 @@ type SettingsSection = 'general' | 'audio' | 'connections' | 'server'
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
 const router = useRouter()
+const isTauriApp = isTauri()
+const tauriWindow = shallowRef<Awaited<ReturnType<typeof import('@tauri-apps/api/window')['getCurrentWindow']>> | null>(null)
+let unlistenWindowResized: null | (() => void) = null
 
 const usernameInput = ref('')
 const showCreateServerModal = ref(false)
 const newServerAddress = ref('')
+const isMaximized = ref(false)
 
 const showCreateChannelModal = ref(false)
 const newChannelName = ref('')
@@ -97,7 +103,7 @@ const activeServer = computed(() => {
       return { name: connection.name }
     }
   }
-  return { name: 'RougeCord Server' }
+  return { name: 'RougeCord' }
 })
 
 const getCurrentStorageFingerprint = () => {
@@ -371,6 +377,39 @@ const openSettings = (section: SettingsSection = 'general') => {
   void webrtcStore.refreshAudioDevices()
 }
 
+const syncWindowState = async () => {
+  if (!tauriWindow.value) {
+    return
+  }
+
+  isMaximized.value = await tauriWindow.value.isMaximized()
+}
+
+const minimizeWindow = async () => {
+  if (!tauriWindow.value) {
+    return
+  }
+
+  await tauriWindow.value.minimize()
+}
+
+const toggleMaximizeWindow = async () => {
+  if (!tauriWindow.value) {
+    return
+  }
+
+  await tauriWindow.value.toggleMaximize()
+  await syncWindowState()
+}
+
+const closeWindow = async () => {
+  if (!tauriWindow.value) {
+    return
+  }
+
+  await tauriWindow.value.close()
+}
+
 const handleGlobalKeyDown = (event: KeyboardEvent) => {
   if (event.key === 'Escape' && showSettingsPage.value) {
     showSettingsPage.value = false
@@ -471,16 +510,71 @@ onMounted(() => {
   if (lastUsedServer && autoConnectLastServer.value) {
     chatStore.connect(lastUsedServer, true)
   }
+
+  if (!isTauriApp) {
+    return
+  }
+
+  void (async () => {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    tauriWindow.value = getCurrentWindow()
+
+    await syncWindowState()
+
+    unlistenWindowResized = await tauriWindow.value.onResized(async () => {
+      await syncWindowState()
+    })
+  })()
 })
 
 onUnmounted(() => {
   document.removeEventListener('keydown', handleGlobalKeyDown)
   chatStore.removeMessageListener(handleChatStoreMessage)
+  unlistenWindowResized?.()
+  unlistenWindowResized = null
 })
 </script>
 
 <template>
-  <div class="flex h-screen w-full overflow-hidden bg-zinc-950 text-zinc-300 font-sans">
+  <div class="flex h-screen w-full flex-col overflow-hidden bg-zinc-950 text-zinc-300 font-sans">
+    <div
+      v-if="isTauriApp"
+      class="tauri-titlebar flex h-10 shrink-0 items-center border-b border-zinc-800 bg-zinc-900/95"
+    >
+      <div class="tauri-titlebar-drag-region flex min-w-0 flex-1 items-center px-4" data-tauri-drag-region>
+        <div class="truncate text-sm font-medium text-zinc-400">
+          {{ activeServer.name }}
+        </div>
+      </div>
+
+      <div class="tauri-titlebar-controls flex h-full items-stretch">
+        <button
+          type="button"
+          class="tauri-titlebar-button"
+          aria-label="Minimize window"
+          @click="minimizeWindow"
+        >
+          <Minus class="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          class="tauri-titlebar-button"
+          :aria-label="isMaximized ? 'Restore window' : 'Maximize window'"
+          @click="toggleMaximizeWindow"
+        >
+          <Square class="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          class="tauri-titlebar-button tauri-titlebar-button-close"
+          aria-label="Close window"
+          @click="closeWindow"
+        >
+          <X class="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+
     <LoginModal :visible="!chatStore.localUsername" v-model:username="usernameInput" @login="login" />
 
     <CreateServerModal
@@ -532,38 +626,40 @@ onUnmounted(() => {
       v-model:autoConnectLastServer="autoConnectLastServer"
     />
 
-    <ServerListSidebar @open-create-server="showCreateServerModal = true" />
+    <div class="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+      <ServerListSidebar @open-create-server="showCreateServerModal = true" />
 
-    <div v-if="chatStore.moderationNotice" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm">
-      <div class="bg-zinc-950 border border-white/10 p-6 rounded-xl shadow-2xl w-[400px] max-w-[95vw]">
-        <h2 class="text-xl font-bold text-white mb-2">{{ chatStore.moderationNotice.title }}</h2>
-        <p class="text-sm text-zinc-400 mb-6">{{ chatStore.moderationNotice.message }}</p>
-        <div class="flex justify-end">
-          <button
-            @click="chatStore.clearModerationNotice()"
-            class="bg-indigo-500 hover:bg-indigo-600 text-white px-5 py-2 rounded text-sm font-medium"
-          >
-            OK
-          </button>
+      <div v-if="chatStore.moderationNotice" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm">
+        <div class="bg-zinc-950 border border-white/10 p-6 rounded-xl shadow-2xl w-[400px] max-w-[95vw]">
+          <h2 class="text-xl font-bold text-white mb-2">{{ chatStore.moderationNotice.title }}</h2>
+          <p class="text-sm text-zinc-400 mb-6">{{ chatStore.moderationNotice.message }}</p>
+          <div class="flex justify-end">
+            <button
+              @click="chatStore.clearModerationNotice()"
+              class="bg-indigo-500 hover:bg-indigo-600 text-white px-5 py-2 rounded text-sm font-medium"
+            >
+              OK
+            </button>
+          </div>
         </div>
       </div>
+
+      <ChannelListSidebar
+        :is-admin="isAdmin"
+        @open-server-settings="showServerSettingsModal = true"
+        @open-invite="showInviteModal = true"
+        @remove-server="handleRemoveServer"
+        @open-admin="openSettings(isAdmin ? 'server' : 'general')"
+        @open-create-channel="openCreateChannelModal"
+      />
+
+      <main class="flex min-w-0 flex-1 bg-zinc-900 border-l border-white/5">
+        <div class="flex flex-1 flex-col min-w-0">
+          <RouterView />
+        </div>
+
+        <MemberListSidebar v-if="shouldShowMemberList" />
+      </main>
     </div>
-
-    <ChannelListSidebar
-      :is-admin="isAdmin"
-      @open-server-settings="showServerSettingsModal = true"
-      @open-invite="showInviteModal = true"
-      @remove-server="handleRemoveServer"
-      @open-admin="openSettings(isAdmin ? 'server' : 'general')"
-      @open-create-channel="openCreateChannelModal"
-    />
-
-    <main class="flex-1 flex min-w-0 bg-zinc-900 border-l border-white/5">
-      <div class="flex-1 flex flex-col min-w-0">
-        <RouterView />
-      </div>
-
-      <MemberListSidebar v-if="shouldShowMemberList" />
-    </main>
   </div>
 </template>
