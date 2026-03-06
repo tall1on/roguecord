@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
-import { Archive, Code2, File, FileText, Film, Image, Music2 } from 'lucide-vue-next'
+import { Archive, Code2, File, FileText, Film, Image, Music2, Trash2 } from 'lucide-vue-next'
 import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, type MessageAttachment } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
@@ -92,6 +92,13 @@ type ScreenContextMenuState = {
   isOwner: boolean
 }
 
+type MessageContextMenuState = {
+  visible: boolean
+  x: number
+  y: number
+  message: Message | null
+}
+
 type ScreenStreamFps = 30 | 60
 type ScreenStreamResolution = 'source' | '1080p' | '720p' | '480p' | '4k' | '8k'
 
@@ -103,6 +110,13 @@ const screenContextMenu = ref<ScreenContextMenuState>({
   isOwner: false
 })
 const screenContextMenuRef = ref<HTMLElement | null>(null)
+const messageContextMenu = ref<MessageContextMenuState>({
+  visible: false,
+  x: 0,
+  y: 0,
+  message: null
+})
+const messageContextMenuRef = ref<HTMLElement | null>(null)
 
 const screenFpsOptions: Array<{ value: ScreenStreamFps; label: string }> = [
   { value: 30, label: '30 FPS' },
@@ -159,6 +173,15 @@ const closeScreenContextMenu = () => {
   screenContextMenu.value.visible = false
 }
 
+const closeMessageContextMenu = () => {
+  messageContextMenu.value = {
+    visible: false,
+    x: 0,
+    y: 0,
+    message: null
+  }
+}
+
 const syncScreenVideoAudioState = (userId: string) => {
   const video = screenVideoElements.get(userId)
   if (!video) return
@@ -182,6 +205,43 @@ const openScreenContextMenu = (event: MouseEvent, userId: string) => {
     userId,
     isOwner
   }
+}
+
+const canDeleteMessage = (message: Message) => {
+  const currentUserId = chatStore.currentUser?.id
+  const currentRole = chatStore.currentUserRole || 'user'
+  return message.user_id === currentUserId || currentRole === 'admin' || currentRole === 'owner'
+}
+
+const openMessageContextMenu = (event: MouseEvent, message: Message) => {
+  if (!canDeleteMessage(message)) {
+    closeMessageContextMenu()
+    return
+  }
+
+  event.preventDefault()
+  event.stopPropagation()
+
+  const estimatedWidth = 224
+  const estimatedHeight = 52
+  const maxX = Math.max(8, window.innerWidth - estimatedWidth - 8)
+  const maxY = Math.max(8, window.innerHeight - estimatedHeight - 8)
+
+  messageContextMenu.value = {
+    visible: true,
+    x: Math.min(event.clientX, maxX),
+    y: Math.min(event.clientY, maxY),
+    message
+  }
+}
+
+const deleteMessageFromContextMenu = () => {
+  const message = messageContextMenu.value.message
+  const channelId = activeTextChannel.value?.id
+  if (!message || !channelId || !canDeleteMessage(message)) return
+
+  closeMessageContextMenu()
+  chatStore.deleteMessage(channelId, message.id)
 }
 
 const onSelectScreenFps = (fps: ScreenStreamFps) => {
@@ -235,22 +295,29 @@ const getScreenVolumeIcon = (userId: string) => {
 }
 
 const onGlobalPointerDown = (event: MouseEvent) => {
-  if (!screenContextMenu.value.visible) return
   const target = event.target as Node | null
-  if (screenContextMenuRef.value?.contains(target || null)) return
-  closeScreenContextMenu()
+  if (screenContextMenu.value.visible && !screenContextMenuRef.value?.contains(target || null)) {
+    closeScreenContextMenu()
+  }
+  if (messageContextMenu.value.visible && !messageContextMenuRef.value?.contains(target || null)) {
+    closeMessageContextMenu()
+  }
 }
 
 const onGlobalContextMenu = (event: MouseEvent) => {
-  if (!screenContextMenu.value.visible) return
   const target = event.target as Node | null
-  if (screenContextMenuRef.value?.contains(target || null)) return
-  closeScreenContextMenu()
+  if (screenContextMenu.value.visible && !screenContextMenuRef.value?.contains(target || null)) {
+    closeScreenContextMenu()
+  }
+  if (messageContextMenu.value.visible && !messageContextMenuRef.value?.contains(target || null)) {
+    closeMessageContextMenu()
+  }
 }
 
 const onGlobalKeyDown = (event: KeyboardEvent) => {
   if (event.key === 'Escape') {
     closeScreenContextMenu()
+    closeMessageContextMenu()
   }
 }
 
@@ -833,12 +900,22 @@ const onMessagesScroll = async () => {
 watch(
   () => activeTextChannel.value?.id,
   async () => {
+    closeMessageContextMenu()
     preserveScrollOnNextRender.value = false
     isFetchingOlderMessages.value = false
     messageInput.value = ''
     pendingMessageAttachments.value = []
     await nextTick()
     scrollToBottom()
+  }
+)
+
+watch(
+  () => chatStore.activeChannelMessages.some((message) => message.id === messageContextMenu.value.message?.id),
+  (isMessageStillVisible) => {
+    if (!isMessageStillVisible) {
+      closeMessageContextMenu()
+    }
   }
 )
 
@@ -922,6 +999,7 @@ watch(
           <div
             v-else
             class="flex items-start gap-3 hover:bg-zinc-900/40 py-1 px-2 -mx-2 rounded-lg transition-colors duration-100 group"
+            @contextmenu.stop.prevent="openMessageContextMenu($event, entry.message)"
           >
             <div class="w-10 h-10 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mt-0.5 overflow-hidden">
               <img v-if="resolveMessageAvatarUrl(entry.message)" :src="resolveMessageAvatarUrl(entry.message) || ''" alt="Avatar" class="w-full h-full object-cover" />
@@ -993,6 +1071,26 @@ watch(
           </div>
         </template>
       </main>
+
+      <div
+        v-if="messageContextMenu.visible"
+        ref="messageContextMenuRef"
+        class="fixed z-50 w-56 rounded-xl border border-white/10 bg-zinc-950 shadow-2xl py-1 backdrop-blur-md"
+        :style="{ left: `${messageContextMenu.x}px`, top: `${messageContextMenu.y}px` }"
+        role="menu"
+        @click.stop
+        @contextmenu.stop
+      >
+        <button
+          type="button"
+          class="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors"
+          role="menuitem"
+          @click="deleteMessageFromContextMenu"
+        >
+          <Trash2 class="w-4 h-4" />
+          Delete message
+        </button>
+      </div>
 
       <!-- Chat Input Area -->
       <div class="p-4 pt-1 shrink-0 bg-zinc-950 relative z-10">
