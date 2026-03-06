@@ -1,11 +1,16 @@
 import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadBucketCommand,
   ListObjectsV2Command,
   PutObjectCommand,
-  S3Client
+  S3Client,
+  UploadPartCommand
 } from '@aws-sdk/client-s3';
+import fs from 'node:fs';
 
 export type S3StorageConfig = {
   endpoint: string;
@@ -484,6 +489,80 @@ export const uploadFileToS3 = async (input: {
   }));
 };
 
+export const uploadFilePathToS3Multipart = async (input: {
+  config: S3StorageConfig;
+  key: string;
+  filePath: string;
+  mimeType?: string | null;
+}) => {
+  const normalized = sanitizeConfig(input.config);
+  const resolved = resolveS3ClientConfig(normalized);
+  const client = createS3Client(resolved);
+  const stat = await fs.promises.stat(input.filePath);
+  const partSize = 8 * 1024 * 1024;
+
+  if (stat.size <= partSize) {
+    const buffer = await fs.promises.readFile(input.filePath);
+    await client.send(new PutObjectCommand({
+      Bucket: resolved.bucket,
+      Key: input.key,
+      Body: buffer,
+      ContentType: input.mimeType || 'application/octet-stream'
+    }));
+    return;
+  }
+
+  const createResponse = await client.send(new CreateMultipartUploadCommand({
+    Bucket: resolved.bucket,
+    Key: input.key,
+    ContentType: input.mimeType || 'application/octet-stream'
+  }));
+
+  const uploadId = createResponse.UploadId;
+  if (!uploadId) {
+    throw new Error('S3 multipart upload did not return an upload id');
+  }
+
+  const completedParts: Array<{ ETag?: string; PartNumber: number }> = [];
+
+  try {
+    let partNumber = 1;
+    let offset = 0;
+    while (offset < stat.size) {
+      const end = Math.min(offset + partSize, stat.size);
+      const chunkLength = end - offset;
+      const stream = fs.createReadStream(input.filePath, { start: offset, end: end - 1 });
+      const uploadPartResponse = await client.send(new UploadPartCommand({
+        Bucket: resolved.bucket,
+        Key: input.key,
+        UploadId: uploadId,
+        PartNumber: partNumber,
+        Body: stream,
+        ContentLength: chunkLength
+      }));
+      completedParts.push({ ETag: uploadPartResponse.ETag, PartNumber: partNumber });
+      offset = end;
+      partNumber += 1;
+    }
+
+    await client.send(new CompleteMultipartUploadCommand({
+      Bucket: resolved.bucket,
+      Key: input.key,
+      UploadId: uploadId,
+      MultipartUpload: {
+        Parts: completedParts
+      }
+    }));
+  } catch (error) {
+    await client.send(new AbortMultipartUploadCommand({
+      Bucket: resolved.bucket,
+      Key: input.key,
+      UploadId: uploadId
+    })).catch(() => undefined);
+    throw error;
+  }
+};
+
 export const downloadFileFromS3 = async (input: {
   config: S3StorageConfig;
   key: string;
@@ -505,6 +584,39 @@ export const downloadFileFromS3 = async (input: {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks);
+};
+
+export const getFileStreamFromS3 = async (input: {
+  config: S3StorageConfig;
+  key: string;
+  range?: string | null;
+}): Promise<{
+  body: AsyncIterable<Uint8Array>;
+  contentLength: number | null;
+  contentRange: string | null;
+  acceptRanges: string | null;
+  contentType: string | null;
+}> => {
+  const normalized = sanitizeConfig(input.config);
+  const resolved = resolveS3ClientConfig(normalized);
+  const client = createS3Client(resolved);
+  const response = await client.send(new GetObjectCommand({
+    Bucket: resolved.bucket,
+    Key: input.key,
+    Range: input.range?.trim() || undefined
+  }));
+
+  if (!response.Body) {
+    throw new Error('S3 object is empty');
+  }
+
+  return {
+    body: response.Body as AsyncIterable<Uint8Array>,
+    contentLength: typeof response.ContentLength === 'number' ? response.ContentLength : null,
+    contentRange: typeof response.ContentRange === 'string' ? response.ContentRange : null,
+    acceptRanges: typeof response.AcceptRanges === 'string' ? response.AcceptRanges : null,
+    contentType: typeof response.ContentType === 'string' ? response.ContentType : null
+  };
 };
 
 export const deleteFileFromS3 = async (input: {

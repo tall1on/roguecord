@@ -53,6 +53,12 @@ export interface MessageEmbed {
   embedUrl: string | null;
 }
 
+export interface MessageReaction {
+  emoji: string;
+  count: number;
+  reacted_by_current_user: boolean;
+}
+
 export interface Message {
   id: string;
   channel_id: string;
@@ -61,6 +67,38 @@ export interface Message {
   created_at: string;
   user?: User;
   embeds?: MessageEmbed[];
+  attachments?: MessageAttachment[];
+  reply_to_message_id?: string | null;
+  reply_to_message?: MessageReplyReference | null;
+  reactions: MessageReaction[];
+}
+
+export interface MessageReplyReference {
+  id: string;
+  channel_id: string;
+  user_id: string;
+  content: string;
+  created_at: string;
+  user?: User;
+  attachments?: MessageAttachment[];
+  reactions?: MessageReaction[];
+}
+
+export interface MessageAttachment {
+  id: string;
+  message_id?: string;
+  original_name: string;
+  mime_type: string | null;
+  size_bytes: number;
+  storage_provider?: 'data_dir' | 's3';
+  storage_key?: string | null;
+  url?: string | null;
+}
+
+export interface PendingMessageUploadProgress {
+  fileName: string;
+  loadedBytes: number;
+  totalBytes: number;
 }
 
 interface ChannelUnreadState {
@@ -269,24 +307,187 @@ export const useChatStore = defineStore('chat', () => {
   let pendingStorageTestResolve: ((result: ServerStorageTestResult) => void) | null = null;
   let pendingStorageTestTimeout: number | null = null;
   const lastMarkedReadMessageByChannel = ref<Record<string, string>>({});
+  const pendingMessageUploadProgress = ref<PendingMessageUploadProgress[] | null>(null);
+
+  const setPendingMessageUploadProgress = (progress: PendingMessageUploadProgress[] | null) => {
+    pendingMessageUploadProgress.value = progress;
+  };
+
+  const clearPendingMessageUploadProgress = () => {
+    pendingMessageUploadProgress.value = null;
+  };
+
+  const uploadChunkSizeBytes = 8 * 1024 * 1024;
+
+  const readBlobAsArrayBuffer = (blob: Blob) => {
+    return new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (!(reader.result instanceof ArrayBuffer)) {
+          reject(new Error('Failed to read file chunk'));
+          return;
+        }
+        resolve(reader.result);
+      };
+      reader.onerror = () => reject(new Error('Failed to read file chunk'));
+      reader.readAsArrayBuffer(blob);
+    });
+  };
+
+  const readFileAsDataBase64WithProgress = async (file: File, onProgress?: (loadedBytes: number, totalBytes: number) => void) => {
+    const parts: string[] = [];
+    let offset = 0;
+
+    while (offset < file.size) {
+      const end = Math.min(offset + uploadChunkSizeBytes, file.size);
+      const chunk = file.slice(offset, end);
+      const arrayBuffer = await readBlobAsArrayBuffer(chunk);
+      parts.push(arrayBufferToBase64(arrayBuffer));
+      offset = end;
+      onProgress?.(offset, file.size);
+    }
+
+    return parts.join('');
+  };
+
+  const waitForSocketMessage = <T>(matcher: (message: any) => T | null, timeoutMs = 30000): Promise<T> => {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const timeout = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        removeMessageListener(listener);
+        reject(new Error('Upload request timed out'));
+      }, timeoutMs);
+
+      const listener = (message: any) => {
+        const matched = matcher(message);
+        if (matched === null) {
+          return;
+        }
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.clearTimeout(timeout);
+        removeMessageListener(listener);
+        resolve(matched);
+      };
+
+      addMessageListener(listener);
+    });
+  };
+
+  const uploadFileOverWebSocket = async (input: {
+    kind: 'message_attachment' | 'folder_file';
+    channelId: string;
+    file: File;
+    onProgress?: (loadedBytes: number, totalBytes: number) => void;
+    content?: string;
+    replyToMessageId?: string | null;
+  }) => {
+    const readyPromise = waitForSocketMessage((message) => {
+      if (message?.type === 'file_upload_ready' && message?.payload?.channel_id === input.channelId) {
+        return message.payload as { upload_id: string; chunk_size_bytes?: number };
+      }
+      if (message?.type === 'error') {
+        throw new Error(message?.payload?.message || 'Upload initialization failed');
+      }
+      return null;
+    });
+
+    send('begin_file_upload', {
+      kind: input.kind,
+      channel_id: input.channelId,
+      file_name: input.file.name,
+      mime_type: input.file.type || 'application/octet-stream',
+      size_bytes: input.file.size
+    });
+
+    const ready = await readyPromise;
+    const uploadId = ready.upload_id;
+    const chunkSize = typeof ready.chunk_size_bytes === 'number' && ready.chunk_size_bytes > 0
+      ? ready.chunk_size_bytes
+      : uploadChunkSizeBytes;
+
+    let offset = 0;
+    while (offset < input.file.size) {
+      const end = Math.min(offset + chunkSize, input.file.size);
+      const arrayBuffer = await readBlobAsArrayBuffer(input.file.slice(offset, end));
+      const dataBase64 = arrayBufferToBase64(arrayBuffer);
+
+      const ackPromise = waitForSocketMessage((message) => {
+        if (message?.type === 'file_upload_chunk_ack' && message?.payload?.upload_id === uploadId) {
+          return message.payload as { received_bytes: number };
+        }
+        if (message?.type === 'error') {
+          throw new Error(message?.payload?.message || 'Upload chunk failed');
+        }
+        return null;
+      });
+
+      send('upload_file_chunk', {
+        upload_id: uploadId,
+        offset,
+        data_base64: dataBase64
+      });
+
+      const ack = await ackPromise;
+      offset = ack.received_bytes;
+      input.onProgress?.(offset, input.file.size);
+    }
+
+    send('complete_file_upload', {
+      upload_id: uploadId,
+      content: input.content,
+      reply_to_message_id: input.replyToMessageId || null
+    });
+  };
 
   const saveLocalUsername = (username: string) => {
     localUsername.value = username;
     localStorage.setItem('username', username);
   };
 
+  const DEFAULT_SERVER_PORT = '1337';
+  const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+
+  const isLocalServerHostname = (hostname: string) => {
+    const normalizedHostname = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
+    return LOCALHOST_HOSTNAMES.has(normalizedHostname);
+  };
+
   const normalizeServerAddress = (address: string) => {
-    let wsUrl = address.trim();
+    const wsUrl = address.trim();
     if (!wsUrl) return wsUrl;
 
-    if (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://')) {
-      const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
-      wsUrl = `${protocol}${wsUrl}`;
-    } else if (wsUrl.startsWith('ws://') && window.location.protocol === 'https:') {
-      wsUrl = wsUrl.replace(/^ws:\/\//i, 'wss://');
-    }
+    const hasProtocol = /^wss?:\/\//i.test(wsUrl);
+    const rawAddress = hasProtocol ? wsUrl.replace(/^wss?:\/\//i, '') : wsUrl;
+    const [rawHostAndPort = '', ...pathParts] = rawAddress.split('/');
+    const normalizedHostAndPort = rawHostAndPort.replace(/^0\.0\.0\.0(?=[:$])/i, 'localhost');
+    const hostMatch = normalizedHostAndPort.match(/^\[([^\]]+)\](?::(\d+))?$/);
+    const hostForProtocol = hostMatch
+      ? hostMatch[1] || ''
+      : normalizedHostAndPort.replace(/:(\d+)$/, '');
+    const protocol = hasProtocol
+      ? (wsUrl.toLowerCase().startsWith('wss://') ? 'wss://' : 'ws://')
+      : (isLocalServerHostname(hostForProtocol) ? 'ws://' : 'wss://');
+    const hasPort = hostMatch ? Boolean(hostMatch[2]) : /:\d+$/.test(normalizedHostAndPort);
+    const normalizedPath = pathParts.length > 0 ? `/${pathParts.join('/')}` : '';
 
-    return wsUrl.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`);
+    console.log('[DEBUG] normalizeServerAddress', {
+      input: address,
+      trimmedInput: wsUrl,
+      hasProtocol,
+      rawHostAndPort,
+      normalizedHostAndPort,
+      hostForProtocol,
+      selectedProtocol: protocol,
+      hasPort,
+      normalizedPath,
+    });
+
+    return `${protocol}${normalizedHostAndPort}${hasPort ? '' : `:${DEFAULT_SERVER_PORT}`}${normalizedPath}`;
   };
 
   const getHttpBaseFromWsAddress = (address: string) => {
@@ -310,6 +511,105 @@ export const useChatStore = defineStore('chat', () => {
     return `${url}${separator}v=${encodeURIComponent(normalizedVersion)}`;
   };
 
+  const resolveConnectedServerBaseUrl = (wsAddress?: string | null) => {
+    if (wsAddress) {
+      return getHttpBaseFromWsAddress(wsAddress);
+    }
+
+    const activeConnection = activeConnectionId.value
+      ? savedConnections.value.find((connection) => connection.id === activeConnectionId.value)
+      : null;
+
+    return activeConnection
+      ? getHttpBaseFromWsAddress(activeConnection.address)
+      : window.location.origin;
+  };
+
+  const resolveAttachmentUrl = (attachmentUrl?: string | null, wsAddress?: string | null) => {
+    const url = (attachmentUrl || '').trim();
+    if (!url) {
+      return null;
+    }
+
+    if (/^(data:|blob:|https?:\/\/|\/\/)/i.test(url)) {
+      return url;
+    }
+
+    const normalizedPath = url.startsWith('/') ? url : `/${url}`;
+    return `${resolveConnectedServerBaseUrl(wsAddress)}${normalizedPath}`;
+  };
+
+  const normalizeMessageAttachments = (message: Message, wsAddress?: string | null): Message => {
+    if (!Array.isArray(message.attachments) || message.attachments.length === 0) {
+      return message;
+    }
+
+    return {
+      ...message,
+      attachments: message.attachments.map((attachment) => ({
+        ...attachment,
+        url: resolveAttachmentUrl(attachment.url, wsAddress)
+      }))
+    };
+  };
+
+  const normalizeMessageReactions = (reactions: unknown): MessageReaction[] => {
+    if (!Array.isArray(reactions)) {
+      return [];
+    }
+
+    return reactions
+      .map((reaction): MessageReaction | null => {
+        if (!reaction || typeof reaction !== 'object') {
+          return null;
+        }
+
+        const emoji = typeof (reaction as { emoji?: unknown }).emoji === 'string'
+          ? (reaction as { emoji: string }).emoji.trim()
+          : '';
+        const rawCount = (reaction as { count?: unknown }).count;
+        const count = typeof rawCount === 'number' && Number.isFinite(rawCount)
+          ? Math.max(0, Math.floor(rawCount))
+          : 0;
+
+        if (!emoji || count <= 0) {
+          return null;
+        }
+
+        return {
+          emoji,
+          count,
+          reacted_by_current_user: (reaction as { reacted_by_current_user?: unknown }).reacted_by_current_user === true
+        };
+      })
+      .filter((reaction): reaction is MessageReaction => Boolean(reaction))
+      .sort((a, b) => a.emoji.localeCompare(b.emoji));
+  };
+
+  const normalizeMessageShape = <T extends Message | MessageReplyReference>(message: T): T => {
+    return {
+      ...message,
+      reactions: normalizeMessageReactions((message as { reactions?: unknown }).reactions)
+    } as T;
+  };
+
+  const normalizeIncomingMessage = (message: Message, wsAddress?: string | null) => {
+    const normalizedMessage = normalizeMessageShape(normalizeMessageAttachments(message, wsAddress));
+
+    if (!normalizedMessage.reply_to_message) {
+      return normalizedMessage;
+    }
+
+    return {
+      ...normalizedMessage,
+      reply_to_message: normalizeMessageShape(normalizeMessageAttachments(normalizedMessage.reply_to_message as Message, wsAddress))
+    };
+  };
+
+  const normalizeIncomingMessages = (incomingMessages: Message[], wsAddress?: string | null) => {
+    return incomingMessages.map((message) => normalizeIncomingMessage(message, wsAddress));
+  };
+
   const resolveServerIconUrl = (iconPath?: string | null, wsAddress?: string | null, version?: string | null) => {
     const path = (iconPath || '').trim();
     if (!path) {
@@ -322,13 +622,7 @@ export const useChatStore = defineStore('chat', () => {
         return null;
       }
 
-      const baseUrl = wsAddress
-        ? getHttpBaseFromWsAddress(wsAddress)
-        : (activeConnectionId.value
-          ? getHttpBaseFromWsAddress(savedConnections.value.find((connection) => connection.id === activeConnectionId.value)?.address || '')
-          : window.location.origin);
-
-      return appendServerIconVersion(`${baseUrl}/server-icons/s3/${encodeURIComponent(key)}`, version);
+      return appendServerIconVersion(`${resolveConnectedServerBaseUrl(wsAddress)}/server-icons/s3/${encodeURIComponent(key)}`, version);
     }
 
     if (/^(data:|blob:|https?:\/\/|\/\/)/i.test(path)) {
@@ -336,19 +630,7 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-    if (wsAddress) {
-      return appendServerIconVersion(`${getHttpBaseFromWsAddress(wsAddress)}${normalizedPath}`, version);
-    }
-
-    const activeConnection = activeConnectionId.value
-      ? savedConnections.value.find((connection) => connection.id === activeConnectionId.value)
-      : null;
-
-    const baseUrl = activeConnection
-      ? getHttpBaseFromWsAddress(activeConnection.address)
-      : window.location.origin;
-
-    return appendServerIconVersion(`${baseUrl}${normalizedPath}`, version);
+    return appendServerIconVersion(`${resolveConnectedServerBaseUrl(wsAddress)}${normalizedPath}`, version);
   };
 
   const requestServerRefresh = () => {
@@ -513,15 +795,16 @@ export const useChatStore = defineStore('chat', () => {
       if (host === '0.0.0.0') {
         host = 'localhost';
       }
-      const port = '1337'; // Assuming server is on 1337
+      const port = DEFAULT_SERVER_PORT; // Assuming server is on 1337
       // Use wss:// if the page is loaded over https, otherwise ws://
       const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
       wsUrl = `${protocol}${host}:${port}`;
     } else if (wsUrl.startsWith('ws://') && window.location.protocol === 'https:') {
-      wsUrl = wsUrl.replace(/^ws:\/\//i, 'wss://');
+      console.log('[DEBUG] Preserving explicit ws:// address on https page', { input: wsUrl });
     }
 
-    // Replace 0.0.0.0 with localhost in the final URL to prevent browser connection errors
+    console.log('[DEBUG] connect pre-normalize wsUrl', { inputAddress: address, preNormalizedWsUrl: wsUrl });
+
     wsUrl = normalizeServerAddress(wsUrl);
 
     console.log(`[DEBUG] Final wsUrl: ${wsUrl}`);
@@ -774,6 +1057,45 @@ export const useChatStore = defineStore('chat', () => {
     const next = new Set(unreadChannelIds.value);
     next.delete(channelId);
     unreadChannelIds.value = next;
+  };
+
+  const removeMessageFromChannel = (channelId: string, messageId: string) => {
+    if (!channelId || !messageId) {
+      return;
+    }
+
+    const existingMessages = messages.value[channelId];
+    if (!existingMessages?.length) {
+      return;
+    }
+
+    messages.value[channelId] = existingMessages.filter((message) => message.id !== messageId);
+    markActiveChannelReadFromMessages(channelId);
+  };
+
+  const updateMessageInChannel = (channelId: string, messageId: string, updater: (message: Message) => Message) => {
+    if (!channelId || !messageId) {
+      return;
+    }
+
+    const existingMessages = messages.value[channelId];
+    if (!existingMessages?.length) {
+      return;
+    }
+
+    let didUpdate = false;
+    messages.value[channelId] = existingMessages.map((message) => {
+      if (message.id !== messageId) {
+        return message;
+      }
+
+      didUpdate = true;
+      return updater(message);
+    });
+
+    if (!didUpdate) {
+      return;
+    }
   };
 
   const markChannelReadOnServer = (channelId: string, message: Message | null | undefined) => {
@@ -1102,7 +1424,7 @@ export const useChatStore = defineStore('chat', () => {
       case 'messages_list': {
         const channelId = payload.channel_id as string;
         const pageState = ensureMessagePageState(channelId);
-        const incomingMessages = (payload.messages || []) as Message[];
+        const incomingMessages = normalizeIncomingMessages((payload.messages || []) as Message[]);
         const isOlderPage = payload.is_older_page === true;
 
         if (isOlderPage) {
@@ -1133,7 +1455,7 @@ export const useChatStore = defineStore('chat', () => {
       }
         
       case 'new_message':
-        const msg = payload.message;
+        const msg = normalizeIncomingMessage(payload.message as Message);
         const pageState = ensureMessagePageState(msg.channel_id);
         const alreadyPresent = Boolean(messages.value[msg.channel_id]?.some((existing) => existing.id === msg.id));
         if (!messages.value[msg.channel_id]) {
@@ -1155,6 +1477,24 @@ export const useChatStore = defineStore('chat', () => {
           markChannelUnread(msg.channel_id);
         }
         break;
+
+      case 'message_deleted': {
+        const channelId = payload.channel_id as string;
+        const messageId = payload.message_id as string;
+        removeMessageFromChannel(channelId, messageId);
+        break;
+      }
+
+      case 'message_reactions_updated': {
+        const channelId = payload.channel_id as string;
+        const messageId = payload.message_id as string;
+        const reactions = normalizeMessageReactions(payload.reactions);
+        updateMessageInChannel(channelId, messageId, (existingMessage) => ({
+          ...existingMessage,
+          reactions
+        }));
+        break;
+      }
         
       case 'error':
         lastError.value = payload.message;
@@ -1355,8 +1695,84 @@ export const useChatStore = defineStore('chat', () => {
     send('submit_admin_key', { key });
   };
 
-  const sendMessage = (channel_id: string, content: string) => {
-    send('send_message', { channel_id, content });
+  const sendMessage = (channel_id: string, content: string, reply_to_message_id?: string | null) => {
+    send('send_message', { channel_id, content, reply_to_message_id: reply_to_message_id || null });
+  };
+
+  const deleteMessage = (channel_id: string, message_id: string) => {
+    if (!channel_id || !message_id) {
+      lastError.value = 'Channel ID and message ID are required';
+      return;
+    }
+
+    send('delete_message', { channel_id, message_id });
+  };
+
+  const toggleMessageReaction = (channel_id: string, message_id: string, emoji: string) => {
+    const normalizedEmoji = emoji.trim();
+    if (!channel_id || !message_id || !normalizedEmoji) {
+      lastError.value = 'Channel ID, message ID, and emoji are required';
+      return;
+    }
+
+    send('toggle_message_reaction', { channel_id, message_id, emoji: normalizedEmoji });
+  };
+
+  const sendMessageWithAttachments = async (channel_id: string, content: string, files: File[], reply_to_message_id?: string | null) => {
+    const initialProgress = files.map((file) => ({
+      fileName: file.name,
+      loadedBytes: 0,
+      totalBytes: file.size
+    }));
+    setPendingMessageUploadProgress(initialProgress);
+
+    try {
+      if (files.length === 1) {
+        const [file] = files;
+        if (!file) {
+          return;
+        }
+        await uploadFileOverWebSocket({
+          kind: 'message_attachment',
+          channelId: channel_id,
+          file,
+          content,
+          replyToMessageId: reply_to_message_id || null,
+          onProgress: (loadedBytes, totalBytes) => {
+            const currentProgress = pendingMessageUploadProgress.value || initialProgress;
+            const nextProgress = currentProgress.map((entry, entryIndex) => entryIndex === 0
+              ? { fileName: file.name, loadedBytes, totalBytes }
+              : entry);
+            setPendingMessageUploadProgress(nextProgress);
+          }
+        });
+      } else {
+        const attachments = await Promise.all(files.map(async (file, index) => {
+          const dataBase64 = await readFileAsDataBase64WithProgress(file, (loadedBytes, totalBytes) => {
+            const currentProgress = pendingMessageUploadProgress.value || initialProgress;
+            const nextProgress = currentProgress.map((entry, entryIndex) => entryIndex === index
+              ? {
+                  fileName: file.name,
+                  loadedBytes,
+                  totalBytes
+                }
+              : entry);
+            setPendingMessageUploadProgress(nextProgress);
+          });
+
+          return {
+            file_name: file.name,
+            mime_type: file.type || 'application/octet-stream',
+            data_base64: dataBase64
+          };
+        }));
+
+        send('send_message', { channel_id, content, attachments, reply_to_message_id: reply_to_message_id || null });
+      }
+    } catch (error) {
+      clearPendingMessageUploadProgress();
+      throw error;
+    }
   };
 
   const kickMember = (targetUserId: string, options: { reason?: string; deleteMode?: ModerationDeleteMode; deleteHours?: number }) => {
@@ -1467,36 +1883,10 @@ export const useChatStore = defineStore('chat', () => {
     if (blockedExtension) {
       throw new Error(`Upload blocked: .${blockedExtension} files are not allowed in folder channels.`);
     }
-
-    const dataBase64 = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = reader.result;
-        if (typeof result !== 'string') {
-          console.error('[FOLDER_UPLOAD] FileReader result was not a string', { channel_id, fileName: file.name });
-          reject(new Error('Failed to read file'));
-          return;
-        }
-
-        const commaIndex = result.indexOf(',');
-        if (commaIndex === -1) {
-          console.error('[FOLDER_UPLOAD] Unexpected FileReader result format', { channel_id, fileName: file.name });
-          reject(new Error('Failed to read file'));
-          return;
-        }
-
-        const base64 = result.slice(commaIndex + 1);
-        resolve(base64);
-      };
-      reader.onerror = () => reject(new Error('Failed to read file'));
-      reader.readAsDataURL(file);
-    });
-
-    send('folder_upload_file', {
-      channel_id,
-      file_name: file.name,
-      mime_type: file.type || 'application/octet-stream',
-      data_base64: dataBase64
+    await uploadFileOverWebSocket({
+      kind: 'folder_file',
+      channelId: channel_id,
+      file
     });
   };
 
@@ -1569,6 +1959,11 @@ export const useChatStore = defineStore('chat', () => {
     requestServerRefresh,
     clearError,
     sendMessage,
+    deleteMessage,
+    toggleMessageReaction,
+    sendMessageWithAttachments,
+    pendingMessageUploadProgress,
+    clearPendingMessageUploadProgress,
     loadOlderMessages,
     isLoadingMessagesForChannel,
     hasOlderMessagesForChannel,

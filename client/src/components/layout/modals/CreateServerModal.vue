@@ -18,16 +18,17 @@ const emit = defineEmits<{
       <p class="text-zinc-400 mb-6 text-center text-sm">Connect to a new server.</p>
 
       <div class="mb-6">
-        <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">WebSocket Address</label>
+        <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Server Address</label>
         <div class="flex bg-zinc-900 border border-white/5 rounded-lg p-1 focus-within:ring-1 focus-within:ring-indigo-500 transition-all">
           <input
             v-model="serverAddress"
             type="text"
             class="w-full bg-transparent text-white p-2 focus:outline-none text-sm placeholder:text-zinc-600 font-mono"
-            placeholder="wss://localhost:3000"
+            placeholder="localhost or example.com:1337"
             @keyup.enter="emit('create')"
           />
         </div>
+        <p class="mt-2 text-xs text-zinc-500">Protocol and port are optional. Localhost defaults to ws, all other hosts default to wss, and the port defaults to 1337.</p>
         <p v-if="errorMessage" class="mt-2 text-xs font-medium text-red-400">{{ errorMessage }}</p>
       </div>
 
