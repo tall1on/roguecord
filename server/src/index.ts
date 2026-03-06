@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import {WebSocketServer} from 'ws';
 import dotenv from 'dotenv';
 import {db, channelsSchemaReady, dataDir} from './db';
@@ -10,7 +11,8 @@ import {handleMessage, handleClientDisconnect} from './ws/handlers';
 import {adminKey} from './admin';
 import { startRssPolling } from './rssPolling';
 import { getServer, getServerStorageSettings } from './models';
-import { downloadFileFromS3 } from './storage/s3Storage';
+import type { S3StorageConfig } from './storage/s3Storage';
+import { getFileStreamFromS3 } from './storage/s3Storage';
 
 dotenv.config();
 
@@ -73,6 +75,137 @@ const sendNotFound = (res: http.ServerResponse) => {
 const sendServerError = (res: http.ServerResponse) => {
     res.writeHead(500, {'Content-Type': 'text/plain'});
     res.end('Failed to load server icon\n');
+};
+
+const MEDIA_RANGE_HEADER = 'bytes';
+
+const buildBaseFileHeaders = (contentType: string, contentLength: number) => ({
+    'Content-Type': contentType,
+    'Content-Length': contentLength,
+    'Accept-Ranges': MEDIA_RANGE_HEADER,
+    'Cache-Control': 'public, max-age=300'
+});
+
+const parseSingleRangeHeader = (rangeHeader: string | undefined, size: number) => {
+    if (!rangeHeader) {
+        return null;
+    }
+
+    const trimmed = rangeHeader.trim();
+    const match = /^bytes=(\d*)-(\d*)$/i.exec(trimmed);
+    if (!match) {
+        return { malformed: true as const };
+    }
+
+    const startRaw = match[1] || '';
+    const endRaw = match[2] || '';
+    if (!startRaw && !endRaw) {
+        return { malformed: true as const };
+    }
+
+    let start: number;
+    let end: number;
+
+    if (!startRaw) {
+        const suffixLength = Number.parseInt(endRaw, 10);
+        if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
+            return { malformed: true as const };
+        }
+        if (suffixLength >= size) {
+            start = 0;
+        } else {
+            start = size - suffixLength;
+        }
+        end = size - 1;
+    } else {
+        start = Number.parseInt(startRaw, 10);
+        if (!Number.isFinite(start) || start < 0 || start >= size) {
+            return { unsatisfiable: true as const };
+        }
+
+        if (!endRaw) {
+            end = size - 1;
+        } else {
+            end = Number.parseInt(endRaw, 10);
+            if (!Number.isFinite(end) || end < start) {
+                return { malformed: true as const };
+            }
+            if (end >= size) {
+                end = size - 1;
+            }
+        }
+    }
+
+    return {
+        start,
+        end,
+        length: end - start + 1
+    };
+};
+
+const sendRangeNotSatisfiable = (res: http.ServerResponse, size: number) => {
+    res.writeHead(416, {
+        'Content-Range': `bytes */${size}`,
+        'Accept-Ranges': MEDIA_RANGE_HEADER
+    });
+    res.end();
+};
+
+const streamLocalFile = async (req: http.IncomingMessage, res: http.ServerResponse, filePath: string, fallbackContentType: string | null = null) => {
+    const stats = await fs.promises.stat(filePath);
+    const parsedRange = parseSingleRangeHeader(req.headers.range, stats.size);
+    const contentType = getFileContentType(filePath, fallbackContentType);
+
+    if (parsedRange && 'malformed' in parsedRange) {
+        res.writeHead(200, buildBaseFileHeaders(contentType, stats.size));
+        await pipeline(fs.createReadStream(filePath), res);
+        return;
+    }
+
+    if (parsedRange && 'unsatisfiable' in parsedRange) {
+        sendRangeNotSatisfiable(res, stats.size);
+        return;
+    }
+
+    if (!parsedRange) {
+        res.writeHead(200, buildBaseFileHeaders(contentType, stats.size));
+        await pipeline(fs.createReadStream(filePath), res);
+        return;
+    }
+
+    res.writeHead(206, {
+        ...buildBaseFileHeaders(contentType, parsedRange.length),
+        'Content-Range': `bytes ${parsedRange.start}-${parsedRange.end}/${stats.size}`
+    });
+    await pipeline(fs.createReadStream(filePath, { start: parsedRange.start, end: parsedRange.end }), res);
+};
+
+const streamS3File = async (req: http.IncomingMessage, res: http.ServerResponse, key: string, config: S3StorageConfig, fallbackContentType: string | null = null) => {
+    const rangeHeader = req.headers.range?.trim() || null;
+    const normalizedRange = rangeHeader && /^bytes=(\d*)-(\d*)$/i.test(rangeHeader) ? rangeHeader : null;
+    const response = await getFileStreamFromS3({
+        config,
+        key,
+        range: normalizedRange
+    });
+
+    const contentType = getFileContentType(key, response.contentType || fallbackContentType);
+    const isPartial = Boolean(normalizedRange && response.contentRange);
+    const headers: Record<string, string | number> = {
+        'Content-Type': contentType,
+        'Cache-Control': 'public, max-age=300',
+        'Accept-Ranges': response.acceptRanges || MEDIA_RANGE_HEADER
+    };
+
+    if (response.contentLength !== null) {
+        headers['Content-Length'] = response.contentLength;
+    }
+    if (response.contentRange) {
+        headers['Content-Range'] = response.contentRange;
+    }
+
+    res.writeHead(isPartial ? 206 : 200, headers);
+    await pipeline(response.body, res);
 };
 
 const isSafeServerId = (value: string) => /^[a-zA-Z0-9-]+$/.test(value);
@@ -144,16 +277,7 @@ async function startServer() {
                         return;
                     }
 
-                    const fileBuffer = await downloadFileFromS3({
-                        config: storageSettings.s3,
-                        key
-                    });
-
-                    res.writeHead(200, {
-                        'Content-Type': getIconContentType(key),
-                        'Cache-Control': 'public, max-age=300'
-                    });
-                    res.end(fileBuffer);
+                    await streamS3File(req, res, key, storageSettings.s3, getIconContentType(key));
                     return;
                 }
 
@@ -183,12 +307,7 @@ async function startServer() {
                     return;
                 }
 
-                const fileBuffer = fs.readFileSync(iconFilePath);
-                res.writeHead(200, {
-                    'Content-Type': getIconContentType(iconFilePath),
-                    'Cache-Control': 'public, max-age=300'
-                });
-                res.end(fileBuffer);
+                await streamLocalFile(req, res, iconFilePath, getIconContentType(iconFilePath));
                 return;
             } catch (error) {
                 console.error('Failed to serve server icon:', error);
@@ -213,16 +332,7 @@ async function startServer() {
                         return;
                     }
 
-                    const fileBuffer = await downloadFileFromS3({
-                        config: storageSettings.s3,
-                        key
-                    });
-
-                    res.writeHead(200, {
-                        'Content-Type': getFileContentType(key),
-                        'Cache-Control': 'public, max-age=300'
-                    });
-                    res.end(fileBuffer);
+                    await streamS3File(req, res, key, storageSettings.s3);
                     return;
                 }
 
@@ -246,12 +356,7 @@ async function startServer() {
                     return;
                 }
 
-                const fileBuffer = fs.readFileSync(filePath);
-                res.writeHead(200, {
-                    'Content-Type': getFileContentType(filePath),
-                    'Cache-Control': 'public, max-age=300'
-                });
-                res.end(fileBuffer);
+                await streamLocalFile(req, res, filePath);
                 return;
             } catch (error) {
                 console.error('Failed to serve stored file:', error);
