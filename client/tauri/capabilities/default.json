@@ -5,6 +5,7 @@
   "windows": ["main"],
   "permissions": [
     "opener:default",
+    "core:event:allow-listen",
     "core:window:allow-is-maximized",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
