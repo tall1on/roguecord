@@ -642,6 +642,24 @@ const sendMessage = () => {
   void submitMessage()
 }
 
+const pendingAttachmentUploadSummary = computed(() => {
+  const progressEntries = chatStore.pendingMessageUploadProgress
+  if (!isSendingMessage.value || !progressEntries?.length) {
+    return null
+  }
+
+  const totalBytes = progressEntries.reduce((sum, entry) => sum + Math.max(entry.totalBytes, 0), 0)
+  const loadedBytes = progressEntries.reduce((sum, entry) => sum + Math.min(Math.max(entry.loadedBytes, 0), Math.max(entry.totalBytes, 0)), 0)
+  const percent = totalBytes > 0 ? Math.min(100, Math.round((loadedBytes / totalBytes) * 100)) : 0
+
+  return {
+    fileCount: progressEntries.length,
+    loadedBytes,
+    totalBytes,
+    percent
+  }
+})
+
 const onOpenMessageAttachmentPicker = () => {
   if (isReadOnlyRssChannel.value || isSendingMessage.value) return
   messageAttachmentInput.value?.click()
@@ -696,6 +714,7 @@ const submitMessage = async () => {
     clearReplyDraft()
   } finally {
     isSendingMessage.value = false
+    chatStore.clearPendingMessageUploadProgress()
   }
 }
 
@@ -1308,6 +1327,20 @@ watch(
               Remove
             </button>
           </div>
+        </div>
+        <div v-if="pendingAttachmentUploadSummary" class="mb-2 rounded-lg border border-indigo-500/20 bg-indigo-500/10 px-3 py-2.5">
+          <div class="flex items-center justify-between gap-3 text-xs text-indigo-100">
+            <span>
+              Uploading {{ pendingAttachmentUploadSummary.fileCount }} {{ pendingAttachmentUploadSummary.fileCount === 1 ? 'attachment' : 'attachments' }}
+            </span>
+            <span>{{ pendingAttachmentUploadSummary.percent }}%</span>
+          </div>
+          <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
+            <div class="h-full rounded-full bg-indigo-400 transition-[width] duration-150" :style="{ width: `${pendingAttachmentUploadSummary.percent}%` }"></div>
+          </div>
+          <p class="mt-2 text-[11px] text-indigo-200/80">
+            {{ formatFileSize(pendingAttachmentUploadSummary.loadedBytes) }} / {{ formatFileSize(pendingAttachmentUploadSummary.totalBytes) }}
+          </p>
         </div>
         <div class="bg-zinc-900/60 border border-white/5 rounded-lg py-2.5 px-3 flex items-center gap-2.5 shadow-sm focus-within:ring-1 focus-within:ring-indigo-500/50 focus-within:border-indigo-500/30 transition-all duration-200 focus-within:bg-zinc-900/90" :class="isReadOnlyRssChannel ? 'opacity-80' : ''">
           <button type="button" class="w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-700 shrink-0 transition-colors disabled:opacity-50" :disabled="isReadOnlyRssChannel || isSendingMessage" @click="onOpenMessageAttachmentPicker">

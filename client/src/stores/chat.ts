@@ -95,6 +95,12 @@ export interface MessageAttachment {
   url?: string | null;
 }
 
+export interface PendingMessageUploadProgress {
+  fileName: string;
+  loadedBytes: number;
+  totalBytes: number;
+}
+
 interface ChannelUnreadState {
   channel_id: string;
   unread: boolean | number;
@@ -301,6 +307,49 @@ export const useChatStore = defineStore('chat', () => {
   let pendingStorageTestResolve: ((result: ServerStorageTestResult) => void) | null = null;
   let pendingStorageTestTimeout: number | null = null;
   const lastMarkedReadMessageByChannel = ref<Record<string, string>>({});
+  const pendingMessageUploadProgress = ref<PendingMessageUploadProgress[] | null>(null);
+
+  const setPendingMessageUploadProgress = (progress: PendingMessageUploadProgress[] | null) => {
+    pendingMessageUploadProgress.value = progress;
+  };
+
+  const clearPendingMessageUploadProgress = () => {
+    pendingMessageUploadProgress.value = null;
+  };
+
+  const readFileAsDataBase64WithProgress = (file: File, onProgress?: (loadedBytes: number, totalBytes: number) => void) => {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      const totalBytes = file.size;
+
+      reader.onprogress = (event) => {
+        if (!event.lengthComputable) {
+          return;
+        }
+        onProgress?.(event.loaded, event.total);
+      };
+
+      reader.onload = () => {
+        const result = reader.result;
+        if (typeof result !== 'string') {
+          reject(new Error('Failed to read file'));
+          return;
+        }
+
+        const commaIndex = result.indexOf(',');
+        if (commaIndex === -1) {
+          reject(new Error('Failed to read file'));
+          return;
+        }
+
+        onProgress?.(totalBytes, totalBytes);
+        resolve(result.slice(commaIndex + 1));
+      };
+
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    });
+  };
 
   const saveLocalUsername = (username: string) => {
     localUsername.value = username;
@@ -1577,36 +1626,39 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const sendMessageWithAttachments = async (channel_id: string, content: string, files: File[], reply_to_message_id?: string | null) => {
-    const attachments = await Promise.all(files.map(async (file) => {
-      const dataBase64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const result = reader.result;
-          if (typeof result !== 'string') {
-            reject(new Error('Failed to read file'));
-            return;
-          }
-
-          const commaIndex = result.indexOf(',');
-          if (commaIndex === -1) {
-            reject(new Error('Failed to read file'));
-            return;
-          }
-
-          resolve(result.slice(commaIndex + 1));
-        };
-        reader.onerror = () => reject(new Error('Failed to read file'));
-        reader.readAsDataURL(file);
-      });
-
-      return {
-        file_name: file.name,
-        mime_type: file.type || 'application/octet-stream',
-        data_base64: dataBase64
-      };
+    const initialProgress = files.map((file) => ({
+      fileName: file.name,
+      loadedBytes: 0,
+      totalBytes: file.size
     }));
+    setPendingMessageUploadProgress(initialProgress);
 
-    send('send_message', { channel_id, content, attachments, reply_to_message_id: reply_to_message_id || null });
+    try {
+      const attachments = await Promise.all(files.map(async (file, index) => {
+        const dataBase64 = await readFileAsDataBase64WithProgress(file, (loadedBytes, totalBytes) => {
+          const currentProgress = pendingMessageUploadProgress.value || initialProgress;
+          const nextProgress = currentProgress.map((entry, entryIndex) => entryIndex === index
+            ? {
+                fileName: file.name,
+                loadedBytes,
+                totalBytes
+              }
+            : entry);
+          setPendingMessageUploadProgress(nextProgress);
+        });
+
+        return {
+          file_name: file.name,
+          mime_type: file.type || 'application/octet-stream',
+          data_base64: dataBase64
+        };
+      }));
+
+      send('send_message', { channel_id, content, attachments, reply_to_message_id: reply_to_message_id || null });
+    } catch (error) {
+      clearPendingMessageUploadProgress();
+      throw error;
+    }
   };
 
   const kickMember = (targetUserId: string, options: { reason?: string; deleteMode?: ModerationDeleteMode; deleteHours?: number }) => {
@@ -1822,6 +1874,8 @@ export const useChatStore = defineStore('chat', () => {
     deleteMessage,
     toggleMessageReaction,
     sendMessageWithAttachments,
+    pendingMessageUploadProgress,
+    clearPendingMessageUploadProgress,
     loadOlderMessages,
     isLoadingMessagesForChannel,
     hasOlderMessagesForChannel,
