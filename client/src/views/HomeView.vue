@@ -4,6 +4,7 @@ import { Archive, Code2, File, FileText, Film, Image, Music2 } from 'lucide-vue-
 import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, type MessageAttachment } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
+import { openExternalUrl } from '../utils/openExternalUrl'
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
@@ -595,6 +596,20 @@ const submitMessage = async () => {
 
 const getAttachmentDisplayLabel = (attachment: MessageAttachment) => attachment.original_name
 
+const openMessageAttachment = async (attachment: MessageAttachment, event: MouseEvent) => {
+  const attachmentUrl = attachment.url?.trim()
+  if (!attachmentUrl) {
+    event.preventDefault()
+    return
+  }
+
+  event.preventDefault()
+  const opened = await openExternalUrl(attachmentUrl)
+  if (!opened && !window.open(attachmentUrl, '_blank', 'noopener,noreferrer')) {
+    window.location.href = attachmentUrl
+  }
+}
+
 const openFolderUploadPicker = () => {
   folderUploadError.value = null
   folderFileInput.value?.click()
@@ -922,10 +937,11 @@ watch(
                 <a
                   v-for="attachment in entry.message.attachments"
                   :key="attachment.id"
-                  :href="attachment.url || '#'"
+                 :href="attachment.url || '#'"
                   target="_blank"
                   rel="noopener noreferrer"
                   class="flex items-center gap-3 max-w-[420px] rounded-lg border border-white/10 bg-zinc-900/70 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800/80 transition-colors"
+                  @click="openMessageAttachment(attachment, $event)"
                 >
                   <component :is="getFolderFileIcon(attachment.original_name)" class="w-4 h-4 shrink-0" :class="getFolderFileIconClass(attachment.original_name)" />
                   <div class="min-w-0 flex-1">

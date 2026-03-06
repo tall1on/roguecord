@@ -4,6 +4,8 @@
   "description": "Default desktop capability for the Roguecord client window.",
   "windows": ["main"],
   "permissions": [
+    "opener:default",
+    "core:window:allow-is-maximized",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close"
