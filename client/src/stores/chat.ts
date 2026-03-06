@@ -848,6 +848,20 @@ export const useChatStore = defineStore('chat', () => {
     unreadChannelIds.value = next;
   };
 
+  const removeMessageFromChannel = (channelId: string, messageId: string) => {
+    if (!channelId || !messageId) {
+      return;
+    }
+
+    const existingMessages = messages.value[channelId];
+    if (!existingMessages?.length) {
+      return;
+    }
+
+    messages.value[channelId] = existingMessages.filter((message) => message.id !== messageId);
+    markActiveChannelReadFromMessages(channelId);
+  };
+
   const markChannelReadOnServer = (channelId: string, message: Message | null | undefined) => {
     if (!message?.id || !message?.created_at) {
       return;
@@ -1227,6 +1241,13 @@ export const useChatStore = defineStore('chat', () => {
           markChannelUnread(msg.channel_id);
         }
         break;
+
+      case 'message_deleted': {
+        const channelId = payload.channel_id as string;
+        const messageId = payload.message_id as string;
+        removeMessageFromChannel(channelId, messageId);
+        break;
+      }
         
       case 'error':
         lastError.value = payload.message;
@@ -1429,6 +1450,15 @@ export const useChatStore = defineStore('chat', () => {
 
   const sendMessage = (channel_id: string, content: string) => {
     send('send_message', { channel_id, content });
+  };
+
+  const deleteMessage = (channel_id: string, message_id: string) => {
+    if (!channel_id || !message_id) {
+      lastError.value = 'Channel ID and message ID are required';
+      return;
+    }
+
+    send('delete_message', { channel_id, message_id });
   };
 
   const sendMessageWithAttachments = async (channel_id: string, content: string, files: File[]) => {
@@ -1674,6 +1704,7 @@ export const useChatStore = defineStore('chat', () => {
     requestServerRefresh,
     clearError,
     sendMessage,
+    deleteMessage,
     sendMessageWithAttachments,
     loadOlderMessages,
     isLoadingMessagesForChannel,

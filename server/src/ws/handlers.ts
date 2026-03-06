@@ -37,7 +37,10 @@ import {
   updateServerStorageLastError,
   updateFolderChannelFileStorage,
   getAllFolderChannelFiles,
-  getMessageAttachments
+  getMessageAttachments,
+  getMessageById,
+  deleteMessageAttachmentById,
+  deleteMessageById
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -379,6 +382,35 @@ const hasFolderManagementAccess = (role: string | null | undefined) => {
   return role === 'admin' || role === 'owner';
 };
 
+const canDeleteMessage = (role: string | null | undefined, messageUserId: string, actingUserId: string) => {
+  if (!actingUserId) {
+    return false;
+  }
+  if (messageUserId === actingUserId) {
+    return true;
+  }
+  return role === 'admin' || role === 'owner';
+};
+
+const deleteStoredMessageAttachment = async (channelId: string, attachment: {
+  storage_provider: 'data_dir' | 's3';
+  storage_key: string | null;
+  storage_name: string;
+}) => {
+  if (attachment.storage_provider === 's3') {
+    const persistedS3Config = await getPersistedS3Config();
+    if (persistedS3Config && attachment.storage_key) {
+      await deleteFileFromS3({ config: persistedS3Config, key: attachment.storage_key });
+    }
+    return;
+  }
+
+  const fullPath = resolveSafeStoredFilePath(channelId, attachment.storage_name);
+  if (fs.existsSync(fullPath)) {
+    fs.unlinkSync(fullPath);
+  }
+};
+
 const sanitizeStoragePrefix = (prefix: string | null | undefined) => {
   const trimmed = (prefix || '').trim().replace(/^\/+/, '').replace(/\/+$/, '');
   return trimmed.length > 0 ? trimmed : null;
@@ -609,6 +641,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'send_message':
         await handleSendMessage(client, payload);
+        break;
+      case 'delete_message':
+        await handleDeleteMessage(client, payload);
         break;
       case 'folder_list_files':
         await handleFolderListFiles(client, payload);
@@ -1468,6 +1503,78 @@ const handleFolderDeleteFile = async (
     payload: {
       channel_id: channelId,
       file_id: file.id
+    }
+  }));
+};
+
+const handleDeleteMessage = async (
+  client: ClientConnection,
+  payload: { channel_id?: string; message_id?: string }
+) => {
+  if (!client.userId) return;
+
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  const messageId = typeof payload?.message_id === 'string' ? payload.message_id : '';
+  if (!channelId || !messageId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid delete payload' } }));
+    return;
+  }
+
+  const channel = await getChannelById(channelId);
+  if (!channel || (channel.type !== 'text' && channel.type !== 'rss')) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Message channel not found' } }));
+    return;
+  }
+
+  const message = await getMessageById(messageId);
+  if (!message || message.channel_id !== channelId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Message not found' } }));
+    return;
+  }
+
+  const user = await getUserById(client.userId);
+  if (!user || !canDeleteMessage(user.role, message.user_id, client.userId)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions to delete message' } }));
+    return;
+  }
+
+  const attachmentMap = await getMessageAttachments([message.id]);
+  const attachments = attachmentMap[message.id] || [];
+
+  try {
+    for (const attachment of attachments) {
+      await deleteStoredMessageAttachment(channelId, attachment);
+    }
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to delete stored message attachment:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to delete message attachment' } }));
+    return;
+  }
+
+  try {
+    for (const attachment of attachments) {
+      await deleteMessageAttachmentById(attachment.id);
+    }
+    await deleteMessageById(message.id);
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to delete message metadata:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to delete message' } }));
+    return;
+  }
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'message_deleted',
+    payload: {
+      channel_id: channelId,
+      message_id: message.id
+    }
+  });
+
+  client.ws.send(JSON.stringify({
+    type: 'message_delete_success',
+    payload: {
+      channel_id: channelId,
+      message_id: message.id
     }
   }));
 };

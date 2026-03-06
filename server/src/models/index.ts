@@ -743,6 +743,18 @@ export const getMessageAttachments = async (messageIds: string[]): Promise<Recor
   }, {});
 };
 
+export const getMessageById = async (id: string): Promise<Message | undefined> => {
+  return dbGet<Message>('SELECT * FROM messages WHERE id = ?', [id]);
+};
+
+export const deleteMessageAttachmentById = async (id: string): Promise<void> => {
+  await dbRun('DELETE FROM message_attachments WHERE id = ?', [id]);
+};
+
+export const deleteMessageById = async (id: string): Promise<void> => {
+  await dbRun('DELETE FROM messages WHERE id = ?', [id]);
+};
+
 export const ensureChannelReadState = async (userId: string, channelId: string): Promise<void> => {
   await dbRun(
     `
