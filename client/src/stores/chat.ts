@@ -61,6 +61,18 @@ export interface Message {
   created_at: string;
   user?: User;
   embeds?: MessageEmbed[];
+  attachments?: MessageAttachment[];
+}
+
+export interface MessageAttachment {
+  id: string;
+  message_id?: string;
+  original_name: string;
+  mime_type: string | null;
+  size_bytes: number;
+  storage_provider?: 'data_dir' | 's3';
+  storage_key?: string | null;
+  url?: string | null;
 }
 
 interface ChannelUnreadState {
@@ -275,18 +287,45 @@ export const useChatStore = defineStore('chat', () => {
     localStorage.setItem('username', username);
   };
 
+  const DEFAULT_SERVER_PORT = '1337';
+  const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+
+  const isLocalServerHostname = (hostname: string) => {
+    const normalizedHostname = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
+    return LOCALHOST_HOSTNAMES.has(normalizedHostname);
+  };
+
   const normalizeServerAddress = (address: string) => {
-    let wsUrl = address.trim();
+    const wsUrl = address.trim();
     if (!wsUrl) return wsUrl;
 
-    if (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://')) {
-      const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
-      wsUrl = `${protocol}${wsUrl}`;
-    } else if (wsUrl.startsWith('ws://') && window.location.protocol === 'https:') {
-      wsUrl = wsUrl.replace(/^ws:\/\//i, 'wss://');
-    }
+    const hasProtocol = /^wss?:\/\//i.test(wsUrl);
+    const rawAddress = hasProtocol ? wsUrl.replace(/^wss?:\/\//i, '') : wsUrl;
+    const [rawHostAndPort = '', ...pathParts] = rawAddress.split('/');
+    const normalizedHostAndPort = rawHostAndPort.replace(/^0\.0\.0\.0(?=[:$])/i, 'localhost');
+    const hostMatch = normalizedHostAndPort.match(/^\[([^\]]+)\](?::(\d+))?$/);
+    const hostForProtocol = hostMatch
+      ? hostMatch[1] || ''
+      : normalizedHostAndPort.replace(/:(\d+)$/, '');
+    const protocol = hasProtocol
+      ? (wsUrl.toLowerCase().startsWith('wss://') ? 'wss://' : 'ws://')
+      : (isLocalServerHostname(hostForProtocol) ? 'ws://' : 'wss://');
+    const hasPort = hostMatch ? Boolean(hostMatch[2]) : /:\d+$/.test(normalizedHostAndPort);
+    const normalizedPath = pathParts.length > 0 ? `/${pathParts.join('/')}` : '';
 
-    return wsUrl.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`);
+    console.log('[DEBUG] normalizeServerAddress', {
+      input: address,
+      trimmedInput: wsUrl,
+      hasProtocol,
+      rawHostAndPort,
+      normalizedHostAndPort,
+      hostForProtocol,
+      selectedProtocol: protocol,
+      hasPort,
+      normalizedPath,
+    });
+
+    return `${protocol}${normalizedHostAndPort}${hasPort ? '' : `:${DEFAULT_SERVER_PORT}`}${normalizedPath}`;
   };
 
   const getHttpBaseFromWsAddress = (address: string) => {
@@ -310,6 +349,56 @@ export const useChatStore = defineStore('chat', () => {
     return `${url}${separator}v=${encodeURIComponent(normalizedVersion)}`;
   };
 
+  const resolveConnectedServerBaseUrl = (wsAddress?: string | null) => {
+    if (wsAddress) {
+      return getHttpBaseFromWsAddress(wsAddress);
+    }
+
+    const activeConnection = activeConnectionId.value
+      ? savedConnections.value.find((connection) => connection.id === activeConnectionId.value)
+      : null;
+
+    return activeConnection
+      ? getHttpBaseFromWsAddress(activeConnection.address)
+      : window.location.origin;
+  };
+
+  const resolveAttachmentUrl = (attachmentUrl?: string | null, wsAddress?: string | null) => {
+    const url = (attachmentUrl || '').trim();
+    if (!url) {
+      return null;
+    }
+
+    if (/^(data:|blob:|https?:\/\/|\/\/)/i.test(url)) {
+      return url;
+    }
+
+    const normalizedPath = url.startsWith('/') ? url : `/${url}`;
+    return `${resolveConnectedServerBaseUrl(wsAddress)}${normalizedPath}`;
+  };
+
+  const normalizeMessageAttachments = (message: Message, wsAddress?: string | null): Message => {
+    if (!Array.isArray(message.attachments) || message.attachments.length === 0) {
+      return message;
+    }
+
+    return {
+      ...message,
+      attachments: message.attachments.map((attachment) => ({
+        ...attachment,
+        url: resolveAttachmentUrl(attachment.url, wsAddress)
+      }))
+    };
+  };
+
+  const normalizeIncomingMessage = (message: Message, wsAddress?: string | null) => {
+    return normalizeMessageAttachments(message, wsAddress);
+  };
+
+  const normalizeIncomingMessages = (incomingMessages: Message[], wsAddress?: string | null) => {
+    return incomingMessages.map((message) => normalizeIncomingMessage(message, wsAddress));
+  };
+
   const resolveServerIconUrl = (iconPath?: string | null, wsAddress?: string | null, version?: string | null) => {
     const path = (iconPath || '').trim();
     if (!path) {
@@ -322,13 +411,7 @@ export const useChatStore = defineStore('chat', () => {
         return null;
       }
 
-      const baseUrl = wsAddress
-        ? getHttpBaseFromWsAddress(wsAddress)
-        : (activeConnectionId.value
-          ? getHttpBaseFromWsAddress(savedConnections.value.find((connection) => connection.id === activeConnectionId.value)?.address || '')
-          : window.location.origin);
-
-      return appendServerIconVersion(`${baseUrl}/server-icons/s3/${encodeURIComponent(key)}`, version);
+      return appendServerIconVersion(`${resolveConnectedServerBaseUrl(wsAddress)}/server-icons/s3/${encodeURIComponent(key)}`, version);
     }
 
     if (/^(data:|blob:|https?:\/\/|\/\/)/i.test(path)) {
@@ -336,19 +419,7 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-    if (wsAddress) {
-      return appendServerIconVersion(`${getHttpBaseFromWsAddress(wsAddress)}${normalizedPath}`, version);
-    }
-
-    const activeConnection = activeConnectionId.value
-      ? savedConnections.value.find((connection) => connection.id === activeConnectionId.value)
-      : null;
-
-    const baseUrl = activeConnection
-      ? getHttpBaseFromWsAddress(activeConnection.address)
-      : window.location.origin;
-
-    return appendServerIconVersion(`${baseUrl}${normalizedPath}`, version);
+    return appendServerIconVersion(`${resolveConnectedServerBaseUrl(wsAddress)}${normalizedPath}`, version);
   };
 
   const requestServerRefresh = () => {
@@ -513,15 +584,16 @@ export const useChatStore = defineStore('chat', () => {
       if (host === '0.0.0.0') {
         host = 'localhost';
       }
-      const port = '1337'; // Assuming server is on 1337
+      const port = DEFAULT_SERVER_PORT; // Assuming server is on 1337
       // Use wss:// if the page is loaded over https, otherwise ws://
       const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
       wsUrl = `${protocol}${host}:${port}`;
     } else if (wsUrl.startsWith('ws://') && window.location.protocol === 'https:') {
-      wsUrl = wsUrl.replace(/^ws:\/\//i, 'wss://');
+      console.log('[DEBUG] Preserving explicit ws:// address on https page', { input: wsUrl });
     }
 
-    // Replace 0.0.0.0 with localhost in the final URL to prevent browser connection errors
+    console.log('[DEBUG] connect pre-normalize wsUrl', { inputAddress: address, preNormalizedWsUrl: wsUrl });
+
     wsUrl = normalizeServerAddress(wsUrl);
 
     console.log(`[DEBUG] Final wsUrl: ${wsUrl}`);
@@ -774,6 +846,20 @@ export const useChatStore = defineStore('chat', () => {
     const next = new Set(unreadChannelIds.value);
     next.delete(channelId);
     unreadChannelIds.value = next;
+  };
+
+  const removeMessageFromChannel = (channelId: string, messageId: string) => {
+    if (!channelId || !messageId) {
+      return;
+    }
+
+    const existingMessages = messages.value[channelId];
+    if (!existingMessages?.length) {
+      return;
+    }
+
+    messages.value[channelId] = existingMessages.filter((message) => message.id !== messageId);
+    markActiveChannelReadFromMessages(channelId);
   };
 
   const markChannelReadOnServer = (channelId: string, message: Message | null | undefined) => {
@@ -1102,7 +1188,7 @@ export const useChatStore = defineStore('chat', () => {
       case 'messages_list': {
         const channelId = payload.channel_id as string;
         const pageState = ensureMessagePageState(channelId);
-        const incomingMessages = (payload.messages || []) as Message[];
+        const incomingMessages = normalizeIncomingMessages((payload.messages || []) as Message[]);
         const isOlderPage = payload.is_older_page === true;
 
         if (isOlderPage) {
@@ -1133,7 +1219,7 @@ export const useChatStore = defineStore('chat', () => {
       }
         
       case 'new_message':
-        const msg = payload.message;
+        const msg = normalizeIncomingMessage(payload.message as Message);
         const pageState = ensureMessagePageState(msg.channel_id);
         const alreadyPresent = Boolean(messages.value[msg.channel_id]?.some((existing) => existing.id === msg.id));
         if (!messages.value[msg.channel_id]) {
@@ -1155,6 +1241,13 @@ export const useChatStore = defineStore('chat', () => {
           markChannelUnread(msg.channel_id);
         }
         break;
+
+      case 'message_deleted': {
+        const channelId = payload.channel_id as string;
+        const messageId = payload.message_id as string;
+        removeMessageFromChannel(channelId, messageId);
+        break;
+      }
         
       case 'error':
         lastError.value = payload.message;
@@ -1357,6 +1450,48 @@ export const useChatStore = defineStore('chat', () => {
 
   const sendMessage = (channel_id: string, content: string) => {
     send('send_message', { channel_id, content });
+  };
+
+  const deleteMessage = (channel_id: string, message_id: string) => {
+    if (!channel_id || !message_id) {
+      lastError.value = 'Channel ID and message ID are required';
+      return;
+    }
+
+    send('delete_message', { channel_id, message_id });
+  };
+
+  const sendMessageWithAttachments = async (channel_id: string, content: string, files: File[]) => {
+    const attachments = await Promise.all(files.map(async (file) => {
+      const dataBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result;
+          if (typeof result !== 'string') {
+            reject(new Error('Failed to read file'));
+            return;
+          }
+
+          const commaIndex = result.indexOf(',');
+          if (commaIndex === -1) {
+            reject(new Error('Failed to read file'));
+            return;
+          }
+
+          resolve(result.slice(commaIndex + 1));
+        };
+        reader.onerror = () => reject(new Error('Failed to read file'));
+        reader.readAsDataURL(file);
+      });
+
+      return {
+        file_name: file.name,
+        mime_type: file.type || 'application/octet-stream',
+        data_base64: dataBase64
+      };
+    }));
+
+    send('send_message', { channel_id, content, attachments });
   };
 
   const kickMember = (targetUserId: string, options: { reason?: string; deleteMode?: ModerationDeleteMode; deleteHours?: number }) => {
@@ -1569,6 +1704,8 @@ export const useChatStore = defineStore('chat', () => {
     requestServerRefresh,
     clearError,
     sendMessage,
+    deleteMessage,
+    sendMessageWithAttachments,
     loadOlderMessages,
     isLoadingMessagesForChannel,
     hasOlderMessagesForChannel,

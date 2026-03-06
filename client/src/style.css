@@ -9,3 +9,50 @@ html, body, #app {
   background-color: #20252b;
   color: #d8dde3;
 }
+
+body {
+  overflow: hidden;
+}
+
+.tauri-titlebar {
+  user-select: none;
+}
+
+.tauri-titlebar-drag-region {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 100%;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.tauri-titlebar-controls,
+.tauri-titlebar-button,
+.tauri-titlebar-button svg,
+.tauri-titlebar-button * {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.tauri-titlebar-button {
+  display: inline-flex;
+  width: 3rem;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: #d4d4d8;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.tauri-titlebar-button:hover {
+  background-color: rgba(63, 63, 70, 0.85);
+}
+
+.tauri-titlebar-button-close:hover {
+  background-color: #dc2626;
+  color: #fafafa;
+}
