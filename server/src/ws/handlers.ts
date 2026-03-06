@@ -40,7 +40,9 @@ import {
   getMessageAttachments,
   getMessageById,
   deleteMessageAttachmentById,
-  deleteMessageById
+  deleteMessageById,
+  toggleMessageReaction,
+  getMessageReactionSummary
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -654,6 +656,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'delete_message':
         await handleDeleteMessage(client, payload);
         break;
+      case 'toggle_message_reaction':
+        await handleToggleMessageReaction(client, payload);
+        break;
       case 'folder_list_files':
         await handleFolderListFiles(client, payload);
         break;
@@ -1254,6 +1259,7 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     ...message,
     user,
     attachments: createdAttachments,
+    reactions: message.reactions || [],
     reply_to_message: replyToMessage && replyUser
       ? {
           ...replyToMessage,
@@ -1269,6 +1275,54 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     type: 'new_message',
     payload: { message: messageWithUser }
   });
+};
+
+const handleToggleMessageReaction = async (
+  client: ClientConnection,
+  payload: { channel_id?: string; message_id?: string; emoji?: string }
+) => {
+  if (!client.userId) return;
+
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  const messageId = typeof payload?.message_id === 'string' ? payload.message_id : '';
+  const emoji = typeof payload?.emoji === 'string' ? payload.emoji.trim() : '';
+  if (!channelId || !messageId || !emoji) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid reaction payload' } }));
+    return;
+  }
+
+  const channel = await getChannelById(channelId);
+  if (!channel || (channel.type !== 'text' && channel.type !== 'rss')) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Message channel not found' } }));
+    return;
+  }
+
+  const message = await getMessageById(messageId);
+  if (!message || message.channel_id !== channelId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Message not found' } }));
+    return;
+  }
+
+  await toggleMessageReaction(messageId, client.userId, emoji);
+  const reactions = await getMessageReactionSummary(messageId);
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'message_reactions_updated',
+    payload: {
+      channel_id: channelId,
+      message_id: messageId,
+      reactions
+    }
+  });
+
+  client.ws.send(JSON.stringify({
+    type: 'message_reaction_toggled',
+    payload: {
+      channel_id: channelId,
+      message_id: messageId,
+      reactions
+    }
+  }));
 };
 
 const handleFolderListFiles = async (client: ClientConnection, payload: { channel_id?: string }) => {

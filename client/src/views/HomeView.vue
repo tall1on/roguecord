@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
 import { Archive, Code2, File, FileText, Film, Image, Music2, Reply, Trash2, X } from 'lucide-vue-next'
-import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, type MessageAttachment } from '../stores/chat'
+import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, type MessageAttachment, type MessageReaction } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
 import { openExternalUrl } from '../utils/openExternalUrl'
@@ -21,6 +21,7 @@ const folderViewMode = ref<'list' | 'tiles'>('list')
 const pendingMessageAttachments = ref<File[]>([])
 const isSendingMessage = ref(false)
 const replyDraftMessage = ref<Message | null>(null)
+const MESSAGE_REACTION_OPTIONS = ['👍', '❤️', '😂', '😮', '🎉'] as const
 
 const TOP_SCROLL_THRESHOLD_PX = 120
 const BOTTOM_SCROLL_THRESHOLD_PX = 120
@@ -219,7 +220,7 @@ const canReplyToMessage = (message: Message) => {
 }
 
 const openMessageContextMenu = (event: MouseEvent, message: Message) => {
-  if (!canDeleteMessage(message) && !canReplyToMessage(message)) {
+  if (!canDeleteMessage(message) && !canReplyToMessage(message) && !canReactToMessage(message)) {
     closeMessageContextMenu()
     return
   }
@@ -228,7 +229,7 @@ const openMessageContextMenu = (event: MouseEvent, message: Message) => {
   event.stopPropagation()
 
   const estimatedWidth = 224
-  const estimatedHeight = (canReplyToMessage(message) ? 52 : 0) + (canDeleteMessage(message) ? 52 : 0)
+  const estimatedHeight = (canReplyToMessage(message) ? 52 : 0) + (canDeleteMessage(message) ? 52 : 0) + (canReactToMessage(message) ? 72 : 0)
   const maxX = Math.max(8, window.innerWidth - estimatedWidth - 8)
   const maxY = Math.max(8, window.innerHeight - estimatedHeight - 8)
 
@@ -238,6 +239,26 @@ const openMessageContextMenu = (event: MouseEvent, message: Message) => {
     y: Math.min(event.clientY, maxY),
     message
   }
+}
+
+const canReactToMessage = (message: Message) => {
+  return Boolean(activeTextChannel.value) && !isReadOnlyRssChannel.value && message.channel_id === activeTextChannel.value?.id
+}
+
+const toggleMessageReaction = (message: Message, emoji: string) => {
+  if (!canReactToMessage(message)) return
+  chatStore.toggleMessageReaction(message.channel_id, message.id, emoji)
+}
+
+const toggleReactionFromContextMenu = (emoji: string) => {
+  const message = messageContextMenu.value.message
+  if (!message) return
+  toggleMessageReaction(message, emoji)
+  closeMessageContextMenu()
+}
+
+const getMessageReactions = (message: Message): MessageReaction[] => {
+  return Array.isArray(message.reactions) ? message.reactions : []
 }
 
 const startReplyFromContextMenu = () => {
@@ -1104,6 +1125,19 @@ watch(
                   </a>
                 </div>
               </div>
+              <div v-if="getMessageReactions(entry.message).length > 0" class="mt-2 flex flex-wrap gap-2">
+                <button
+                  v-for="reaction in getMessageReactions(entry.message)"
+                  :key="`${entry.message.id}-${reaction.emoji}`"
+                  type="button"
+                  class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
+                  :class="reaction.reacted_by_current_user ? 'border-indigo-400/50 bg-indigo-500/15 text-indigo-200' : 'border-white/10 bg-zinc-900/70 text-zinc-300 hover:bg-zinc-800/80'"
+                  @click="toggleMessageReaction(entry.message, reaction.emoji)"
+                >
+                  <span>{{ reaction.emoji }}</span>
+                  <span>{{ reaction.count }}</span>
+                </button>
+              </div>
             </div>
           </div>
         </template>
@@ -1117,10 +1151,28 @@ watch(
         role="menu"
         @click.stop
         @contextmenu.stop
-      >
-        <button
-          v-if="messageContextMenu.message && canReplyToMessage(messageContextMenu.message)"
-          type="button"
+        >
+          <div
+            v-if="messageContextMenu.message && canReactToMessage(messageContextMenu.message)"
+            class="px-3 py-2 border-b border-white/5"
+          >
+            <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Add reaction</p>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-for="emoji in MESSAGE_REACTION_OPTIONS"
+                :key="emoji"
+                type="button"
+                class="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-zinc-900/70 text-base text-zinc-200 transition-colors hover:bg-zinc-800/80"
+                role="menuitem"
+                @click="toggleReactionFromContextMenu(emoji)"
+              >
+                {{ emoji }}
+              </button>
+            </div>
+          </div>
+          <button
+            v-if="messageContextMenu.message && canReplyToMessage(messageContextMenu.message)"
+            type="button"
           class="w-full px-3 py-2 text-left text-sm text-zinc-200 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors"
           role="menuitem"
           @click="startReplyFromContextMenu"
