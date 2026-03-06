@@ -1,8 +1,8 @@
 # RogueCord
 
-RogueCord is a self-hosted, Discord-like platform where a community can run its own standalone server/guild instance. This repository contains both the web client and the Node.js backend.
+RogueCord is a self-hosted, real-time communication platform where communities can run their own standalone server instances. This repository contains both the web client and the Node.js backend.
 
-Current implementation focus is real-time text + voice collaboration with WebSocket signaling, Mediasoup-based media transport, and SQLite-backed persistence.
+The current implementation focuses on real-time text and voice communication using WebSocket signaling, Mediasoup-based media transport, and SQLite-backed persistence.
 
 ## Current Feature Status
 
