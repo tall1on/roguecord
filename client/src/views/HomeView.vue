@@ -715,14 +715,24 @@ const getAttachmentDisplayLabel = (attachment: MessageAttachment) => attachment.
 
 const getAttachmentMimeType = (attachment: MessageAttachment) => attachment.mime_type?.split(';', 1)[0]?.trim().toLowerCase() || ''
 
-const getAttachmentExtension = (attachment: MessageAttachment) => attachment.original_name.split('.').pop()?.trim().toLowerCase() || ''
+const getAttachmentExtension = (attachment: MessageAttachment) => {
+  const rawFileName = attachment.original_name || attachment.url || ''
+  const normalizedFileName = rawFileName.split(/[?#]/, 1)[0]?.trim() || ''
+  const dotIndex = normalizedFileName.lastIndexOf('.')
+
+  if (dotIndex <= 0 || dotIndex === normalizedFileName.length - 1) {
+    return ''
+  }
+
+  return normalizedFileName.slice(dotIndex + 1).trim().toLowerCase()
+}
 
 const isInlineImageAttachment = (attachment: MessageAttachment) => {
   const mimeType = getAttachmentMimeType(attachment)
   if (mimeType.startsWith('image/')) {
     return mimeType !== 'image/svg+xml'
   }
-  return ['apng', 'avif', 'bmp', 'gif', 'ico', 'cur', 'jpg', 'jpeg', 'jfif', 'pjpeg', 'pjp', 'png', 'svg', 'svgz', 'webp'].includes(getAttachmentExtension(attachment))
+  return ['apng', 'avif', 'bmp', 'gif', 'ico', 'cur', 'jpg', 'jpeg', 'jfif', 'pjpeg', 'pjp', 'png', 'webp'].includes(getAttachmentExtension(attachment))
 }
 
 const isInlineVideoAttachment = (attachment: MessageAttachment) => {
