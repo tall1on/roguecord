@@ -542,6 +542,13 @@ export interface Message {
   created_at: string;
   reply_to_message_id?: string | null;
   attachments?: MessageAttachment[];
+  reactions: MessageReaction[];
+}
+
+export interface MessageReaction {
+  emoji: string;
+  count: number;
+  user_ids: string[];
 }
 
 export interface MessageReplyReference {
@@ -588,6 +595,14 @@ export interface MessageWithUserAndAttachmentData extends MessageWithUserAndEmbe
   attachments?: MessageAttachment[];
   reply_to_message?: MessageReplyReference | null;
 }
+
+const enrichMessagesWithReactions = async <T extends { id: string }>(messages: T[]): Promise<Array<T & { reactions: MessageReaction[] }>> => {
+  const reactionMap = await getMessageReactions(messages.map((message) => message.id));
+  return messages.map((message) => ({
+    ...message,
+    reactions: reactionMap[message.id] || []
+  }));
+};
 
 export interface ChannelReadState {
   user_id: string;
@@ -642,7 +657,76 @@ export interface BanRule {
 export const createMessage = async (channel_id: string, user_id: string, content: string, replyToMessageId: string | null = null): Promise<Message> => {
   const id = crypto.randomUUID();
   await dbRun('INSERT INTO messages (id, channel_id, user_id, content, reply_to_message_id) VALUES (?, ?, ?, ?, ?)', [id, channel_id, user_id, content, replyToMessageId]);
-  return (await dbGet<Message>('SELECT * FROM messages WHERE id = ?', [id]))!;
+  const message = (await dbGet<Omit<Message, 'reactions'>>('SELECT * FROM messages WHERE id = ?', [id]))!;
+  return {
+    ...message,
+    reactions: []
+  };
+};
+
+export const getMessageReactions = async (messageIds: string[]): Promise<Record<string, MessageReaction[]>> => {
+  if (messageIds.length === 0) {
+    return {};
+  }
+
+  const placeholders = messageIds.map(() => '?').join(', ');
+  const rows = await dbAll<{ message_id: string; emoji: string; user_id: string }>(
+    `
+      SELECT message_id, emoji, user_id
+      FROM message_reactions
+      WHERE message_id IN (${placeholders})
+      ORDER BY message_id ASC, emoji ASC, created_at ASC, user_id ASC
+    `,
+    messageIds
+  );
+
+  const reactionMap: Record<string, Map<string, string[]>> = {};
+  for (const row of rows) {
+    if (!reactionMap[row.message_id]) {
+      reactionMap[row.message_id] = new Map<string, string[]>();
+    }
+    const byEmoji = reactionMap[row.message_id]!;
+    const users = byEmoji.get(row.emoji) || [];
+    users.push(row.user_id);
+    byEmoji.set(row.emoji, users);
+  }
+
+  return messageIds.reduce<Record<string, MessageReaction[]>>((acc, messageId) => {
+    const byEmoji = reactionMap[messageId];
+    acc[messageId] = byEmoji
+      ? Array.from(byEmoji.entries()).map(([emoji, user_ids]) => ({
+          emoji,
+          count: user_ids.length,
+          user_ids
+        }))
+      : [];
+    return acc;
+  }, {});
+};
+
+export const getMessageReactionSummary = async (messageId: string): Promise<MessageReaction[]> => {
+  const reactions = await getMessageReactions([messageId]);
+  return reactions[messageId] || [];
+};
+
+export const toggleMessageReaction = async (messageId: string, userId: string, emoji: string): Promise<MessageReaction[]> => {
+  const normalizedEmoji = emoji.trim();
+  if (!normalizedEmoji) {
+    throw new Error('Emoji is required');
+  }
+
+  const existing = await dbGet<{ message_id: string }>(
+    'SELECT message_id FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?',
+    [messageId, userId, normalizedEmoji]
+  );
+
+  if (existing) {
+    await dbRun('DELETE FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?', [messageId, userId, normalizedEmoji]);
+  } else {
+    await dbRun('INSERT INTO message_reactions (message_id, user_id, emoji) VALUES (?, ?, ?)', [messageId, userId, normalizedEmoji]);
+  }
+
+  return getMessageReactionSummary(messageId);
 };
 
 export const getMessageReplyReferences = async (messageIds: string[]): Promise<Record<string, MessageReplyReference | null>> => {
@@ -818,7 +902,10 @@ export const getMessageAttachments = async (messageIds: string[]): Promise<Recor
 };
 
 export const getMessageById = async (id: string): Promise<Message | undefined> => {
-  return dbGet<Message>('SELECT * FROM messages WHERE id = ?', [id]);
+  const message = await dbGet<Omit<Message, 'reactions'>>('SELECT * FROM messages WHERE id = ?', [id]);
+  if (!message) return undefined;
+  const [enrichedMessage] = await enrichMessagesWithReactions([message]);
+  return enrichedMessage;
 };
 
 export const deleteMessageAttachmentById = async (id: string): Promise<void> => {
@@ -1140,7 +1227,7 @@ export const getChannelMessages = async (
 
   queryParams.push(normalizedLimit + 1);
 
-  const messages = await dbAll<Message>(
+  const messages = await dbAll<Omit<Message, 'reactions'>>(
     `
       SELECT *
       FROM messages
@@ -1155,10 +1242,11 @@ export const getChannelMessages = async (
   const hasMore = messages.length > normalizedLimit;
   const pageMessages = hasMore ? messages.slice(0, normalizedLimit) : messages;
   const replyMap = await getMessageReplyReferences(pageMessages.map((message) => message.id));
+  const messagesWithReactions = await enrichMessagesWithReactions(pageMessages);
   
   // Fetch users for messages (could be done with a JOIN, but this is fine for now)
   const messagesWithUsers: MessageWithUserAndEmbedData[] = [];
-  for (const msg of pageMessages) {
+  for (const msg of messagesWithReactions) {
     const user = await getUserById(msg.user_id);
     if (user) {
       messagesWithUsers.push(withMessageEmbeds({ ...msg, user, reply_to_message: replyMap[msg.id] || null }));
