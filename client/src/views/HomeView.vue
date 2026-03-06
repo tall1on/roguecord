@@ -642,6 +642,24 @@ const sendMessage = () => {
   void submitMessage()
 }
 
+const pendingAttachmentUploadSummary = computed(() => {
+  const progressEntries = chatStore.pendingMessageUploadProgress
+  if (!isSendingMessage.value || !progressEntries?.length) {
+    return null
+  }
+
+  const totalBytes = progressEntries.reduce((sum, entry) => sum + Math.max(entry.totalBytes, 0), 0)
+  const loadedBytes = progressEntries.reduce((sum, entry) => sum + Math.min(Math.max(entry.loadedBytes, 0), Math.max(entry.totalBytes, 0)), 0)
+  const percent = totalBytes > 0 ? Math.min(100, Math.round((loadedBytes / totalBytes) * 100)) : 0
+
+  return {
+    fileCount: progressEntries.length,
+    loadedBytes,
+    totalBytes,
+    percent
+  }
+})
+
 const onOpenMessageAttachmentPicker = () => {
   if (isReadOnlyRssChannel.value || isSendingMessage.value) return
   messageAttachmentInput.value?.click()
@@ -696,6 +714,7 @@ const submitMessage = async () => {
     clearReplyDraft()
   } finally {
     isSendingMessage.value = false
+    chatStore.clearPendingMessageUploadProgress()
   }
 }
 
@@ -712,6 +731,55 @@ const getReplyPreviewText = (message: Message | MessageReplyReference | null | u
 }
 
 const getAttachmentDisplayLabel = (attachment: MessageAttachment) => attachment.original_name
+
+const getAttachmentMimeType = (attachment: MessageAttachment) => attachment.mime_type?.split(';', 1)[0]?.trim().toLowerCase() || ''
+
+const getAttachmentExtension = (attachment: MessageAttachment) => {
+  const rawFileName = attachment.original_name || attachment.url || ''
+  const normalizedFileName = rawFileName.split(/[?#]/, 1)[0]?.trim() || ''
+  const dotIndex = normalizedFileName.lastIndexOf('.')
+
+  if (dotIndex <= 0 || dotIndex === normalizedFileName.length - 1) {
+    return ''
+  }
+
+  return normalizedFileName.slice(dotIndex + 1).trim().toLowerCase()
+}
+
+const isInlineImageAttachment = (attachment: MessageAttachment) => {
+  const mimeType = getAttachmentMimeType(attachment)
+  if (mimeType.startsWith('image/')) {
+    return mimeType !== 'image/svg+xml'
+  }
+  return ['apng', 'avif', 'bmp', 'gif', 'ico', 'cur', 'jpg', 'jpeg', 'jfif', 'pjpeg', 'pjp', 'png', 'webp'].includes(getAttachmentExtension(attachment))
+}
+
+const isInlineVideoAttachment = (attachment: MessageAttachment) => {
+  const mimeType = getAttachmentMimeType(attachment)
+  if (mimeType.startsWith('video/')) {
+    return ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'].includes(mimeType)
+  }
+  return ['mp4', 'webm', 'ogv', 'mov'].includes(getAttachmentExtension(attachment))
+}
+
+const isInlineAudioAttachment = (attachment: MessageAttachment) => {
+  const mimeType = getAttachmentMimeType(attachment)
+  if (mimeType.startsWith('audio/')) {
+    return ['audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/ogg', 'audio/wav', 'audio/webm', 'audio/flac', 'audio/aac'].includes(mimeType)
+  }
+  return ['mp3', 'm4a', 'ogg', 'oga', 'wav', 'weba', 'flac', 'aac'].includes(getAttachmentExtension(attachment))
+}
+
+const getAttachmentInlineKind = (attachment: MessageAttachment): 'image' | 'video' | 'audio' | null => {
+  const attachmentUrl = attachment.url?.trim()
+  if (!attachmentUrl) return null
+  if (isInlineImageAttachment(attachment)) return 'image'
+  if (isInlineVideoAttachment(attachment)) return 'video'
+  if (isInlineAudioAttachment(attachment)) return 'audio'
+  return null
+}
+
+const isInlineAttachment = (attachment: MessageAttachment) => getAttachmentInlineKind(attachment) !== null
 
 const openMessageAttachment = async (attachment: MessageAttachment, event: MouseEvent) => {
   const attachmentUrl = attachment.url?.trim()
@@ -1070,21 +1138,47 @@ watch(
               </div>
               <p v-if="entry.message.content" class="text-zinc-300 whitespace-pre-wrap break-words leading-[1.35] text-[14px]" v-html="formatMessageContentWithLinks(entry.message.content)"></p>
               <div v-if="entry.message.attachments?.length" class="mt-2 space-y-2">
-                <a
+                <div
                   v-for="attachment in entry.message.attachments"
                   :key="attachment.id"
-                 :href="attachment.url || '#'"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="flex items-center gap-3 max-w-[420px] rounded-lg border border-white/10 bg-zinc-900/70 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800/80 transition-colors"
-                  @click="openMessageAttachment(attachment, $event)"
+                  class="max-w-[420px] space-y-2"
                 >
-                  <component :is="getFolderFileIcon(attachment.original_name)" class="w-4 h-4 shrink-0" :class="getFolderFileIconClass(attachment.original_name)" />
-                  <div class="min-w-0 flex-1">
-                    <p class="truncate">{{ getAttachmentDisplayLabel(attachment) }}</p>
-                    <p class="text-xs text-zinc-500">{{ formatFileSize(attachment.size_bytes) }}</p>
-                  </div>
-                </a>
+                  <img
+                    v-if="getAttachmentInlineKind(attachment) === 'image'"
+                    :src="attachment.url || ''"
+                    :alt="attachment.original_name"
+                    class="block max-h-[420px] max-w-full rounded-lg border border-white/10 bg-zinc-950/60 object-contain"
+                    loading="lazy"
+                  />
+                  <video
+                    v-else-if="getAttachmentInlineKind(attachment) === 'video'"
+                    :src="attachment.url || ''"
+                    class="block max-h-[420px] max-w-full rounded-lg border border-white/10 bg-black"
+                    controls
+                    preload="metadata"
+                  ></video>
+                  <audio
+                    v-else-if="getAttachmentInlineKind(attachment) === 'audio'"
+                    :src="attachment.url || ''"
+                    class="block w-full rounded-lg border border-white/10 bg-zinc-950/60"
+                    controls
+                    preload="metadata"
+                  ></audio>
+                  <a
+                    :href="attachment.url || '#'"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="flex items-center gap-3 rounded-lg border border-white/10 bg-zinc-900/70 px-3 py-2 text-sm text-zinc-200 transition-colors hover:bg-zinc-800/80"
+                    @click="openMessageAttachment(attachment, $event)"
+                  >
+                    <component :is="getFolderFileIcon(attachment.original_name)" class="w-4 h-4 shrink-0" :class="getFolderFileIconClass(attachment.original_name)" />
+                    <div class="min-w-0 flex-1">
+                      <p class="truncate">{{ getAttachmentDisplayLabel(attachment) }}</p>
+                      <p class="text-xs text-zinc-500">{{ formatFileSize(attachment.size_bytes) }}</p>
+                    </div>
+                    <span v-if="isInlineAttachment(attachment)" class="shrink-0 text-[11px] uppercase tracking-wide text-zinc-500">Open</span>
+                  </a>
+                </div>
               </div>
               <div v-if="getMessageEmbeds(entry.message).length > 0" class="mt-2 space-y-2">
                 <div
@@ -1233,6 +1327,20 @@ watch(
               Remove
             </button>
           </div>
+        </div>
+        <div v-if="pendingAttachmentUploadSummary" class="mb-2 rounded-lg border border-indigo-500/20 bg-indigo-500/10 px-3 py-2.5">
+          <div class="flex items-center justify-between gap-3 text-xs text-indigo-100">
+            <span>
+              Uploading {{ pendingAttachmentUploadSummary.fileCount }} {{ pendingAttachmentUploadSummary.fileCount === 1 ? 'attachment' : 'attachments' }}
+            </span>
+            <span>{{ pendingAttachmentUploadSummary.percent }}%</span>
+          </div>
+          <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
+            <div class="h-full rounded-full bg-indigo-400 transition-[width] duration-150" :style="{ width: `${pendingAttachmentUploadSummary.percent}%` }"></div>
+          </div>
+          <p class="mt-2 text-[11px] text-indigo-200/80">
+            {{ formatFileSize(pendingAttachmentUploadSummary.loadedBytes) }} / {{ formatFileSize(pendingAttachmentUploadSummary.totalBytes) }}
+          </p>
         </div>
         <div class="bg-zinc-900/60 border border-white/5 rounded-lg py-2.5 px-3 flex items-center gap-2.5 shadow-sm focus-within:ring-1 focus-within:ring-indigo-500/50 focus-within:border-indigo-500/30 transition-all duration-200 focus-within:bg-zinc-900/90" :class="isReadOnlyRssChannel ? 'opacity-80' : ''">
           <button type="button" class="w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-700 shrink-0 transition-colors disabled:opacity-50" :disabled="isReadOnlyRssChannel || isSendingMessage" @click="onOpenMessageAttachmentPicker">
