@@ -197,6 +197,7 @@ const pollChannelFeed = async (channel: Channel) => {
         payload: {
           message: withMessageEmbeds({
             ...message,
+            reactions: message.reactions || [],
             user: rssBotUser
           })
         }
