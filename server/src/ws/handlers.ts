@@ -28,6 +28,7 @@ import {
   getChannelUnreadStatesForUser,
   markChannelReadUpToMessage,
   createFolderChannelFile,
+  createMessageAttachment,
   getFolderChannelFiles,
   getFolderChannelFileById,
   deleteFolderChannelFileById,
@@ -35,7 +36,8 @@ import {
   updateServerStorageSettings,
   updateServerStorageLastError,
   updateFolderChannelFileStorage,
-  getAllFolderChannelFiles
+  getAllFolderChannelFiles,
+  getMessageAttachments
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -340,6 +342,24 @@ const ensureChannelFilesDir = (channelId: string) => {
     fs.mkdirSync(dir, { recursive: true });
   }
   return dir;
+};
+
+const buildStoredFileUrl = (storageProvider: 'data_dir' | 's3', channelId: string, storageName: string, storageKey: string | null) => {
+  if (storageProvider === 's3' && storageKey) {
+    return `/files/s3/${encodeURIComponent(storageKey)}`;
+  }
+  return `/files/${encodeURIComponent(channelId)}/${encodeURIComponent(storageName)}`;
+};
+
+const enrichMessageAttachmentsForClient = async <T extends { id: string; channel_id: string }>(messages: T[]) => {
+  const attachmentMap = await getMessageAttachments(messages.map((message) => message.id));
+  return messages.map((message) => ({
+    ...message,
+    attachments: (attachmentMap[message.id] || []).map((attachment) => ({
+      ...attachment,
+      url: buildStoredFileUrl(attachment.storage_provider, message.channel_id, attachment.storage_name, attachment.storage_key)
+    }))
+  }));
 };
 
 const resolveSafeStoredFilePath = (channelId: string, storageName: string) => {
@@ -1053,13 +1073,14 @@ const handleGetMessages = async (
 
   // Ideally verify user has access to this channel's server
   const page = await getChannelMessages(channel_id, MESSAGE_PAGE_SIZE, before);
+  const messagesWithAttachments = await enrichMessageAttachmentsForClient(page.messages);
   const oldestMessage = page.messages[0];
 
   client.ws.send(JSON.stringify({
     type: 'messages_list',
     payload: {
       channel_id,
-      messages: page.messages,
+      messages: messagesWithAttachments,
       has_more: page.hasMore,
       page_size: MESSAGE_PAGE_SIZE,
       is_older_page: isOlderPageRequest,
@@ -1071,10 +1092,11 @@ const handleGetMessages = async (
   }));
 };
 
-const handleSendMessage = async (client: ClientConnection, payload: { channel_id: string, content: string }) => {
+const handleSendMessage = async (client: ClientConnection, payload: { channel_id: string, content: string, attachments?: Array<{ file_name?: string; mime_type?: string; data_base64?: string }> }) => {
   if (!client.userId) return;
   const { channel_id, content } = payload;
-  if (!channel_id || !content) return;
+  const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+  if (!channel_id || (!content && attachments.length === 0)) return;
 
   const channel = await getChannelById(channel_id);
   if (!channel) {
@@ -1094,7 +1116,69 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     return;
   }
 
-  const message = await createMessage(channel_id, client.userId, content);
+  const message = await createMessage(channel_id, client.userId, content || '');
+
+  const createdAttachments: Array<Record<string, unknown>> = [];
+
+  for (const attachment of attachments) {
+    const originalName = sanitizeFileName(typeof attachment?.file_name === 'string' ? attachment.file_name : 'attachment');
+    const mimeType = typeof attachment?.mime_type === 'string' && attachment.mime_type.trim() ? attachment.mime_type.trim() : null;
+    const dataBase64 = typeof attachment?.data_base64 === 'string' ? attachment.data_base64 : '';
+    if (!dataBase64) {
+      continue;
+    }
+
+    let fileBuffer: Buffer;
+    try {
+      fileBuffer = Buffer.from(dataBase64, 'base64');
+    } catch {
+      continue;
+    }
+    if (!fileBuffer.length || fileBuffer.length > MAX_FOLDER_FILE_SIZE_BYTES) {
+      continue;
+    }
+
+    const extension = getNormalizedFileExtension(originalName);
+    if (extension && BLOCKED_FOLDER_UPLOAD_EXTENSIONS.has(extension)) {
+      continue;
+    }
+
+    const ext = path.extname(originalName).slice(0, 20);
+    const storageName = `${crypto.randomUUID()}${ext}`;
+    const storageRuntime = await getStorageRuntimeConfig();
+    let storageProvider: 'data_dir' | 's3' = 'data_dir';
+    let storageKey: string | null = null;
+
+    if (storageRuntime.storageType === 's3' && storageRuntime.s3Config) {
+      storageProvider = 's3';
+      storageKey = buildS3StorageKey(storageRuntime.s3Config.prefix, channel_id, storageName);
+      await uploadFileToS3({
+        config: storageRuntime.s3Config,
+        key: storageKey,
+        buffer: fileBuffer,
+        mimeType
+      });
+    } else {
+      const filePath = resolveSafeStoredFilePath(channel_id, storageName);
+      ensureChannelFilesDir(channel_id);
+      fs.writeFileSync(filePath, fileBuffer);
+    }
+
+    const createdAttachment = await createMessageAttachment({
+      messageId: message.id,
+      originalName,
+      storageName,
+      storageProvider,
+      storageKey,
+      mimeType,
+      sizeBytes: fileBuffer.length
+    });
+
+    createdAttachments.push({
+      ...createdAttachment,
+      url: buildStoredFileUrl(storageProvider, channel_id, storageName, storageKey)
+    });
+  }
 
   await markChannelReadUpToMessage({
     userId: client.userId,
@@ -1105,7 +1189,8 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
   
   const messageWithUser = withMessageEmbeds({
     ...message,
-    user
+    user,
+    attachments: createdAttachments
   });
 
   // Broadcast to all authenticated users (for simplicity, as requested)
