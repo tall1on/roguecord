@@ -74,7 +74,30 @@ const sendNotFound = (res: http.ServerResponse) => {
 
 const sendServerError = (res: http.ServerResponse) => {
     res.writeHead(500, {'Content-Type': 'text/plain'});
-    res.end('Failed to load server icon\n');
+    res.end('Failed to serve file\n');
+};
+
+const isAbortedStreamError = (error: unknown) => {
+    return error instanceof Error && (
+        error.name === 'AbortError'
+        || error.message === 'aborted'
+        || error.message === 'The operation was aborted'
+    );
+};
+
+const handleStreamingResponseError = (res: http.ServerResponse, error: unknown, contextMessage: string) => {
+    if (isAbortedStreamError(error) || res.destroyed || res.writableEnded) {
+        return;
+    }
+
+    console.error(contextMessage, error);
+
+    if (res.headersSent) {
+        res.destroy();
+        return;
+    }
+
+    sendServerError(res);
 };
 
 const MEDIA_RANGE_HEADER = 'bytes';
@@ -310,8 +333,7 @@ async function startServer() {
                 await streamLocalFile(req, res, iconFilePath, getIconContentType(iconFilePath));
                 return;
             } catch (error) {
-                console.error('Failed to serve server icon:', error);
-                sendServerError(res);
+                handleStreamingResponseError(res, error, 'Failed to serve server icon:');
                 return;
             }
         }
@@ -359,8 +381,7 @@ async function startServer() {
                 await streamLocalFile(req, res, filePath);
                 return;
             } catch (error) {
-                console.error('Failed to serve stored file:', error);
-                sendServerError(res);
+                handleStreamingResponseError(res, error, 'Failed to serve stored file:');
                 return;
             }
         }
