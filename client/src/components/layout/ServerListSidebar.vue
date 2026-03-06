@@ -30,7 +30,7 @@ const handleServerListOpened = () => {
     @focusin="handleServerListOpened"
   >
     <div
-      class="w-12 h-12 rounded-[24px] hover:rounded-[16px] flex items-center justify-center transition-all duration-300 cursor-pointer group bg-zinc-900 hover:bg-indigo-600/20 shadow-sm border border-white/5 hover:border-indigo-500/30"
+      class="w-12 h-12 rounded-full hover:rounded-2xl flex items-center justify-center transition-all duration-300 cursor-pointer group bg-zinc-900 hover:bg-indigo-600/20 shadow-sm border border-white/5 hover:border-indigo-500/30"
       title="RougeCord"
     >
       <RougeCordMark :size="48" class="text-white group-hover:text-indigo-400 transition-colors" />
@@ -51,7 +51,7 @@ const handleServerListOpened = () => {
 
       <div
         class="w-12 h-12 flex items-center justify-center transition-all duration-300 font-bold text-lg overflow-hidden border"
-        :class="chatStore.activeConnectionId === connection.id ? 'rounded-[16px] bg-indigo-600 text-white border-indigo-500/50 shadow-lg shadow-indigo-600/20' : 'rounded-[24px] hover:rounded-[16px] bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border-white/5 hover:border-white/10 shadow-sm'"
+        :class="chatStore.activeConnectionId === connection.id ? 'rounded-2xl bg-indigo-600 text-white border-indigo-500/50 shadow-lg shadow-indigo-600/20' : 'rounded-full hover:rounded-2xl bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border-white/5 hover:border-white/10 shadow-sm'"
       >
         <img v-if="connection.iconUrl" :src="connection.iconUrl" alt="Server Icon" class="w-full h-full object-cover" />
         <span v-else>{{ connection.name.charAt(0).toUpperCase() }}</span>
@@ -59,7 +59,7 @@ const handleServerListOpened = () => {
     </div>
 
     <div
-      class="w-12 h-12 rounded-[24px] hover:rounded-[16px] bg-zinc-900 hover:bg-green-500/20 text-green-500 hover:text-green-400 flex items-center justify-center transition-all duration-300 cursor-pointer mt-2 border border-white/5 hover:border-green-500/30 shadow-sm group"
+      class="w-12 h-12 rounded-full hover:rounded-2xl bg-zinc-900 hover:bg-green-500/20 text-green-500 hover:text-green-400 flex items-center justify-center transition-all duration-300 cursor-pointer mt-2 border border-white/5 hover:border-green-500/30 shadow-sm group"
       @click="emit('open-create-server')"
     >
       <Plus class="w-6 h-6 transform group-hover:rotate-90 transition-transform duration-300" />
