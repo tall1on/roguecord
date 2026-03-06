@@ -22,18 +22,20 @@ let serversSchemaMigrated = false;
 let channelsSchemaMigrated = false;
 let folderFilesSchemaMigrated = false;
 let messageAttachmentsSchemaMigrated = false;
+let messagesSchemaMigrated = false;
 
 function failSchemaInitialization(error: Error) {
   rejectChannelsSchemaReady?.(error);
 }
 
-function markSchemaStepDone(step: 'servers' | 'channels' | 'folder_files' | 'message_attachments') {
+function markSchemaStepDone(step: 'servers' | 'channels' | 'folder_files' | 'message_attachments' | 'messages') {
   if (step === 'servers') serversSchemaMigrated = true;
   if (step === 'channels') channelsSchemaMigrated = true;
   if (step === 'folder_files') folderFilesSchemaMigrated = true;
   if (step === 'message_attachments') messageAttachmentsSchemaMigrated = true;
+  if (step === 'messages') messagesSchemaMigrated = true;
 
-  if (serversSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated) {
+  if (serversSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated) {
     resolveChannelsSchemaReady?.();
   }
 }
@@ -218,11 +220,29 @@ function initializeDatabase() {
         channel_id TEXT NOT NULL,
         user_id TEXT NOT NULL,
         content TEXT NOT NULL,
+        reply_to_message_id TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (channel_id) REFERENCES channels(id),
-        FOREIGN KEY (user_id) REFERENCES users(id)
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (reply_to_message_id) REFERENCES messages(id)
       )
-    `);
+    `, (err) => {
+      if (err) {
+        console.error('Error creating messages table:', err.message);
+        failSchemaInitialization(err);
+        return;
+      }
+
+      migrateMessagesTableSchema((migrationErr) => {
+        if (migrationErr) {
+          console.error('Error migrating messages table:', migrationErr.message);
+          failSchemaInitialization(migrationErr);
+          return;
+        }
+
+        markSchemaStepDone('messages');
+      });
+    });
 
     // Message attachments table
     db.run(`
@@ -720,6 +740,25 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
 
     runNextAlter(0);
   });
+}
+
+function migrateMessagesTableSchema(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(messages)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr)
+      return
+    }
+
+    const hasReplyToMessageId = columns.some((column) => column.name === 'reply_to_message_id')
+    if (hasReplyToMessageId) {
+      done()
+      return
+    }
+
+    db.run('ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT', (alterErr) => {
+      done(alterErr || undefined)
+    })
+  })
 }
 
 function migrateRssChannelItemsForContentDedupe(done: (error?: Error) => void) {

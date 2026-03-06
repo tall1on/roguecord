@@ -361,7 +361,16 @@ const enrichMessageAttachmentsForClient = async <T extends { id: string; channel
     attachments: (attachmentMap[message.id] || []).map((attachment) => ({
       ...attachment,
       url: buildStoredFileUrl(attachment.storage_provider, message.channel_id, attachment.storage_name, attachment.storage_key)
-    }))
+    })),
+    reply_to_message: (message as T & { reply_to_message?: any }).reply_to_message
+      ? {
+          ...(message as T & { reply_to_message: any }).reply_to_message,
+          attachments: (((message as T & { reply_to_message: any }).reply_to_message.attachments) || []).map((attachment: any) => ({
+            ...attachment,
+            url: buildStoredFileUrl(attachment.storage_provider, (message as T & { reply_to_message: any }).reply_to_message.channel_id, attachment.storage_name, attachment.storage_key)
+          }))
+        }
+      : null
   }));
 };
 
@@ -1127,9 +1136,12 @@ const handleGetMessages = async (
   }));
 };
 
-const handleSendMessage = async (client: ClientConnection, payload: { channel_id: string, content: string, attachments?: Array<{ file_name?: string; mime_type?: string; data_base64?: string }> }) => {
+const handleSendMessage = async (client: ClientConnection, payload: { channel_id: string, content: string, reply_to_message_id?: string | null, attachments?: Array<{ file_name?: string; mime_type?: string; data_base64?: string }> }) => {
   if (!client.userId) return;
   const { channel_id, content } = payload;
+  const replyToMessageId = typeof payload.reply_to_message_id === 'string' && payload.reply_to_message_id.trim()
+    ? payload.reply_to_message_id.trim()
+    : null;
   const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
   if (!channel_id || (!content && attachments.length === 0)) return;
 
@@ -1151,7 +1163,16 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     return;
   }
 
-  const message = await createMessage(channel_id, client.userId, content || '');
+  let replyToMessage = null;
+  if (replyToMessageId) {
+    replyToMessage = await getMessageById(replyToMessageId);
+    if (!replyToMessage || replyToMessage.channel_id !== channel_id) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Reply target not found' } }));
+      return;
+    }
+  }
+
+  const message = await createMessage(channel_id, client.userId, content || '', replyToMessageId);
 
   const createdAttachments: Array<Record<string, unknown>> = [];
 
@@ -1226,10 +1247,20 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     messageCreatedAt: message.created_at
   });
   
+  const replyAttachmentMap = replyToMessage ? await getMessageAttachments([replyToMessage.id]) : {};
+  const replyUser = replyToMessage ? await getUserById(replyToMessage.user_id) : null;
+
   const messageWithUser = withMessageEmbeds({
     ...message,
     user,
-    attachments: createdAttachments
+    attachments: createdAttachments,
+    reply_to_message: replyToMessage && replyUser
+      ? {
+          ...replyToMessage,
+          user: replyUser,
+          attachments: replyAttachmentMap[replyToMessage.id] || []
+        }
+      : null
   });
 
   // Broadcast to all authenticated users (for simplicity, as requested)
