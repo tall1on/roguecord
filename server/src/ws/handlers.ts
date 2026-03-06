@@ -60,10 +60,20 @@ import {
   validateS3Configuration
 } from '../storage/s3Storage';
 import { withMessageEmbeds } from '../messages/embeds';
+import {
+  MAX_UPLOAD_CHUNK_SIZE_BYTES,
+  MAX_UPLOAD_FILE_SIZE_BYTES,
+  abortPendingUpload,
+  appendPendingUploadChunk,
+  createPendingUpload,
+  finalizePendingUpload,
+  getPendingUpload,
+  sanitizeUploadFileName
+} from '../uploads';
 
 const filesRootDir = path.join(dataDir, 'files');
 const serverIconsRootDir = path.join(dataDir, 'server-icons');
-const MAX_FOLDER_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+const MAX_FOLDER_FILE_SIZE_BYTES = MAX_UPLOAD_FILE_SIZE_BYTES;
 const MAX_SERVER_ICON_SIZE_BYTES = 2 * 1024 * 1024;
 const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
   'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx',
@@ -653,6 +663,18 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'send_message':
         await handleSendMessage(client, payload);
         break;
+      case 'begin_file_upload':
+        await handleBeginFileUpload(client, payload);
+        break;
+      case 'upload_file_chunk':
+        await handleUploadFileChunk(client, payload);
+        break;
+      case 'complete_file_upload':
+        await handleCompleteFileUpload(client, payload);
+        break;
+      case 'abort_file_upload':
+        await handleAbortFileUpload(client, payload);
+        break;
       case 'delete_message':
         await handleDeleteMessage(client, payload);
         break;
@@ -1139,6 +1161,292 @@ const handleGetMessages = async (
       before_id: oldestMessage?.id || null
     }
   }));
+};
+
+const handleBeginFileUpload = async (
+  client: ClientConnection,
+  payload: { kind?: 'message_attachment' | 'folder_file'; channel_id?: string; file_name?: string; mime_type?: string; size_bytes?: number }
+) => {
+  if (!client.userId) return;
+
+  const kind = payload?.kind === 'folder_file' ? 'folder_file' : 'message_attachment';
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id.trim() : '';
+  const originalName = sanitizeUploadFileName(typeof payload?.file_name === 'string' ? payload.file_name : 'attachment');
+  const mimeType = typeof payload?.mime_type === 'string' && payload.mime_type.trim() ? payload.mime_type.trim() : null;
+  const expectedSize = typeof payload?.size_bytes === 'number' ? payload.size_bytes : Number(payload?.size_bytes);
+
+  if (!channelId || !Number.isFinite(expectedSize) || expectedSize <= 0 || expectedSize > MAX_UPLOAD_FILE_SIZE_BYTES) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid upload metadata' } }));
+    return;
+  }
+
+  const channel = await getChannelById(channelId);
+  if (!channel) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Channel not found' } }));
+    return;
+  }
+
+  if (kind === 'folder_file') {
+    if (channel.type !== 'folder') {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Folder channel not found' } }));
+      return;
+    }
+
+    const user = await getUserById(client.userId);
+    if (!user || user.role !== 'admin') {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can upload files' } }));
+      return;
+    }
+  } else if (channel.type !== 'text' && channel.type !== 'rss') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Message channel not found' } }));
+    return;
+  }
+
+  const extension = getNormalizedFileExtension(originalName);
+  if (extension && BLOCKED_FOLDER_UPLOAD_EXTENSIONS.has(extension)) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message: `Upload blocked: .${extension} files are not allowed.` }
+    }));
+    return;
+  }
+
+  const upload = createPendingUpload({
+    kind,
+    channelId,
+    userId: client.userId,
+    originalName,
+    mimeType,
+    expectedSize
+  });
+
+  client.ws.send(JSON.stringify({
+    type: 'file_upload_ready',
+    payload: {
+      upload_id: upload.uploadId,
+      channel_id: channelId,
+      kind,
+      chunk_size_bytes: MAX_UPLOAD_CHUNK_SIZE_BYTES,
+      max_file_size_bytes: MAX_UPLOAD_FILE_SIZE_BYTES
+    }
+  }));
+};
+
+const handleUploadFileChunk = async (
+  client: ClientConnection,
+  payload: { upload_id?: string; offset?: number; data_base64?: string }
+) => {
+  if (!client.userId) return;
+
+  const uploadId = typeof payload?.upload_id === 'string' ? payload.upload_id.trim() : '';
+  const offset = typeof payload?.offset === 'number' ? payload.offset : Number(payload?.offset);
+  const dataBase64 = typeof payload?.data_base64 === 'string' ? payload.data_base64 : '';
+
+  if (!uploadId || !Number.isFinite(offset) || offset < 0 || !dataBase64) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid upload chunk payload' } }));
+    return;
+  }
+
+  try {
+    const buffer = Buffer.from(dataBase64, 'base64');
+    const upload = appendPendingUploadChunk(uploadId, buffer, offset);
+    client.ws.send(JSON.stringify({
+      type: 'file_upload_chunk_ack',
+      payload: {
+        upload_id: uploadId,
+        received_bytes: upload.receivedBytes,
+        total_bytes: upload.expectedSize,
+        done: upload.receivedBytes === upload.expectedSize
+      }
+    }));
+  } catch (error) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message: error instanceof Error ? error.message : 'Failed to append upload chunk' }
+    }));
+  }
+};
+
+const createMessageAttachmentRecord = async (input: {
+  channelId: string;
+  messageId: string;
+  originalName: string;
+  storageName: string;
+  storageProvider: 'data_dir' | 's3';
+  storageKey: string | null;
+  mimeType: string | null;
+  sizeBytes: number;
+}) => {
+  const createdAttachment = await createMessageAttachment({
+    messageId: input.messageId,
+    originalName: input.originalName,
+    storageName: input.storageName,
+    storageProvider: input.storageProvider,
+    storageKey: input.storageKey,
+    mimeType: input.mimeType,
+    sizeBytes: input.sizeBytes
+  });
+
+  return {
+    ...createdAttachment,
+    url: buildStoredFileUrl(input.storageProvider, input.channelId, input.storageName, input.storageKey)
+  };
+};
+
+const handleCompleteFileUpload = async (
+  client: ClientConnection,
+  payload: { upload_id?: string; content?: string; reply_to_message_id?: string | null }
+) => {
+  if (!client.userId) return;
+
+  const uploadId = typeof payload?.upload_id === 'string' ? payload.upload_id.trim() : '';
+  if (!uploadId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Upload ID is required' } }));
+    return;
+  }
+
+  const pendingUpload = getPendingUpload(uploadId);
+  if (!pendingUpload || pendingUpload.userId !== client.userId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Upload session not found' } }));
+    return;
+  }
+
+  try {
+    const storageRuntime = await getStorageRuntimeConfig();
+    const finalized = storageRuntime.storageType === 's3' && storageRuntime.s3Config
+      ? await finalizePendingUpload(uploadId, {
+          storageType: 's3',
+          s3Config: storageRuntime.s3Config,
+          s3Prefix: storageRuntime.s3Config.prefix
+        })
+      : await finalizePendingUpload(uploadId, {
+          storageType: 'data_dir',
+          localTargetPath: (() => {
+            ensureChannelFilesDir(pendingUpload.channelId);
+            return resolveSafeStoredFilePath(pendingUpload.channelId, pendingUpload.storageName);
+          })()
+        });
+
+    if (pendingUpload.kind === 'folder_file') {
+      const user = await getUserById(client.userId);
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      const created = await createFolderChannelFile({
+        channelId: pendingUpload.channelId,
+        originalName: pendingUpload.originalName,
+        storageName: pendingUpload.storageName,
+        storageProvider: finalized.storageProvider,
+        storageKey: finalized.storageKey,
+        mimeType: pendingUpload.mimeType,
+        sizeBytes: pendingUpload.expectedSize,
+        uploaderUserId: client.userId
+      });
+
+      connectionManager.broadcastToAuthenticated({
+        type: 'folder_file_uploaded',
+        payload: {
+          channel_id: pendingUpload.channelId,
+          file: {
+            ...created,
+            uploader_username: user.username
+          }
+        }
+      });
+
+      client.ws.send(JSON.stringify({
+        type: 'folder_upload_success',
+        payload: { channel_id: pendingUpload.channelId, file_id: created.id }
+      }));
+      return;
+    }
+
+    const channelId = pendingUpload.channelId;
+    const content = typeof payload?.content === 'string' ? payload.content : '';
+    const replyToMessageId = typeof payload?.reply_to_message_id === 'string' && payload.reply_to_message_id.trim()
+      ? payload.reply_to_message_id.trim()
+      : null;
+
+    const channel = await getChannelById(channelId);
+    if (!channel) {
+      throw new Error('Channel not found');
+    }
+
+    const user = await getUserById(client.userId);
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    const privilegedRoles = new Set(['admin', 'owner', 'mod', 'moderator', 'bot', 'system']);
+    if (channel.type === 'rss' && !privilegedRoles.has(user.role)) {
+      throw new Error('RSS channels are read-only for your role');
+    }
+
+    let replyToMessage = null;
+    if (replyToMessageId) {
+      replyToMessage = await getMessageById(replyToMessageId);
+      if (!replyToMessage || replyToMessage.channel_id !== channelId) {
+        throw new Error('Reply target not found');
+      }
+    }
+
+    const message = await createMessage(channelId, client.userId, content || '', replyToMessageId);
+    const createdAttachment = await createMessageAttachmentRecord({
+      channelId,
+      messageId: message.id,
+      originalName: pendingUpload.originalName,
+      storageName: pendingUpload.storageName,
+      storageProvider: finalized.storageProvider,
+      storageKey: finalized.storageKey,
+      mimeType: pendingUpload.mimeType,
+      sizeBytes: pendingUpload.expectedSize
+    });
+
+    await markChannelReadUpToMessage({
+      userId: client.userId,
+      channelId,
+      messageId: message.id,
+      messageCreatedAt: message.created_at
+    });
+
+    const replyAttachmentMap = replyToMessage ? await getMessageAttachments([replyToMessage.id]) : {};
+    const replyUser = replyToMessage ? await getUserById(replyToMessage.user_id) : null;
+
+    const messageWithUser = withMessageEmbeds({
+      ...message,
+      user,
+      attachments: [createdAttachment],
+      reactions: message.reactions || [],
+      reply_to_message: replyToMessage && replyUser
+        ? {
+            ...replyToMessage,
+            user: replyUser,
+            attachments: replyAttachmentMap[replyToMessage.id] || []
+          }
+        : null
+    });
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'new_message',
+      payload: { message: messageWithUser }
+    });
+  } catch (error) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message: error instanceof Error ? error.message : 'Failed to finalize upload' }
+    }));
+  }
+};
+
+const handleAbortFileUpload = async (client: ClientConnection, payload: { upload_id?: string }) => {
+  if (!client.userId) return;
+  const uploadId = typeof payload?.upload_id === 'string' ? payload.upload_id.trim() : '';
+  if (!uploadId) {
+    return;
+  }
+  abortPendingUpload(uploadId);
+  client.ws.send(JSON.stringify({ type: 'file_upload_aborted', payload: { upload_id: uploadId } }));
 };
 
 const handleSendMessage = async (client: ClientConnection, payload: { channel_id: string, content: string, reply_to_message_id?: string | null, attachments?: Array<{ file_name?: string; mime_type?: string; data_base64?: string }> }) => {

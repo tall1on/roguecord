@@ -1,11 +1,16 @@
 import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadBucketCommand,
   ListObjectsV2Command,
   PutObjectCommand,
-  S3Client
+  S3Client,
+  UploadPartCommand
 } from '@aws-sdk/client-s3';
+import fs from 'node:fs';
 
 export type S3StorageConfig = {
   endpoint: string;
@@ -482,6 +487,80 @@ export const uploadFileToS3 = async (input: {
     Body: input.buffer,
     ContentType: input.mimeType || 'application/octet-stream'
   }));
+};
+
+export const uploadFilePathToS3Multipart = async (input: {
+  config: S3StorageConfig;
+  key: string;
+  filePath: string;
+  mimeType?: string | null;
+}) => {
+  const normalized = sanitizeConfig(input.config);
+  const resolved = resolveS3ClientConfig(normalized);
+  const client = createS3Client(resolved);
+  const stat = await fs.promises.stat(input.filePath);
+  const partSize = 8 * 1024 * 1024;
+
+  if (stat.size <= partSize) {
+    const buffer = await fs.promises.readFile(input.filePath);
+    await client.send(new PutObjectCommand({
+      Bucket: resolved.bucket,
+      Key: input.key,
+      Body: buffer,
+      ContentType: input.mimeType || 'application/octet-stream'
+    }));
+    return;
+  }
+
+  const createResponse = await client.send(new CreateMultipartUploadCommand({
+    Bucket: resolved.bucket,
+    Key: input.key,
+    ContentType: input.mimeType || 'application/octet-stream'
+  }));
+
+  const uploadId = createResponse.UploadId;
+  if (!uploadId) {
+    throw new Error('S3 multipart upload did not return an upload id');
+  }
+
+  const completedParts: Array<{ ETag?: string; PartNumber: number }> = [];
+
+  try {
+    let partNumber = 1;
+    let offset = 0;
+    while (offset < stat.size) {
+      const end = Math.min(offset + partSize, stat.size);
+      const chunkLength = end - offset;
+      const stream = fs.createReadStream(input.filePath, { start: offset, end: end - 1 });
+      const uploadPartResponse = await client.send(new UploadPartCommand({
+        Bucket: resolved.bucket,
+        Key: input.key,
+        UploadId: uploadId,
+        PartNumber: partNumber,
+        Body: stream,
+        ContentLength: chunkLength
+      }));
+      completedParts.push({ ETag: uploadPartResponse.ETag, PartNumber: partNumber });
+      offset = end;
+      partNumber += 1;
+    }
+
+    await client.send(new CompleteMultipartUploadCommand({
+      Bucket: resolved.bucket,
+      Key: input.key,
+      UploadId: uploadId,
+      MultipartUpload: {
+        Parts: completedParts
+      }
+    }));
+  } catch (error) {
+    await client.send(new AbortMultipartUploadCommand({
+      Bucket: resolved.bucket,
+      Key: input.key,
+      UploadId: uploadId
+    })).catch(() => undefined);
+    throw error;
+  }
 };
 
 export const downloadFileFromS3 = async (input: {

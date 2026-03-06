@@ -317,37 +317,130 @@ export const useChatStore = defineStore('chat', () => {
     pendingMessageUploadProgress.value = null;
   };
 
-  const readFileAsDataBase64WithProgress = (file: File, onProgress?: (loadedBytes: number, totalBytes: number) => void) => {
-    return new Promise<string>((resolve, reject) => {
+  const uploadChunkSizeBytes = 8 * 1024 * 1024;
+
+  const readBlobAsArrayBuffer = (blob: Blob) => {
+    return new Promise<ArrayBuffer>((resolve, reject) => {
       const reader = new FileReader();
-      const totalBytes = file.size;
-
-      reader.onprogress = (event) => {
-        if (!event.lengthComputable) {
-          return;
-        }
-        onProgress?.(event.loaded, event.total);
-      };
-
       reader.onload = () => {
-        const result = reader.result;
-        if (typeof result !== 'string') {
-          reject(new Error('Failed to read file'));
+        if (!(reader.result instanceof ArrayBuffer)) {
+          reject(new Error('Failed to read file chunk'));
           return;
         }
+        resolve(reader.result);
+      };
+      reader.onerror = () => reject(new Error('Failed to read file chunk'));
+      reader.readAsArrayBuffer(blob);
+    });
+  };
 
-        const commaIndex = result.indexOf(',');
-        if (commaIndex === -1) {
-          reject(new Error('Failed to read file'));
+  const readFileAsDataBase64WithProgress = async (file: File, onProgress?: (loadedBytes: number, totalBytes: number) => void) => {
+    const parts: string[] = [];
+    let offset = 0;
+
+    while (offset < file.size) {
+      const end = Math.min(offset + uploadChunkSizeBytes, file.size);
+      const chunk = file.slice(offset, end);
+      const arrayBuffer = await readBlobAsArrayBuffer(chunk);
+      parts.push(arrayBufferToBase64(arrayBuffer));
+      offset = end;
+      onProgress?.(offset, file.size);
+    }
+
+    return parts.join('');
+  };
+
+  const waitForSocketMessage = <T>(matcher: (message: any) => T | null, timeoutMs = 30000): Promise<T> => {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const timeout = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        removeMessageListener(listener);
+        reject(new Error('Upload request timed out'));
+      }, timeoutMs);
+
+      const listener = (message: any) => {
+        const matched = matcher(message);
+        if (matched === null) {
           return;
         }
-
-        onProgress?.(totalBytes, totalBytes);
-        resolve(result.slice(commaIndex + 1));
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.clearTimeout(timeout);
+        removeMessageListener(listener);
+        resolve(matched);
       };
 
-      reader.onerror = () => reject(new Error('Failed to read file'));
-      reader.readAsDataURL(file);
+      addMessageListener(listener);
+    });
+  };
+
+  const uploadFileOverWebSocket = async (input: {
+    kind: 'message_attachment' | 'folder_file';
+    channelId: string;
+    file: File;
+    onProgress?: (loadedBytes: number, totalBytes: number) => void;
+    content?: string;
+    replyToMessageId?: string | null;
+  }) => {
+    const readyPromise = waitForSocketMessage((message) => {
+      if (message?.type === 'file_upload_ready' && message?.payload?.channel_id === input.channelId) {
+        return message.payload as { upload_id: string; chunk_size_bytes?: number };
+      }
+      if (message?.type === 'error') {
+        throw new Error(message?.payload?.message || 'Upload initialization failed');
+      }
+      return null;
+    });
+
+    send('begin_file_upload', {
+      kind: input.kind,
+      channel_id: input.channelId,
+      file_name: input.file.name,
+      mime_type: input.file.type || 'application/octet-stream',
+      size_bytes: input.file.size
+    });
+
+    const ready = await readyPromise;
+    const uploadId = ready.upload_id;
+    const chunkSize = typeof ready.chunk_size_bytes === 'number' && ready.chunk_size_bytes > 0
+      ? ready.chunk_size_bytes
+      : uploadChunkSizeBytes;
+
+    let offset = 0;
+    while (offset < input.file.size) {
+      const end = Math.min(offset + chunkSize, input.file.size);
+      const arrayBuffer = await readBlobAsArrayBuffer(input.file.slice(offset, end));
+      const dataBase64 = arrayBufferToBase64(arrayBuffer);
+
+      const ackPromise = waitForSocketMessage((message) => {
+        if (message?.type === 'file_upload_chunk_ack' && message?.payload?.upload_id === uploadId) {
+          return message.payload as { received_bytes: number };
+        }
+        if (message?.type === 'error') {
+          throw new Error(message?.payload?.message || 'Upload chunk failed');
+        }
+        return null;
+      });
+
+      send('upload_file_chunk', {
+        upload_id: uploadId,
+        offset,
+        data_base64: dataBase64
+      });
+
+      const ack = await ackPromise;
+      offset = ack.received_bytes;
+      input.onProgress?.(offset, input.file.size);
+    }
+
+    send('complete_file_upload', {
+      upload_id: uploadId,
+      content: input.content,
+      reply_to_message_id: input.replyToMessageId || null
     });
   };
 
@@ -1634,27 +1727,48 @@ export const useChatStore = defineStore('chat', () => {
     setPendingMessageUploadProgress(initialProgress);
 
     try {
-      const attachments = await Promise.all(files.map(async (file, index) => {
-        const dataBase64 = await readFileAsDataBase64WithProgress(file, (loadedBytes, totalBytes) => {
-          const currentProgress = pendingMessageUploadProgress.value || initialProgress;
-          const nextProgress = currentProgress.map((entry, entryIndex) => entryIndex === index
-            ? {
-                fileName: file.name,
-                loadedBytes,
-                totalBytes
-              }
-            : entry);
-          setPendingMessageUploadProgress(nextProgress);
+      if (files.length === 1) {
+        const [file] = files;
+        if (!file) {
+          return;
+        }
+        await uploadFileOverWebSocket({
+          kind: 'message_attachment',
+          channelId: channel_id,
+          file,
+          content,
+          replyToMessageId: reply_to_message_id || null,
+          onProgress: (loadedBytes, totalBytes) => {
+            const currentProgress = pendingMessageUploadProgress.value || initialProgress;
+            const nextProgress = currentProgress.map((entry, entryIndex) => entryIndex === 0
+              ? { fileName: file.name, loadedBytes, totalBytes }
+              : entry);
+            setPendingMessageUploadProgress(nextProgress);
+          }
         });
+      } else {
+        const attachments = await Promise.all(files.map(async (file, index) => {
+          const dataBase64 = await readFileAsDataBase64WithProgress(file, (loadedBytes, totalBytes) => {
+            const currentProgress = pendingMessageUploadProgress.value || initialProgress;
+            const nextProgress = currentProgress.map((entry, entryIndex) => entryIndex === index
+              ? {
+                  fileName: file.name,
+                  loadedBytes,
+                  totalBytes
+                }
+              : entry);
+            setPendingMessageUploadProgress(nextProgress);
+          });
 
-        return {
-          file_name: file.name,
-          mime_type: file.type || 'application/octet-stream',
-          data_base64: dataBase64
-        };
-      }));
+          return {
+            file_name: file.name,
+            mime_type: file.type || 'application/octet-stream',
+            data_base64: dataBase64
+          };
+        }));
 
-      send('send_message', { channel_id, content, attachments, reply_to_message_id: reply_to_message_id || null });
+        send('send_message', { channel_id, content, attachments, reply_to_message_id: reply_to_message_id || null });
+      }
     } catch (error) {
       clearPendingMessageUploadProgress();
       throw error;
@@ -1769,36 +1883,10 @@ export const useChatStore = defineStore('chat', () => {
     if (blockedExtension) {
       throw new Error(`Upload blocked: .${blockedExtension} files are not allowed in folder channels.`);
     }
-
-    const dataBase64 = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = reader.result;
-        if (typeof result !== 'string') {
-          console.error('[FOLDER_UPLOAD] FileReader result was not a string', { channel_id, fileName: file.name });
-          reject(new Error('Failed to read file'));
-          return;
-        }
-
-        const commaIndex = result.indexOf(',');
-        if (commaIndex === -1) {
-          console.error('[FOLDER_UPLOAD] Unexpected FileReader result format', { channel_id, fileName: file.name });
-          reject(new Error('Failed to read file'));
-          return;
-        }
-
-        const base64 = result.slice(commaIndex + 1);
-        resolve(base64);
-      };
-      reader.onerror = () => reject(new Error('Failed to read file'));
-      reader.readAsDataURL(file);
-    });
-
-    send('folder_upload_file', {
-      channel_id,
-      file_name: file.name,
-      mime_type: file.type || 'application/octet-stream',
-      data_base64: dataBase64
+    await uploadFileOverWebSocket({
+      kind: 'folder_file',
+      channelId: channel_id,
+      file
     });
   };
 
