@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
-import { Archive, Code2, File, FileText, Film, Image, Music2 } from 'lucide-vue-next'
-import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile } from '../stores/chat'
+import { Archive, Code2, File, FileText, Film, Image, Music2, Reply, Trash2, X } from 'lucide-vue-next'
+import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, type MessageAttachment, type MessageReaction, type MessageReplyReference } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
+import { openExternalUrl } from '../utils/openExternalUrl'
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
@@ -13,9 +14,14 @@ const preserveScrollOnNextRender = ref(false)
 const previousScrollHeight = ref(0)
 const isFetchingOlderMessages = ref(false)
 const folderFileInput = ref<HTMLInputElement | null>(null)
+const messageAttachmentInput = ref<HTMLInputElement | null>(null)
 const isUploadingFolderFile = ref(false)
 const folderUploadError = ref<string | null>(null)
 const folderViewMode = ref<'list' | 'tiles'>('list')
+const pendingMessageAttachments = ref<File[]>([])
+const isSendingMessage = ref(false)
+const replyDraftMessage = ref<Message | null>(null)
+const MESSAGE_REACTION_OPTIONS = ['👍', '❤️', '😂', '😮', '🎉'] as const
 
 const TOP_SCROLL_THRESHOLD_PX = 120
 const BOTTOM_SCROLL_THRESHOLD_PX = 120
@@ -88,6 +94,13 @@ type ScreenContextMenuState = {
   isOwner: boolean
 }
 
+type MessageContextMenuState = {
+  visible: boolean
+  x: number
+  y: number
+  message: Message | null
+}
+
 type ScreenStreamFps = 30 | 60
 type ScreenStreamResolution = 'source' | '1080p' | '720p' | '480p' | '4k' | '8k'
 
@@ -99,6 +112,13 @@ const screenContextMenu = ref<ScreenContextMenuState>({
   isOwner: false
 })
 const screenContextMenuRef = ref<HTMLElement | null>(null)
+const messageContextMenu = ref<MessageContextMenuState>({
+  visible: false,
+  x: 0,
+  y: 0,
+  message: null
+})
+const messageContextMenuRef = ref<HTMLElement | null>(null)
 
 const screenFpsOptions: Array<{ value: ScreenStreamFps; label: string }> = [
   { value: 30, label: '30 FPS' },
@@ -155,6 +175,15 @@ const closeScreenContextMenu = () => {
   screenContextMenu.value.visible = false
 }
 
+const closeMessageContextMenu = () => {
+  messageContextMenu.value = {
+    visible: false,
+    x: 0,
+    y: 0,
+    message: null
+  }
+}
+
 const syncScreenVideoAudioState = (userId: string) => {
   const video = screenVideoElements.get(userId)
   if (!video) return
@@ -178,6 +207,78 @@ const openScreenContextMenu = (event: MouseEvent, userId: string) => {
     userId,
     isOwner
   }
+}
+
+const canDeleteMessage = (message: Message) => {
+  const currentUserId = chatStore.currentUser?.id
+  const currentRole = chatStore.currentUserRole || 'user'
+  return message.user_id === currentUserId || currentRole === 'admin' || currentRole === 'owner'
+}
+
+const canReplyToMessage = (message: Message) => {
+  return Boolean(activeTextChannel.value) && !isReadOnlyRssChannel.value && message.channel_id === activeTextChannel.value?.id
+}
+
+const openMessageContextMenu = (event: MouseEvent, message: Message) => {
+  if (!canDeleteMessage(message) && !canReplyToMessage(message) && !canReactToMessage(message)) {
+    closeMessageContextMenu()
+    return
+  }
+
+  event.preventDefault()
+  event.stopPropagation()
+
+  const estimatedWidth = 224
+  const estimatedHeight = (canReplyToMessage(message) ? 52 : 0) + (canDeleteMessage(message) ? 52 : 0) + (canReactToMessage(message) ? 72 : 0)
+  const maxX = Math.max(8, window.innerWidth - estimatedWidth - 8)
+  const maxY = Math.max(8, window.innerHeight - estimatedHeight - 8)
+
+  messageContextMenu.value = {
+    visible: true,
+    x: Math.min(event.clientX, maxX),
+    y: Math.min(event.clientY, maxY),
+    message
+  }
+}
+
+const canReactToMessage = (message: Message) => {
+  return Boolean(activeTextChannel.value) && !isReadOnlyRssChannel.value && message.channel_id === activeTextChannel.value?.id
+}
+
+const toggleMessageReaction = (message: Message, emoji: string) => {
+  if (!canReactToMessage(message)) return
+  chatStore.toggleMessageReaction(message.channel_id, message.id, emoji)
+}
+
+const toggleReactionFromContextMenu = (emoji: string) => {
+  const message = messageContextMenu.value.message
+  if (!message) return
+  toggleMessageReaction(message, emoji)
+  closeMessageContextMenu()
+}
+
+const getMessageReactions = (message: Message): MessageReaction[] => {
+  return Array.isArray(message.reactions) ? message.reactions : []
+}
+
+const startReplyFromContextMenu = () => {
+  const message = messageContextMenu.value.message
+  if (!message || !canReplyToMessage(message)) return
+  replyDraftMessage.value = message
+  closeMessageContextMenu()
+}
+
+const clearReplyDraft = () => {
+  replyDraftMessage.value = null
+}
+
+const deleteMessageFromContextMenu = () => {
+  const message = messageContextMenu.value.message
+  const channelId = activeTextChannel.value?.id
+  if (!message || !channelId || !canDeleteMessage(message)) return
+
+  closeMessageContextMenu()
+  chatStore.deleteMessage(channelId, message.id)
 }
 
 const onSelectScreenFps = (fps: ScreenStreamFps) => {
@@ -231,22 +332,29 @@ const getScreenVolumeIcon = (userId: string) => {
 }
 
 const onGlobalPointerDown = (event: MouseEvent) => {
-  if (!screenContextMenu.value.visible) return
   const target = event.target as Node | null
-  if (screenContextMenuRef.value?.contains(target || null)) return
-  closeScreenContextMenu()
+  if (screenContextMenu.value.visible && !screenContextMenuRef.value?.contains(target || null)) {
+    closeScreenContextMenu()
+  }
+  if (messageContextMenu.value.visible && !messageContextMenuRef.value?.contains(target || null)) {
+    closeMessageContextMenu()
+  }
 }
 
 const onGlobalContextMenu = (event: MouseEvent) => {
-  if (!screenContextMenu.value.visible) return
   const target = event.target as Node | null
-  if (screenContextMenuRef.value?.contains(target || null)) return
-  closeScreenContextMenu()
+  if (screenContextMenu.value.visible && !screenContextMenuRef.value?.contains(target || null)) {
+    closeScreenContextMenu()
+  }
+  if (messageContextMenu.value.visible && !messageContextMenuRef.value?.contains(target || null)) {
+    closeMessageContextMenu()
+  }
 }
 
 const onGlobalKeyDown = (event: KeyboardEvent) => {
   if (event.key === 'Escape') {
     closeScreenContextMenu()
+    closeMessageContextMenu()
   }
 }
 
@@ -531,9 +639,159 @@ const sendMessage = () => {
     return
   }
 
-  if (messageInput.value.trim() && activeTextChannel.value) {
-    chatStore.sendMessage(activeTextChannel.value.id, messageInput.value.trim())
+  void submitMessage()
+}
+
+const pendingAttachmentUploadSummary = computed(() => {
+  const progressEntries = chatStore.pendingMessageUploadProgress
+  if (!isSendingMessage.value || !progressEntries?.length) {
+    return null
+  }
+
+  const totalBytes = progressEntries.reduce((sum, entry) => sum + Math.max(entry.totalBytes, 0), 0)
+  const loadedBytes = progressEntries.reduce((sum, entry) => sum + Math.min(Math.max(entry.loadedBytes, 0), Math.max(entry.totalBytes, 0)), 0)
+  const percent = totalBytes > 0 ? Math.min(100, Math.round((loadedBytes / totalBytes) * 100)) : 0
+
+  return {
+    fileCount: progressEntries.length,
+    loadedBytes,
+    totalBytes,
+    percent
+  }
+})
+
+const onOpenMessageAttachmentPicker = () => {
+  if (isReadOnlyRssChannel.value || isSendingMessage.value) return
+  messageAttachmentInput.value?.click()
+}
+
+const appendPendingMessageAttachments = (files: FileList | File[]) => {
+  const nextFiles = Array.from(files)
+  if (nextFiles.length === 0) return
+  pendingMessageAttachments.value = [...pendingMessageAttachments.value, ...nextFiles]
+}
+
+const onMessageAttachmentPicked = (event: Event) => {
+  const target = event.target as HTMLInputElement | null
+  if (target?.files?.length) {
+    appendPendingMessageAttachments(target.files)
+  }
+  if (target) {
+    target.value = ''
+  }
+}
+
+const removePendingMessageAttachment = (index: number) => {
+  pendingMessageAttachments.value = pendingMessageAttachments.value.filter((_, currentIndex) => currentIndex !== index)
+}
+
+const onMessageInputPaste = (event: ClipboardEvent) => {
+  const files = Array.from(event.clipboardData?.files || [])
+  if (files.length === 0 || isReadOnlyRssChannel.value) return
+  event.preventDefault()
+  appendPendingMessageAttachments(files)
+}
+
+const submitMessage = async () => {
+  if (isReadOnlyRssChannel.value || !activeTextChannel.value || isSendingMessage.value) {
+    return
+  }
+
+  const trimmedMessage = messageInput.value.trim()
+  if (!trimmedMessage && pendingMessageAttachments.value.length === 0) {
+    return
+  }
+
+  isSendingMessage.value = true
+  try {
+    if (pendingMessageAttachments.value.length > 0) {
+      await chatStore.sendMessageWithAttachments(activeTextChannel.value.id, trimmedMessage, pendingMessageAttachments.value, replyDraftMessage.value?.id || null)
+    } else {
+      chatStore.sendMessage(activeTextChannel.value.id, trimmedMessage, replyDraftMessage.value?.id || null)
+    }
     messageInput.value = ''
+    pendingMessageAttachments.value = []
+    clearReplyDraft()
+  } finally {
+    isSendingMessage.value = false
+    chatStore.clearPendingMessageUploadProgress()
+  }
+}
+
+const getReplyAuthorName = (message: Message | MessageReplyReference | null | undefined) => message?.user?.username || 'Unknown User'
+
+const getReplyPreviewText = (message: Message | MessageReplyReference | null | undefined) => {
+  if (!message) return ''
+  const content = message.content.trim()
+  if (content) return content
+  if (message.attachments?.length) {
+    return message.attachments.length === 1 ? '1 attachment' : `${message.attachments.length} attachments`
+  }
+  return 'Message'
+}
+
+const getAttachmentDisplayLabel = (attachment: MessageAttachment) => attachment.original_name
+
+const getAttachmentMimeType = (attachment: MessageAttachment) => attachment.mime_type?.split(';', 1)[0]?.trim().toLowerCase() || ''
+
+const getAttachmentExtension = (attachment: MessageAttachment) => {
+  const rawFileName = attachment.original_name || attachment.url || ''
+  const normalizedFileName = rawFileName.split(/[?#]/, 1)[0]?.trim() || ''
+  const dotIndex = normalizedFileName.lastIndexOf('.')
+
+  if (dotIndex <= 0 || dotIndex === normalizedFileName.length - 1) {
+    return ''
+  }
+
+  return normalizedFileName.slice(dotIndex + 1).trim().toLowerCase()
+}
+
+const isInlineImageAttachment = (attachment: MessageAttachment) => {
+  const mimeType = getAttachmentMimeType(attachment)
+  if (mimeType.startsWith('image/')) {
+    return mimeType !== 'image/svg+xml'
+  }
+  return ['apng', 'avif', 'bmp', 'gif', 'ico', 'cur', 'jpg', 'jpeg', 'jfif', 'pjpeg', 'pjp', 'png', 'webp'].includes(getAttachmentExtension(attachment))
+}
+
+const isInlineVideoAttachment = (attachment: MessageAttachment) => {
+  const mimeType = getAttachmentMimeType(attachment)
+  if (mimeType.startsWith('video/')) {
+    return ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'].includes(mimeType)
+  }
+  return ['mp4', 'webm', 'ogv', 'mov'].includes(getAttachmentExtension(attachment))
+}
+
+const isInlineAudioAttachment = (attachment: MessageAttachment) => {
+  const mimeType = getAttachmentMimeType(attachment)
+  if (mimeType.startsWith('audio/')) {
+    return ['audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/ogg', 'audio/wav', 'audio/webm', 'audio/flac', 'audio/aac'].includes(mimeType)
+  }
+  return ['mp3', 'm4a', 'ogg', 'oga', 'wav', 'weba', 'flac', 'aac'].includes(getAttachmentExtension(attachment))
+}
+
+const getAttachmentInlineKind = (attachment: MessageAttachment): 'image' | 'video' | 'audio' | null => {
+  const attachmentUrl = attachment.url?.trim()
+  if (!attachmentUrl) return null
+  if (isInlineImageAttachment(attachment)) return 'image'
+  if (isInlineVideoAttachment(attachment)) return 'video'
+  if (isInlineAudioAttachment(attachment)) return 'audio'
+  return null
+}
+
+const isInlineAttachment = (attachment: MessageAttachment) => getAttachmentInlineKind(attachment) !== null
+
+const openMessageAttachment = async (attachment: MessageAttachment, event: MouseEvent) => {
+  const attachmentUrl = attachment.url?.trim()
+  if (!attachmentUrl) {
+    event.preventDefault()
+    return
+  }
+
+  event.preventDefault()
+  const opened = await openExternalUrl(attachmentUrl)
+  if (!opened && !window.open(attachmentUrl, '_blank', 'noopener,noreferrer')) {
+    window.location.href = attachmentUrl
   }
 }
 
@@ -760,10 +1018,23 @@ const onMessagesScroll = async () => {
 watch(
   () => activeTextChannel.value?.id,
   async () => {
+    closeMessageContextMenu()
     preserveScrollOnNextRender.value = false
     isFetchingOlderMessages.value = false
+    messageInput.value = ''
+    pendingMessageAttachments.value = []
+    clearReplyDraft()
     await nextTick()
     scrollToBottom()
+  }
+)
+
+watch(
+  () => chatStore.activeChannelMessages.some((message) => message.id === messageContextMenu.value.message?.id),
+  (isMessageStillVisible) => {
+    if (!isMessageStillVisible) {
+      closeMessageContextMenu()
+    }
   }
 )
 
@@ -847,6 +1118,7 @@ watch(
           <div
             v-else
             class="flex items-start gap-3 hover:bg-zinc-900/40 py-1 px-2 -mx-2 rounded-lg transition-colors duration-100 group"
+            @contextmenu.stop.prevent="openMessageContextMenu($event, entry.message)"
           >
             <div class="w-10 h-10 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mt-0.5 overflow-hidden">
               <img v-if="resolveMessageAvatarUrl(entry.message)" :src="resolveMessageAvatarUrl(entry.message) || ''" alt="Avatar" class="w-full h-full object-cover" />
@@ -857,7 +1129,57 @@ watch(
                 <span class="font-semibold text-[14px] cursor-pointer transition-colors" :class="entry.message.user?.role === 'admin' ? 'text-red-400 hover:text-red-300' : 'text-zinc-200 hover:text-white'">{{ entry.message.user?.username || 'Unknown User' }}</span>
                 <span class="text-[10px] font-medium text-zinc-500 group-hover:text-zinc-400">{{ formatTime(entry.message.created_at) }}</span>
               </div>
-              <p class="text-zinc-300 whitespace-pre-wrap break-words leading-[1.35] text-[14px]" v-html="formatMessageContentWithLinks(entry.message.content)"></p>
+              <div v-if="entry.message.reply_to_message" class="mb-1 flex max-w-[420px] items-center gap-2 rounded-md border border-white/5 bg-zinc-900/50 px-2.5 py-1.5">
+                <Reply class="w-3.5 h-3.5 shrink-0 text-zinc-500" />
+                <div class="min-w-0">
+                  <p class="text-[11px] font-medium text-zinc-400 truncate">{{ getReplyAuthorName(entry.message.reply_to_message) }}</p>
+                  <p class="text-[12px] text-zinc-500 truncate">{{ getReplyPreviewText(entry.message.reply_to_message) }}</p>
+                </div>
+              </div>
+              <p v-if="entry.message.content" class="text-zinc-300 whitespace-pre-wrap break-words leading-[1.35] text-[14px]" v-html="formatMessageContentWithLinks(entry.message.content)"></p>
+              <div v-if="entry.message.attachments?.length" class="mt-2 space-y-2">
+                <div
+                  v-for="attachment in entry.message.attachments"
+                  :key="attachment.id"
+                  class="max-w-[420px] space-y-2"
+                >
+                  <img
+                    v-if="getAttachmentInlineKind(attachment) === 'image'"
+                    :src="attachment.url || ''"
+                    :alt="attachment.original_name"
+                    class="block max-h-[420px] max-w-full rounded-lg border border-white/10 bg-zinc-950/60 object-contain"
+                    loading="lazy"
+                  />
+                  <video
+                    v-else-if="getAttachmentInlineKind(attachment) === 'video'"
+                    :src="attachment.url || ''"
+                    class="block max-h-[420px] max-w-full rounded-lg border border-white/10 bg-black"
+                    controls
+                    preload="metadata"
+                  ></video>
+                  <audio
+                    v-else-if="getAttachmentInlineKind(attachment) === 'audio'"
+                    :src="attachment.url || ''"
+                    class="block w-full rounded-lg border border-white/10 bg-zinc-950/60"
+                    controls
+                    preload="metadata"
+                  ></audio>
+                  <a
+                    :href="attachment.url || '#'"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="flex items-center gap-3 rounded-lg border border-white/10 bg-zinc-900/70 px-3 py-2 text-sm text-zinc-200 transition-colors hover:bg-zinc-800/80"
+                    @click="openMessageAttachment(attachment, $event)"
+                  >
+                    <component :is="getFolderFileIcon(attachment.original_name)" class="w-4 h-4 shrink-0" :class="getFolderFileIconClass(attachment.original_name)" />
+                    <div class="min-w-0 flex-1">
+                      <p class="truncate">{{ getAttachmentDisplayLabel(attachment) }}</p>
+                      <p class="text-xs text-zinc-500">{{ formatFileSize(attachment.size_bytes) }}</p>
+                    </div>
+                    <span v-if="isInlineAttachment(attachment)" class="shrink-0 text-[11px] uppercase tracking-wide text-zinc-500">Open</span>
+                  </a>
+                </div>
+              </div>
               <div v-if="getMessageEmbeds(entry.message).length > 0" class="mt-2 space-y-2">
                 <div
                   v-for="(embed, embedIndex) in getMessageEmbeds(entry.message)"
@@ -897,23 +1219,140 @@ watch(
                   </a>
                 </div>
               </div>
+              <div v-if="getMessageReactions(entry.message).length > 0" class="mt-2 flex flex-wrap gap-2">
+                <button
+                  v-for="reaction in getMessageReactions(entry.message)"
+                  :key="`${entry.message.id}-${reaction.emoji}`"
+                  type="button"
+                  class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
+                  :class="reaction.reacted_by_current_user ? 'border-indigo-400/50 bg-indigo-500/15 text-indigo-200' : 'border-white/10 bg-zinc-900/70 text-zinc-300 hover:bg-zinc-800/80'"
+                  @click="toggleMessageReaction(entry.message, reaction.emoji)"
+                >
+                  <span>{{ reaction.emoji }}</span>
+                  <span>{{ reaction.count }}</span>
+                </button>
+              </div>
             </div>
           </div>
         </template>
       </main>
 
+      <div
+        v-if="messageContextMenu.visible"
+        ref="messageContextMenuRef"
+        class="fixed z-50 w-56 rounded-xl border border-white/10 bg-zinc-950 shadow-2xl py-1 backdrop-blur-md"
+        :style="{ left: `${messageContextMenu.x}px`, top: `${messageContextMenu.y}px` }"
+        role="menu"
+        @click.stop
+        @contextmenu.stop
+        >
+          <div
+            v-if="messageContextMenu.message && canReactToMessage(messageContextMenu.message)"
+            class="px-3 py-2 border-b border-white/5"
+          >
+            <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Add reaction</p>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-for="emoji in MESSAGE_REACTION_OPTIONS"
+                :key="emoji"
+                type="button"
+                class="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-zinc-900/70 text-base text-zinc-200 transition-colors hover:bg-zinc-800/80"
+                role="menuitem"
+                @click="toggleReactionFromContextMenu(emoji)"
+              >
+                {{ emoji }}
+              </button>
+            </div>
+          </div>
+          <button
+            v-if="messageContextMenu.message && canReplyToMessage(messageContextMenu.message)"
+            type="button"
+          class="w-full px-3 py-2 text-left text-sm text-zinc-200 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors"
+          role="menuitem"
+          @click="startReplyFromContextMenu"
+        >
+          <Reply class="w-4 h-4" />
+          Reply
+        </button>
+        <button
+          v-if="messageContextMenu.message && canDeleteMessage(messageContextMenu.message)"
+          type="button"
+          class="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors"
+          role="menuitem"
+          @click="deleteMessageFromContextMenu"
+        >
+          <Trash2 class="w-4 h-4" />
+          Delete message
+        </button>
+      </div>
+
       <!-- Chat Input Area -->
       <div class="p-4 pt-1 shrink-0 bg-zinc-950 relative z-10">
+        <input
+          ref="messageAttachmentInput"
+          type="file"
+          multiple
+          class="hidden"
+          @change="onMessageAttachmentPicked"
+        />
+        <div v-if="replyDraftMessage" class="mb-2 flex items-start justify-between gap-3 rounded-lg border border-indigo-500/20 bg-indigo-500/5 p-2.5">
+          <div class="min-w-0">
+            <p class="text-xs font-semibold text-indigo-300">Replying to {{ getReplyAuthorName(replyDraftMessage) }}</p>
+            <p class="text-xs text-zinc-400 truncate">{{ getReplyPreviewText(replyDraftMessage) }}</p>
+          </div>
+          <button
+            type="button"
+            class="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors"
+            @click="clearReplyDraft"
+          >
+            <X class="w-4 h-4" />
+          </button>
+        </div>
+        <div v-if="pendingMessageAttachments.length > 0" class="mb-2 space-y-2 rounded-lg border border-white/5 bg-zinc-900/40 p-2.5">
+          <div
+            v-for="(attachment, attachmentIndex) in pendingMessageAttachments"
+            :key="`${attachment.name}-${attachment.size}-${attachmentIndex}`"
+            class="flex items-center gap-3 rounded-md bg-zinc-900/70 px-3 py-2"
+          >
+            <component :is="getFolderFileIcon(attachment.name)" class="w-4 h-4 shrink-0" :class="getFolderFileIconClass(attachment.name)" />
+            <div class="min-w-0 flex-1">
+              <p class="truncate text-sm text-zinc-200">{{ attachment.name }}</p>
+              <p class="text-xs text-zinc-500">{{ formatFileSize(attachment.size) }}</p>
+            </div>
+            <button
+              type="button"
+              class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors"
+              @click="removePendingMessageAttachment(attachmentIndex)"
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+        <div v-if="pendingAttachmentUploadSummary" class="mb-2 rounded-lg border border-indigo-500/20 bg-indigo-500/10 px-3 py-2.5">
+          <div class="flex items-center justify-between gap-3 text-xs text-indigo-100">
+            <span>
+              Uploading {{ pendingAttachmentUploadSummary.fileCount }} {{ pendingAttachmentUploadSummary.fileCount === 1 ? 'attachment' : 'attachments' }}
+            </span>
+            <span>{{ pendingAttachmentUploadSummary.percent }}%</span>
+          </div>
+          <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
+            <div class="h-full rounded-full bg-indigo-400 transition-[width] duration-150" :style="{ width: `${pendingAttachmentUploadSummary.percent}%` }"></div>
+          </div>
+          <p class="mt-2 text-[11px] text-indigo-200/80">
+            {{ formatFileSize(pendingAttachmentUploadSummary.loadedBytes) }} / {{ formatFileSize(pendingAttachmentUploadSummary.totalBytes) }}
+          </p>
+        </div>
         <div class="bg-zinc-900/60 border border-white/5 rounded-lg py-2.5 px-3 flex items-center gap-2.5 shadow-sm focus-within:ring-1 focus-within:ring-indigo-500/50 focus-within:border-indigo-500/30 transition-all duration-200 focus-within:bg-zinc-900/90" :class="isReadOnlyRssChannel ? 'opacity-80' : ''">
-          <button class="w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-700 shrink-0 transition-colors">
+          <button type="button" class="w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-700 shrink-0 transition-colors disabled:opacity-50" :disabled="isReadOnlyRssChannel || isSendingMessage" @click="onOpenMessageAttachmentPicker">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
           </button>
           <input 
             v-model="messageInput"
+            @paste="onMessageInputPaste"
             @keyup.enter="sendMessage"
             type="text" 
             :placeholder="messagePlaceholder"
-            :disabled="isReadOnlyRssChannel"
+            :disabled="isReadOnlyRssChannel || isSendingMessage"
             class="bg-transparent border-none outline-none flex-1 text-zinc-200 placeholder-zinc-500 text-[14px]"
           />
         </div>

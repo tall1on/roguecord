@@ -540,6 +540,37 @@ export interface Message {
   user_id: string;
   content: string;
   created_at: string;
+  reply_to_message_id?: string | null;
+  attachments?: MessageAttachment[];
+  reactions: MessageReaction[];
+}
+
+export interface MessageReaction {
+  emoji: string;
+  count: number;
+  user_ids: string[];
+}
+
+export interface MessageReplyReference {
+  id: string;
+  channel_id: string;
+  user_id: string;
+  content: string;
+  created_at: string;
+  user: User;
+  attachments?: MessageAttachment[];
+}
+
+export interface MessageAttachment {
+  id: string;
+  message_id: string;
+  original_name: string;
+  storage_name: string;
+  storage_provider: 'data_dir' | 's3';
+  storage_key: string | null;
+  mime_type: string | null;
+  size_bytes: number;
+  created_at: string;
 }
 
 export interface MessageWithUser extends Message {
@@ -559,6 +590,19 @@ export interface MessagePage {
   messages: MessageWithUserAndEmbedData[];
   hasMore: boolean;
 }
+
+export interface MessageWithUserAndAttachmentData extends MessageWithUserAndEmbedData {
+  attachments?: MessageAttachment[];
+  reply_to_message?: MessageReplyReference | null;
+}
+
+const enrichMessagesWithReactions = async <T extends { id: string }>(messages: T[]): Promise<Array<T & { reactions: MessageReaction[] }>> => {
+  const reactionMap = await getMessageReactions(messages.map((message) => message.id));
+  return messages.map((message) => ({
+    ...message,
+    reactions: reactionMap[message.id] || []
+  }));
+};
 
 export interface ChannelReadState {
   user_id: string;
@@ -610,10 +654,266 @@ export interface BanRule {
   revoked_at: string | null;
 }
 
-export const createMessage = async (channel_id: string, user_id: string, content: string): Promise<Message> => {
+export const createMessage = async (channel_id: string, user_id: string, content: string, replyToMessageId: string | null = null): Promise<Message> => {
   const id = crypto.randomUUID();
-  await dbRun('INSERT INTO messages (id, channel_id, user_id, content) VALUES (?, ?, ?, ?)', [id, channel_id, user_id, content]);
-  return (await dbGet<Message>('SELECT * FROM messages WHERE id = ?', [id]))!;
+  await dbRun('INSERT INTO messages (id, channel_id, user_id, content, reply_to_message_id) VALUES (?, ?, ?, ?, ?)', [id, channel_id, user_id, content, replyToMessageId]);
+  const message = (await dbGet<Omit<Message, 'reactions'>>('SELECT * FROM messages WHERE id = ?', [id]))!;
+  return {
+    ...message,
+    reactions: []
+  };
+};
+
+export const getMessageReactions = async (messageIds: string[]): Promise<Record<string, MessageReaction[]>> => {
+  if (messageIds.length === 0) {
+    return {};
+  }
+
+  const placeholders = messageIds.map(() => '?').join(', ');
+  const rows = await dbAll<{ message_id: string; emoji: string; user_id: string }>(
+    `
+      SELECT message_id, emoji, user_id
+      FROM message_reactions
+      WHERE message_id IN (${placeholders})
+      ORDER BY message_id ASC, emoji ASC, created_at ASC, user_id ASC
+    `,
+    messageIds
+  );
+
+  const reactionMap: Record<string, Map<string, string[]>> = {};
+  for (const row of rows) {
+    if (!reactionMap[row.message_id]) {
+      reactionMap[row.message_id] = new Map<string, string[]>();
+    }
+    const byEmoji = reactionMap[row.message_id]!;
+    const users = byEmoji.get(row.emoji) || [];
+    users.push(row.user_id);
+    byEmoji.set(row.emoji, users);
+  }
+
+  return messageIds.reduce<Record<string, MessageReaction[]>>((acc, messageId) => {
+    const byEmoji = reactionMap[messageId];
+    acc[messageId] = byEmoji
+      ? Array.from(byEmoji.entries()).map(([emoji, user_ids]) => ({
+          emoji,
+          count: user_ids.length,
+          user_ids
+        }))
+      : [];
+    return acc;
+  }, {});
+};
+
+export const getMessageReactionSummary = async (messageId: string): Promise<MessageReaction[]> => {
+  const reactions = await getMessageReactions([messageId]);
+  return reactions[messageId] || [];
+};
+
+export const toggleMessageReaction = async (messageId: string, userId: string, emoji: string): Promise<MessageReaction[]> => {
+  const normalizedEmoji = emoji.trim();
+  if (!normalizedEmoji) {
+    throw new Error('Emoji is required');
+  }
+
+  const existing = await dbGet<{ message_id: string }>(
+    'SELECT message_id FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?',
+    [messageId, userId, normalizedEmoji]
+  );
+
+  if (existing) {
+    await dbRun('DELETE FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?', [messageId, userId, normalizedEmoji]);
+  } else {
+    await dbRun('INSERT INTO message_reactions (message_id, user_id, emoji) VALUES (?, ?, ?)', [messageId, userId, normalizedEmoji]);
+  }
+
+  return getMessageReactionSummary(messageId);
+};
+
+export const getMessageReplyReferences = async (messageIds: string[]): Promise<Record<string, MessageReplyReference | null>> => {
+  if (messageIds.length === 0) {
+    return {};
+  }
+
+  const placeholders = messageIds.map(() => '?').join(', ');
+  const rows = await dbAll<any>(
+    `
+      SELECT
+        m.id AS message_id,
+        r.id AS reply_id,
+        r.channel_id AS reply_channel_id,
+        r.user_id AS reply_user_id,
+        r.content AS reply_content,
+        r.created_at AS reply_created_at,
+        u.id AS reply_user_join_id,
+        u.username AS reply_username,
+        u.avatar_url AS reply_avatar_url,
+        u.public_key AS reply_public_key,
+        u.last_ip AS reply_last_ip,
+        u.role AS reply_role,
+        u.created_at AS reply_user_created_at
+      FROM messages m
+      LEFT JOIN messages r ON r.id = m.reply_to_message_id
+      LEFT JOIN users u ON u.id = r.user_id
+      WHERE m.id IN (${placeholders})
+    `,
+    messageIds
+  );
+
+  const replyIds = rows
+    .map((row) => row.reply_id as string | null)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+  const attachmentMap = await getMessageAttachments(replyIds);
+
+  return rows.reduce<Record<string, MessageReplyReference | null>>((acc, row) => {
+    if (!row.reply_id || !row.reply_user_join_id) {
+      acc[row.message_id] = null;
+      return acc;
+    }
+
+    acc[row.message_id] = {
+      id: row.reply_id,
+      channel_id: row.reply_channel_id,
+      user_id: row.reply_user_id,
+      content: row.reply_content,
+      created_at: row.reply_created_at,
+      user: {
+        id: row.reply_user_join_id,
+        username: row.reply_username,
+        avatar_url: row.reply_avatar_url,
+        public_key: row.reply_public_key,
+        last_ip: row.reply_last_ip,
+        role: row.reply_role,
+        created_at: row.reply_user_created_at
+      },
+      attachments: attachmentMap[row.reply_id] || []
+    };
+    return acc;
+  }, {});
+};
+
+export const createMessageAttachment = async (input: {
+  messageId: string;
+  originalName: string;
+  storageName: string;
+  storageProvider?: 'data_dir' | 's3';
+  storageKey?: string | null;
+  mimeType?: string | null;
+  sizeBytes: number;
+}): Promise<MessageAttachment> => {
+  const id = crypto.randomUUID();
+  try {
+    await dbRun(
+      `
+        INSERT INTO message_attachments (
+          id,
+          message_id,
+          original_name,
+          storage_name,
+          storage_provider,
+          storage_key,
+          mime_type,
+          size_bytes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        id,
+        input.messageId,
+        input.originalName,
+        input.storageName,
+        input.storageProvider || 'data_dir',
+        input.storageKey || null,
+        input.mimeType || null,
+        input.sizeBytes
+      ]
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key')) {
+      throw error;
+    }
+
+    await dbRun(
+      `
+        INSERT INTO message_attachments (
+          id,
+          message_id,
+          original_name,
+          storage_name,
+          mime_type,
+          size_bytes
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `,
+      [
+        id,
+        input.messageId,
+        input.originalName,
+        input.storageName,
+        input.mimeType || null,
+        input.sizeBytes
+      ]
+    );
+  }
+  return (await dbGet<MessageAttachment>('SELECT * FROM message_attachments WHERE id = ?', [id]))!;
+};
+
+export const getMessageAttachments = async (messageIds: string[]): Promise<Record<string, MessageAttachment[]>> => {
+  if (messageIds.length === 0) {
+    return {};
+  }
+
+  const placeholders = messageIds.map(() => '?').join(', ');
+  let rows: MessageAttachment[];
+  try {
+    rows = await dbAll<MessageAttachment>(
+      `SELECT * FROM message_attachments WHERE message_id IN (${placeholders}) ORDER BY created_at ASC, id ASC`,
+      messageIds
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key')) {
+      throw error;
+    }
+
+    rows = await dbAll<MessageAttachment>(
+      `
+        SELECT
+          id,
+          message_id,
+          original_name,
+          storage_name,
+          'data_dir' AS storage_provider,
+          NULL AS storage_key,
+          mime_type,
+          size_bytes,
+          created_at
+        FROM message_attachments
+        WHERE message_id IN (${placeholders})
+        ORDER BY created_at ASC, id ASC
+      `,
+      messageIds
+    );
+  }
+
+  return rows.reduce<Record<string, MessageAttachment[]>>((acc, row) => {
+    if (!acc[row.message_id]) {
+      acc[row.message_id] = [];
+    }
+    acc[row.message_id]!.push(row);
+    return acc;
+  }, {});
+};
+
+export const getMessageById = async (id: string): Promise<Message | undefined> => {
+  const message = await dbGet<Omit<Message, 'reactions'>>('SELECT * FROM messages WHERE id = ?', [id]);
+  if (!message) return undefined;
+  const [enrichedMessage] = await enrichMessagesWithReactions([message]);
+  return enrichedMessage;
+};
+
+export const deleteMessageAttachmentById = async (id: string): Promise<void> => {
+  await dbRun('DELETE FROM message_attachments WHERE id = ?', [id]);
+};
+
+export const deleteMessageById = async (id: string): Promise<void> => {
+  await dbRun('DELETE FROM messages WHERE id = ?', [id]);
 };
 
 export const ensureChannelReadState = async (userId: string, channelId: string): Promise<void> => {
@@ -927,7 +1227,7 @@ export const getChannelMessages = async (
 
   queryParams.push(normalizedLimit + 1);
 
-  const messages = await dbAll<Message>(
+  const messages = await dbAll<Omit<Message, 'reactions'>>(
     `
       SELECT *
       FROM messages
@@ -941,13 +1241,15 @@ export const getChannelMessages = async (
 
   const hasMore = messages.length > normalizedLimit;
   const pageMessages = hasMore ? messages.slice(0, normalizedLimit) : messages;
+  const replyMap = await getMessageReplyReferences(pageMessages.map((message) => message.id));
+  const messagesWithReactions = await enrichMessagesWithReactions(pageMessages);
   
   // Fetch users for messages (could be done with a JOIN, but this is fine for now)
   const messagesWithUsers: MessageWithUserAndEmbedData[] = [];
-  for (const msg of pageMessages) {
+  for (const msg of messagesWithReactions) {
     const user = await getUserById(msg.user_id);
     if (user) {
-      messagesWithUsers.push(withMessageEmbeds({ ...msg, user }));
+      messagesWithUsers.push(withMessageEmbeds({ ...msg, user, reply_to_message: replyMap[msg.id] || null }));
     }
   }
 
