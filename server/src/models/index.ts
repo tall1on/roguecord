@@ -540,6 +540,19 @@ export interface Message {
   user_id: string;
   content: string;
   created_at: string;
+  attachments?: MessageAttachment[];
+}
+
+export interface MessageAttachment {
+  id: string;
+  message_id: string;
+  original_name: string;
+  storage_name: string;
+  storage_provider: 'data_dir' | 's3';
+  storage_key: string | null;
+  mime_type: string | null;
+  size_bytes: number;
+  created_at: string;
 }
 
 export interface MessageWithUser extends Message {
@@ -558,6 +571,10 @@ export interface MessagePageCursor {
 export interface MessagePage {
   messages: MessageWithUserAndEmbedData[];
   hasMore: boolean;
+}
+
+export interface MessageWithUserAndAttachmentData extends MessageWithUserAndEmbedData {
+  attachments?: MessageAttachment[];
 }
 
 export interface ChannelReadState {
@@ -614,6 +631,128 @@ export const createMessage = async (channel_id: string, user_id: string, content
   const id = crypto.randomUUID();
   await dbRun('INSERT INTO messages (id, channel_id, user_id, content) VALUES (?, ?, ?, ?)', [id, channel_id, user_id, content]);
   return (await dbGet<Message>('SELECT * FROM messages WHERE id = ?', [id]))!;
+};
+
+export const createMessageAttachment = async (input: {
+  messageId: string;
+  originalName: string;
+  storageName: string;
+  storageProvider?: 'data_dir' | 's3';
+  storageKey?: string | null;
+  mimeType?: string | null;
+  sizeBytes: number;
+}): Promise<MessageAttachment> => {
+  const id = crypto.randomUUID();
+  try {
+    await dbRun(
+      `
+        INSERT INTO message_attachments (
+          id,
+          message_id,
+          original_name,
+          storage_name,
+          storage_provider,
+          storage_key,
+          mime_type,
+          size_bytes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        id,
+        input.messageId,
+        input.originalName,
+        input.storageName,
+        input.storageProvider || 'data_dir',
+        input.storageKey || null,
+        input.mimeType || null,
+        input.sizeBytes
+      ]
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key')) {
+      throw error;
+    }
+
+    await dbRun(
+      `
+        INSERT INTO message_attachments (
+          id,
+          message_id,
+          original_name,
+          storage_name,
+          mime_type,
+          size_bytes
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `,
+      [
+        id,
+        input.messageId,
+        input.originalName,
+        input.storageName,
+        input.mimeType || null,
+        input.sizeBytes
+      ]
+    );
+  }
+  return (await dbGet<MessageAttachment>('SELECT * FROM message_attachments WHERE id = ?', [id]))!;
+};
+
+export const getMessageAttachments = async (messageIds: string[]): Promise<Record<string, MessageAttachment[]>> => {
+  if (messageIds.length === 0) {
+    return {};
+  }
+
+  const placeholders = messageIds.map(() => '?').join(', ');
+  let rows: MessageAttachment[];
+  try {
+    rows = await dbAll<MessageAttachment>(
+      `SELECT * FROM message_attachments WHERE message_id IN (${placeholders}) ORDER BY created_at ASC, id ASC`,
+      messageIds
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key')) {
+      throw error;
+    }
+
+    rows = await dbAll<MessageAttachment>(
+      `
+        SELECT
+          id,
+          message_id,
+          original_name,
+          storage_name,
+          'data_dir' AS storage_provider,
+          NULL AS storage_key,
+          mime_type,
+          size_bytes,
+          created_at
+        FROM message_attachments
+        WHERE message_id IN (${placeholders})
+        ORDER BY created_at ASC, id ASC
+      `,
+      messageIds
+    );
+  }
+
+  return rows.reduce<Record<string, MessageAttachment[]>>((acc, row) => {
+    if (!acc[row.message_id]) {
+      acc[row.message_id] = [];
+    }
+    acc[row.message_id]!.push(row);
+    return acc;
+  }, {});
+};
+
+export const getMessageById = async (id: string): Promise<Message | undefined> => {
+  return dbGet<Message>('SELECT * FROM messages WHERE id = ?', [id]);
+};
+
+export const deleteMessageAttachmentById = async (id: string): Promise<void> => {
+  await dbRun('DELETE FROM message_attachments WHERE id = ?', [id]);
+};
+
+export const deleteMessageById = async (id: string): Promise<void> => {
+  await dbRun('DELETE FROM messages WHERE id = ?', [id]);
 };
 
 export const ensureChannelReadState = async (userId: string, channelId: string): Promise<void> => {

@@ -28,6 +28,7 @@ import {
   getChannelUnreadStatesForUser,
   markChannelReadUpToMessage,
   createFolderChannelFile,
+  createMessageAttachment,
   getFolderChannelFiles,
   getFolderChannelFileById,
   deleteFolderChannelFileById,
@@ -35,7 +36,11 @@ import {
   updateServerStorageSettings,
   updateServerStorageLastError,
   updateFolderChannelFileStorage,
-  getAllFolderChannelFiles
+  getAllFolderChannelFiles,
+  getMessageAttachments,
+  getMessageById,
+  deleteMessageAttachmentById,
+  deleteMessageById
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -342,6 +347,24 @@ const ensureChannelFilesDir = (channelId: string) => {
   return dir;
 };
 
+const buildStoredFileUrl = (storageProvider: 'data_dir' | 's3', channelId: string, storageName: string, storageKey: string | null) => {
+  if (storageProvider === 's3' && storageKey) {
+    return `/files/s3/${encodeURIComponent(storageKey)}`;
+  }
+  return `/files/${encodeURIComponent(channelId)}/${encodeURIComponent(storageName)}`;
+};
+
+const enrichMessageAttachmentsForClient = async <T extends { id: string; channel_id: string }>(messages: T[]) => {
+  const attachmentMap = await getMessageAttachments(messages.map((message) => message.id));
+  return messages.map((message) => ({
+    ...message,
+    attachments: (attachmentMap[message.id] || []).map((attachment) => ({
+      ...attachment,
+      url: buildStoredFileUrl(attachment.storage_provider, message.channel_id, attachment.storage_name, attachment.storage_key)
+    }))
+  }));
+};
+
 const resolveSafeStoredFilePath = (channelId: string, storageName: string) => {
   const channelDir = getSafeChannelFilesDir(channelId);
   const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
@@ -357,6 +380,35 @@ const resolveSafeStoredFilePath = (channelId: string, storageName: string) => {
 
 const hasFolderManagementAccess = (role: string | null | undefined) => {
   return role === 'admin' || role === 'owner';
+};
+
+const canDeleteMessage = (role: string | null | undefined, messageUserId: string, actingUserId: string) => {
+  if (!actingUserId) {
+    return false;
+  }
+  if (messageUserId === actingUserId) {
+    return true;
+  }
+  return role === 'admin' || role === 'owner';
+};
+
+const deleteStoredMessageAttachment = async (channelId: string, attachment: {
+  storage_provider: 'data_dir' | 's3';
+  storage_key: string | null;
+  storage_name: string;
+}) => {
+  if (attachment.storage_provider === 's3') {
+    const persistedS3Config = await getPersistedS3Config();
+    if (persistedS3Config && attachment.storage_key) {
+      await deleteFileFromS3({ config: persistedS3Config, key: attachment.storage_key });
+    }
+    return;
+  }
+
+  const fullPath = resolveSafeStoredFilePath(channelId, attachment.storage_name);
+  if (fs.existsSync(fullPath)) {
+    fs.unlinkSync(fullPath);
+  }
 };
 
 const sanitizeStoragePrefix = (prefix: string | null | undefined) => {
@@ -589,6 +641,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'send_message':
         await handleSendMessage(client, payload);
+        break;
+      case 'delete_message':
+        await handleDeleteMessage(client, payload);
         break;
       case 'folder_list_files':
         await handleFolderListFiles(client, payload);
@@ -1053,13 +1108,14 @@ const handleGetMessages = async (
 
   // Ideally verify user has access to this channel's server
   const page = await getChannelMessages(channel_id, MESSAGE_PAGE_SIZE, before);
+  const messagesWithAttachments = await enrichMessageAttachmentsForClient(page.messages);
   const oldestMessage = page.messages[0];
 
   client.ws.send(JSON.stringify({
     type: 'messages_list',
     payload: {
       channel_id,
-      messages: page.messages,
+      messages: messagesWithAttachments,
       has_more: page.hasMore,
       page_size: MESSAGE_PAGE_SIZE,
       is_older_page: isOlderPageRequest,
@@ -1071,10 +1127,11 @@ const handleGetMessages = async (
   }));
 };
 
-const handleSendMessage = async (client: ClientConnection, payload: { channel_id: string, content: string }) => {
+const handleSendMessage = async (client: ClientConnection, payload: { channel_id: string, content: string, attachments?: Array<{ file_name?: string; mime_type?: string; data_base64?: string }> }) => {
   if (!client.userId) return;
   const { channel_id, content } = payload;
-  if (!channel_id || !content) return;
+  const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+  if (!channel_id || (!content && attachments.length === 0)) return;
 
   const channel = await getChannelById(channel_id);
   if (!channel) {
@@ -1094,7 +1151,73 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     return;
   }
 
-  const message = await createMessage(channel_id, client.userId, content);
+  const message = await createMessage(channel_id, client.userId, content || '');
+
+  const createdAttachments: Array<Record<string, unknown>> = [];
+
+  for (const attachment of attachments) {
+    const originalName = sanitizeFileName(typeof attachment?.file_name === 'string' ? attachment.file_name : 'attachment');
+    const mimeType = typeof attachment?.mime_type === 'string' && attachment.mime_type.trim() ? attachment.mime_type.trim() : null;
+    if (typeof attachment?.data_base64 !== 'string') {
+      continue;
+    }
+    const dataBase64 = attachment.data_base64;
+
+    let fileBuffer: Buffer;
+    try {
+      fileBuffer = Buffer.from(dataBase64, 'base64');
+    } catch {
+      continue;
+    }
+    const normalizedBase64 = dataBase64.replace(/\s+/g, '');
+    const canonicalBase64 = fileBuffer.toString('base64');
+    const isValidBase64 = normalizedBase64 === canonicalBase64
+      || normalizedBase64 === canonicalBase64.replace(/=+$/, '');
+    if (!isValidBase64 || fileBuffer.length > MAX_FOLDER_FILE_SIZE_BYTES) {
+      continue;
+    }
+
+    const extension = getNormalizedFileExtension(originalName);
+    if (extension && BLOCKED_FOLDER_UPLOAD_EXTENSIONS.has(extension)) {
+      continue;
+    }
+
+    const ext = path.extname(originalName).slice(0, 20);
+    const storageName = `${crypto.randomUUID()}${ext}`;
+    const storageRuntime = await getStorageRuntimeConfig();
+    let storageProvider: 'data_dir' | 's3' = 'data_dir';
+    let storageKey: string | null = null;
+
+    if (storageRuntime.storageType === 's3' && storageRuntime.s3Config) {
+      storageProvider = 's3';
+      storageKey = buildS3StorageKey(storageRuntime.s3Config.prefix, channel_id, storageName);
+      await uploadFileToS3({
+        config: storageRuntime.s3Config,
+        key: storageKey,
+        buffer: fileBuffer,
+        mimeType
+      });
+    } else {
+      const filePath = resolveSafeStoredFilePath(channel_id, storageName);
+      ensureChannelFilesDir(channel_id);
+      fs.writeFileSync(filePath, fileBuffer);
+    }
+
+    const createdAttachment = await createMessageAttachment({
+      messageId: message.id,
+      originalName,
+      storageName,
+      storageProvider,
+      storageKey,
+      mimeType,
+      sizeBytes: fileBuffer.length
+    });
+
+    createdAttachments.push({
+      ...createdAttachment,
+      url: buildStoredFileUrl(storageProvider, channel_id, storageName, storageKey)
+    });
+  }
 
   await markChannelReadUpToMessage({
     userId: client.userId,
@@ -1105,7 +1228,8 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
   
   const messageWithUser = withMessageEmbeds({
     ...message,
-    user
+    user,
+    attachments: createdAttachments
   });
 
   // Broadcast to all authenticated users (for simplicity, as requested)
@@ -1379,6 +1503,78 @@ const handleFolderDeleteFile = async (
     payload: {
       channel_id: channelId,
       file_id: file.id
+    }
+  }));
+};
+
+const handleDeleteMessage = async (
+  client: ClientConnection,
+  payload: { channel_id?: string; message_id?: string }
+) => {
+  if (!client.userId) return;
+
+  const channelId = typeof payload?.channel_id === 'string' ? payload.channel_id : '';
+  const messageId = typeof payload?.message_id === 'string' ? payload.message_id : '';
+  if (!channelId || !messageId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid delete payload' } }));
+    return;
+  }
+
+  const channel = await getChannelById(channelId);
+  if (!channel || (channel.type !== 'text' && channel.type !== 'rss')) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Message channel not found' } }));
+    return;
+  }
+
+  const message = await getMessageById(messageId);
+  if (!message || message.channel_id !== channelId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Message not found' } }));
+    return;
+  }
+
+  const user = await getUserById(client.userId);
+  if (!user || !canDeleteMessage(user.role, message.user_id, client.userId)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions to delete message' } }));
+    return;
+  }
+
+  const attachmentMap = await getMessageAttachments([message.id]);
+  const attachments = attachmentMap[message.id] || [];
+
+  try {
+    for (const attachment of attachments) {
+      await deleteStoredMessageAttachment(channelId, attachment);
+    }
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to delete stored message attachment:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to delete message attachment' } }));
+    return;
+  }
+
+  try {
+    for (const attachment of attachments) {
+      await deleteMessageAttachmentById(attachment.id);
+    }
+    await deleteMessageById(message.id);
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to delete message metadata:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to delete message' } }));
+    return;
+  }
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'message_deleted',
+    payload: {
+      channel_id: channelId,
+      message_id: message.id
+    }
+  });
+
+  client.ws.send(JSON.stringify({
+    type: 'message_delete_success',
+    payload: {
+      channel_id: channelId,
+      message_id: message.id
     }
   }));
 };

@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-opener": "^2.0.0",
     "lucide-vue-next": "^0.575.0",
     "mediasoup-client": "^3.18.7",
     "pinia": "^3.0.4",
