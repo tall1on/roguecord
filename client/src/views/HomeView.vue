@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
 import { Archive, Code2, File, FileText, Film, Image, Music2 } from 'lucide-vue-next'
-import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile } from '../stores/chat'
+import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, type MessageAttachment } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
 
@@ -13,9 +13,12 @@ const preserveScrollOnNextRender = ref(false)
 const previousScrollHeight = ref(0)
 const isFetchingOlderMessages = ref(false)
 const folderFileInput = ref<HTMLInputElement | null>(null)
+const messageAttachmentInput = ref<HTMLInputElement | null>(null)
 const isUploadingFolderFile = ref(false)
 const folderUploadError = ref<string | null>(null)
 const folderViewMode = ref<'list' | 'tiles'>('list')
+const pendingMessageAttachments = ref<File[]>([])
+const isSendingMessage = ref(false)
 
 const TOP_SCROLL_THRESHOLD_PX = 120
 const BOTTOM_SCROLL_THRESHOLD_PX = 120
@@ -531,11 +534,66 @@ const sendMessage = () => {
     return
   }
 
-  if (messageInput.value.trim() && activeTextChannel.value) {
-    chatStore.sendMessage(activeTextChannel.value.id, messageInput.value.trim())
-    messageInput.value = ''
+  void submitMessage()
+}
+
+const onOpenMessageAttachmentPicker = () => {
+  if (isReadOnlyRssChannel.value || isSendingMessage.value) return
+  messageAttachmentInput.value?.click()
+}
+
+const appendPendingMessageAttachments = (files: FileList | File[]) => {
+  const nextFiles = Array.from(files)
+  if (nextFiles.length === 0) return
+  pendingMessageAttachments.value = [...pendingMessageAttachments.value, ...nextFiles]
+}
+
+const onMessageAttachmentPicked = (event: Event) => {
+  const target = event.target as HTMLInputElement | null
+  if (target?.files?.length) {
+    appendPendingMessageAttachments(target.files)
+  }
+  if (target) {
+    target.value = ''
   }
 }
+
+const removePendingMessageAttachment = (index: number) => {
+  pendingMessageAttachments.value = pendingMessageAttachments.value.filter((_, currentIndex) => currentIndex !== index)
+}
+
+const onMessageInputPaste = (event: ClipboardEvent) => {
+  const files = Array.from(event.clipboardData?.files || [])
+  if (files.length === 0 || isReadOnlyRssChannel.value) return
+  event.preventDefault()
+  appendPendingMessageAttachments(files)
+}
+
+const submitMessage = async () => {
+  if (isReadOnlyRssChannel.value || !activeTextChannel.value || isSendingMessage.value) {
+    return
+  }
+
+  const trimmedMessage = messageInput.value.trim()
+  if (!trimmedMessage && pendingMessageAttachments.value.length === 0) {
+    return
+  }
+
+  isSendingMessage.value = true
+  try {
+    if (pendingMessageAttachments.value.length > 0) {
+      await chatStore.sendMessageWithAttachments(activeTextChannel.value.id, trimmedMessage, pendingMessageAttachments.value)
+    } else {
+      chatStore.sendMessage(activeTextChannel.value.id, trimmedMessage)
+    }
+    messageInput.value = ''
+    pendingMessageAttachments.value = []
+  } finally {
+    isSendingMessage.value = false
+  }
+}
+
+const getAttachmentDisplayLabel = (attachment: MessageAttachment) => attachment.original_name
 
 const openFolderUploadPicker = () => {
   folderUploadError.value = null
@@ -762,6 +820,8 @@ watch(
   async () => {
     preserveScrollOnNextRender.value = false
     isFetchingOlderMessages.value = false
+    messageInput.value = ''
+    pendingMessageAttachments.value = []
     await nextTick()
     scrollToBottom()
   }
@@ -857,7 +917,23 @@ watch(
                 <span class="font-semibold text-[14px] cursor-pointer transition-colors" :class="entry.message.user?.role === 'admin' ? 'text-red-400 hover:text-red-300' : 'text-zinc-200 hover:text-white'">{{ entry.message.user?.username || 'Unknown User' }}</span>
                 <span class="text-[10px] font-medium text-zinc-500 group-hover:text-zinc-400">{{ formatTime(entry.message.created_at) }}</span>
               </div>
-              <p class="text-zinc-300 whitespace-pre-wrap break-words leading-[1.35] text-[14px]" v-html="formatMessageContentWithLinks(entry.message.content)"></p>
+              <p v-if="entry.message.content" class="text-zinc-300 whitespace-pre-wrap break-words leading-[1.35] text-[14px]" v-html="formatMessageContentWithLinks(entry.message.content)"></p>
+              <div v-if="entry.message.attachments?.length" class="mt-2 space-y-2">
+                <a
+                  v-for="attachment in entry.message.attachments"
+                  :key="attachment.id"
+                  :href="attachment.url || '#'"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="flex items-center gap-3 max-w-[420px] rounded-lg border border-white/10 bg-zinc-900/70 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800/80 transition-colors"
+                >
+                  <component :is="getFolderFileIcon(attachment.original_name)" class="w-4 h-4 shrink-0" :class="getFolderFileIconClass(attachment.original_name)" />
+                  <div class="min-w-0 flex-1">
+                    <p class="truncate">{{ getAttachmentDisplayLabel(attachment) }}</p>
+                    <p class="text-xs text-zinc-500">{{ formatFileSize(attachment.size_bytes) }}</p>
+                  </div>
+                </a>
+              </div>
               <div v-if="getMessageEmbeds(entry.message).length > 0" class="mt-2 space-y-2">
                 <div
                   v-for="(embed, embedIndex) in getMessageEmbeds(entry.message)"
@@ -904,16 +980,44 @@ watch(
 
       <!-- Chat Input Area -->
       <div class="p-4 pt-1 shrink-0 bg-zinc-950 relative z-10">
+        <input
+          ref="messageAttachmentInput"
+          type="file"
+          multiple
+          class="hidden"
+          @change="onMessageAttachmentPicked"
+        />
+        <div v-if="pendingMessageAttachments.length > 0" class="mb-2 space-y-2 rounded-lg border border-white/5 bg-zinc-900/40 p-2.5">
+          <div
+            v-for="(attachment, attachmentIndex) in pendingMessageAttachments"
+            :key="`${attachment.name}-${attachment.size}-${attachmentIndex}`"
+            class="flex items-center gap-3 rounded-md bg-zinc-900/70 px-3 py-2"
+          >
+            <component :is="getFolderFileIcon(attachment.name)" class="w-4 h-4 shrink-0" :class="getFolderFileIconClass(attachment.name)" />
+            <div class="min-w-0 flex-1">
+              <p class="truncate text-sm text-zinc-200">{{ attachment.name }}</p>
+              <p class="text-xs text-zinc-500">{{ formatFileSize(attachment.size) }}</p>
+            </div>
+            <button
+              type="button"
+              class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors"
+              @click="removePendingMessageAttachment(attachmentIndex)"
+            >
+              Remove
+            </button>
+          </div>
+        </div>
         <div class="bg-zinc-900/60 border border-white/5 rounded-lg py-2.5 px-3 flex items-center gap-2.5 shadow-sm focus-within:ring-1 focus-within:ring-indigo-500/50 focus-within:border-indigo-500/30 transition-all duration-200 focus-within:bg-zinc-900/90" :class="isReadOnlyRssChannel ? 'opacity-80' : ''">
-          <button class="w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-700 shrink-0 transition-colors">
+          <button type="button" class="w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-700 shrink-0 transition-colors disabled:opacity-50" :disabled="isReadOnlyRssChannel || isSendingMessage" @click="onOpenMessageAttachmentPicker">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
           </button>
           <input 
             v-model="messageInput"
+            @paste="onMessageInputPaste"
             @keyup.enter="sendMessage"
             type="text" 
             :placeholder="messagePlaceholder"
-            :disabled="isReadOnlyRssChannel"
+            :disabled="isReadOnlyRssChannel || isSendingMessage"
             class="bg-transparent border-none outline-none flex-1 text-zinc-200 placeholder-zinc-500 text-[14px]"
           />
         </div>

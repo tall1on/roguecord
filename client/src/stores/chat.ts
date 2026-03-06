@@ -61,6 +61,18 @@ export interface Message {
   created_at: string;
   user?: User;
   embeds?: MessageEmbed[];
+  attachments?: MessageAttachment[];
+}
+
+export interface MessageAttachment {
+  id: string;
+  message_id?: string;
+  original_name: string;
+  mime_type: string | null;
+  size_bytes: number;
+  storage_provider?: 'data_dir' | 's3';
+  storage_key?: string | null;
+  url?: string | null;
 }
 
 interface ChannelUnreadState {
@@ -1387,6 +1399,39 @@ export const useChatStore = defineStore('chat', () => {
     send('send_message', { channel_id, content });
   };
 
+  const sendMessageWithAttachments = async (channel_id: string, content: string, files: File[]) => {
+    const attachments = await Promise.all(files.map(async (file) => {
+      const dataBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result;
+          if (typeof result !== 'string') {
+            reject(new Error('Failed to read file'));
+            return;
+          }
+
+          const commaIndex = result.indexOf(',');
+          if (commaIndex === -1) {
+            reject(new Error('Failed to read file'));
+            return;
+          }
+
+          resolve(result.slice(commaIndex + 1));
+        };
+        reader.onerror = () => reject(new Error('Failed to read file'));
+        reader.readAsDataURL(file);
+      });
+
+      return {
+        file_name: file.name,
+        mime_type: file.type || 'application/octet-stream',
+        data_base64: dataBase64
+      };
+    }));
+
+    send('send_message', { channel_id, content, attachments });
+  };
+
   const kickMember = (targetUserId: string, options: { reason?: string; deleteMode?: ModerationDeleteMode; deleteHours?: number }) => {
     const reason = (options.reason || '').trim();
     const deleteMode = options.deleteMode || 'none';
@@ -1597,6 +1642,7 @@ export const useChatStore = defineStore('chat', () => {
     requestServerRefresh,
     clearError,
     sendMessage,
+    sendMessageWithAttachments,
     loadOlderMessages,
     isLoadingMessagesForChannel,
     hasOlderMessagesForChannel,
