@@ -1143,6 +1143,32 @@ watch(
                   :key="attachment.id"
                   class="max-w-[420px] space-y-2"
                 >
+                  <div
+                    v-if="getAttachmentInlineKind(attachment) === 'video' || getAttachmentInlineKind(attachment) === 'audio'"
+                    class="media-attachment-embed"
+                    :class="{
+                      'media-attachment-embed--audio': getAttachmentInlineKind(attachment) === 'audio'
+                    }"
+                  >
+                    <div v-if="getAttachmentInlineKind(attachment) === 'audio'" class="media-attachment-embed__meta">
+                      <p class="media-attachment-embed__title">{{ getAttachmentDisplayLabel(attachment) }}</p>
+                      <p class="media-attachment-embed__subtitle">{{ formatFileSize(attachment.size_bytes) }}</p>
+                    </div>
+                    <video
+                      v-if="getAttachmentInlineKind(attachment) === 'video'"
+                      :src="attachment.url || ''"
+                      class="block max-h-[420px] max-w-full rounded-lg bg-black"
+                      controls
+                      preload="metadata"
+                    ></video>
+                    <audio
+                      v-else
+                      :src="attachment.url || ''"
+                      class="media-attachment-embed__media media-attachment-embed__media--audio"
+                      controls
+                      preload="metadata"
+                    ></audio>
+                  </div>
                   <img
                     v-if="getAttachmentInlineKind(attachment) === 'image'"
                     :src="attachment.url || ''"
@@ -1150,21 +1176,8 @@ watch(
                     class="block max-h-[420px] max-w-full rounded-lg border border-white/10 bg-zinc-950/60 object-contain"
                     loading="lazy"
                   />
-                  <video
-                    v-else-if="getAttachmentInlineKind(attachment) === 'video'"
-                    :src="attachment.url || ''"
-                    class="block max-h-[420px] max-w-full rounded-lg border border-white/10 bg-black"
-                    controls
-                    preload="metadata"
-                  ></video>
-                  <audio
-                    v-else-if="getAttachmentInlineKind(attachment) === 'audio'"
-                    :src="attachment.url || ''"
-                    class="block w-full rounded-lg border border-white/10 bg-zinc-950/60"
-                    controls
-                    preload="metadata"
-                  ></audio>
                   <a
+                    v-if="getAttachmentInlineKind(attachment) !== 'audio'"
                     :href="attachment.url || '#'"
                     target="_blank"
                     rel="noopener noreferrer"
