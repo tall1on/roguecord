@@ -23,7 +23,7 @@ jobs:
               - self-hosted
               - windows
             artifact_name: tauri-client-windows
-            bundle_glob: client/tauri/target/release/bundle/**/*.msi
+            bundle_glob: client/tauri/target/release/**/*.exe
           - name: linux
             runner:
               - self-hosted
