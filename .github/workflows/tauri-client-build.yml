@@ -19,11 +19,15 @@ jobs:
       matrix:
         platform:
           - name: windows
-            runner: windows-latest
+            runner:
+              - self-hosted
+              - windows
             artifact_name: tauri-client-windows
             bundle_glob: client/tauri/target/release/bundle/**/*.msi
           - name: linux
-            runner: ubuntu-22.04
+            runner:
+              - self-hosted
+              - linux
             artifact_name: tauri-client-linux
             bundle_glob: client/tauri/target/release/bundle/**/*
           - name: macos
