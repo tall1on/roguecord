@@ -14,11 +14,6 @@ jobs:
   build:
     name: Build on ${{ matrix.platform.name }}
     runs-on: ${{ matrix.platform.runner }}
-    env:
-      npm_config_cache: ${{ matrix.platform.name == 'windows' && 'C:\\actions-cache\\roguecord\\npm' || matrix.platform.name == 'linux' && '/var/cache/roguecord/npm' || '' }}
-      CARGO_HOME: ${{ matrix.platform.name == 'windows' && 'C:\\actions-cache\\roguecord\\cargo' || matrix.platform.name == 'linux' && format('{0}/.cargo', github.workspace) || '' }}
-      RUSTUP_HOME: ${{ matrix.platform.name == 'linux' && format('{0}/.rustup', github.workspace) || '' }}
-      CARGO_TARGET_DIR: ${{ matrix.platform.name == 'windows' && 'C:\\actions-cache\\roguecord\\target\\windows' || matrix.platform.name == 'linux' && format('{0}/client/tauri/target', github.workspace) || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -28,7 +23,7 @@ jobs:
               - self-hosted
               - windows
             artifact_name: tauri-client-windows
-            bundle_glob: C:\actions-cache\roguecord\target\windows\release\bundle\**\*.exe
+            bundle_glob: client/tauri/target/release/bundle/**/*.msi
           - name: linux
             runner:
               - self-hosted
@@ -64,14 +59,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: ${{ matrix.platform.name == 'macos' && 'npm' || '' }}
+          cache: npm
           cache-dependency-path: client/package-lock.json
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust build artifacts
-        if: matrix.platform.name == 'macos' || matrix.platform.name == 'linux'
         uses: swatinem/rust-cache@v2
         with:
           workspaces: client/tauri -> target
