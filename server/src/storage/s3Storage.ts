@@ -674,6 +674,7 @@ export const isMissingS3ObjectError = (error: unknown) => {
     name?: unknown;
     code?: unknown;
     Code?: unknown;
+    message?: unknown;
     $metadata?: { httpStatusCode?: unknown };
   };
 
@@ -681,6 +682,11 @@ export const isMissingS3ObjectError = (error: unknown) => {
     .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     .map((value) => value.trim().toLowerCase());
   if (codes.includes('nosuchkey') || codes.includes('notfound')) {
+    return true;
+  }
+
+  const message = typeof awsError.message === 'string' ? awsError.message : '';
+  if (/NoSuchKey/i.test(message) && /The specified key does not exist\./i.test(message)) {
     return true;
   }
 
