@@ -92,7 +92,6 @@ type StorageSettingsInput = {
 };
 
 const filesRootDir = path.join(dataDir, 'files');
-const serverIconsRootDir = path.join(dataDir, 'server-icons');
 const MAX_FOLDER_FILE_SIZE_BYTES = MAX_UPLOAD_FILE_SIZE_BYTES;
 const MAX_SERVER_ICON_SIZE_BYTES = 2 * 1024 * 1024;
 const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
@@ -113,24 +112,17 @@ const ensureFilesRootDir = () => {
   }
 };
 
-const ensureServerIconsRootDir = () => {
-  if (!fs.existsSync(serverIconsRootDir)) {
-    fs.mkdirSync(serverIconsRootDir, { recursive: true });
-  }
-};
-
 const sanitizeServerIdForPath = (serverId: string) => (serverId || '').replace(/[^a-zA-Z0-9-]/g, '');
 
 const getSafeServerIconPath = (serverId: string, storageName: string) => {
-  ensureServerIconsRootDir();
   const safeServerId = sanitizeServerIdForPath(serverId);
   const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
   if (!safeServerId || !safeStorageName) {
     throw new Error('Invalid server icon path');
   }
 
-  const dir = path.resolve(serverIconsRootDir, safeServerId);
-  const root = path.resolve(serverIconsRootDir);
+  const dir = path.resolve(filesRootDir, 'server-icons', safeServerId);
+  const root = path.resolve(filesRootDir);
   if (!dir.startsWith(root)) {
     throw new Error('Unsafe server icon directory');
   }
@@ -164,7 +156,7 @@ const parseServerIconDataUrl = (value: unknown): { buffer: Buffer; mimeType: str
 const buildServerIconPathForClient = (serverId: string, storageName: string) => {
   const safeServerId = sanitizeServerIdForPath(serverId);
   const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
-  return `/server-icons/${safeServerId}/${safeStorageName}`;
+  return `/files/server-icons/${safeServerId}/${safeStorageName}`;
 };
 
 const buildServerIconStorageName = (extension: string) => {
@@ -206,12 +198,17 @@ const parseSafeLocalServerIconStorageName = (serverId: string, iconPath: string)
   }
 
   const normalizedPath = (iconPath || '').trim();
-  const expectedPrefix = `/server-icons/${safeServerId}/`;
-  if (!normalizedPath.startsWith(expectedPrefix)) {
+  const supportedPrefixes = [
+    `/files/server-icons/${safeServerId}/`,
+    `/server-icons/${safeServerId}/`
+  ];
+
+  const matchingPrefix = supportedPrefixes.find((prefix) => normalizedPath.startsWith(prefix));
+  if (!matchingPrefix) {
     return null;
   }
 
-  const storageName = normalizedPath.slice(expectedPrefix.length).trim();
+  const storageName = normalizedPath.slice(matchingPrefix.length).trim();
   if (!storageName || storageName.includes('/') || storageName.includes('\\')) {
     return null;
   }
@@ -222,6 +219,25 @@ const parseSafeLocalServerIconStorageName = (serverId: string, iconPath: string)
   }
 
   return safeStorageName;
+};
+
+const normalizePersistedServerIconPath = (serverId: string, iconPath: string | null | undefined): string | null => {
+  const trimmed = (iconPath || '').trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed.startsWith('s3:')) {
+    const key = trimmed.slice('s3:'.length).trim();
+    return isSafeS3IconKeyForServer(serverId, key) ? `s3:${key}` : null;
+  }
+
+  const storageName = parseSafeLocalServerIconStorageName(serverId, trimmed);
+  if (!storageName) {
+    return null;
+  }
+
+  return buildServerIconPathForClient(serverId, storageName);
 };
 
 const cleanupServerIconReference = async (serverId: string, iconPath: string | null | undefined) => {
@@ -348,6 +364,42 @@ const storeServerIcon = async (serverId: string, iconDataUrl: string): Promise<s
   fs.writeFileSync(targetPath, parsed.buffer);
   cleanupStaleLocalServerIcons(serverId, storageName);
   return buildServerIconPathForClient(serverId, storageName);
+};
+
+const migrateServerIconToS3IfNeeded = async (input: {
+  serverId: string;
+  currentIconPath: string | null | undefined;
+  s3Config: S3StorageConfig;
+}): Promise<string | null> => {
+  const normalizedIconPath = normalizePersistedServerIconPath(input.serverId, input.currentIconPath);
+  if (!normalizedIconPath) {
+    return null;
+  }
+
+  if (normalizedIconPath.startsWith('s3:')) {
+    return normalizedIconPath;
+  }
+
+  const storageName = parseSafeLocalServerIconStorageName(input.serverId, normalizedIconPath);
+  if (!storageName) {
+    return normalizedIconPath;
+  }
+
+  const localPath = getSafeServerIconPath(input.serverId, storageName);
+  if (!fs.existsSync(localPath)) {
+    throw new Error('Missing local server icon source during S3 migration');
+  }
+
+  const key = buildS3StorageKey(input.s3Config.prefix, `server-icons/${input.serverId}`, storageName);
+  const buffer = fs.readFileSync(localPath);
+  await uploadFileToS3({
+    config: input.s3Config,
+    key,
+    buffer,
+    mimeType: null
+  });
+
+  return `s3:${key}`;
 };
 
 const sanitizeFileName = (name: string) => {
@@ -2819,9 +2871,12 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
   try {
     const currentServer = await getServer();
     const previousIconPath = currentServer?.id === serverId ? currentServer.iconPath || null : null;
+    let currentStorageType: 'data_dir' | 's3' | null = null;
+    let normalizedCurrentS3Config: S3StorageConfig | null = null;
 
     if (typedPayload.storage) {
       const currentStorage = await getServerStorageSettings();
+      currentStorageType = currentStorage?.storageType ?? null;
       const currentS3 = currentStorage?.s3;
       const rawStorageInput = typedPayload.storage;
       const nestedS3Input = rawStorageInput?.s3;
@@ -2839,8 +2894,8 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
         prefix: rawStorageInput?.prefix ?? nestedS3Input?.prefix
       };
 
-      if (storageInput.enabled) {
-        const mergedS3Config = normalizeS3Config({
+        if (storageInput.enabled) {
+          const mergedS3Config = normalizeS3Config({
           provider: storageInput.provider || currentS3?.provider || 'generic_s3',
           providerUrl: storageInput.providerUrl || currentS3?.providerUrl || null,
           endpoint: storageInput.endpoint || currentS3?.endpoint || null,
@@ -2851,7 +2906,7 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
           prefix: storageInput.prefix ?? currentS3?.prefix ?? null
         });
 
-        const validation = await validateS3Configuration(mergedS3Config);
+          const validation = await validateS3Configuration(mergedS3Config);
         if (!validation.ok) {
           await updateServerStorageLastError({
             serverId,
@@ -2926,6 +2981,7 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
           }
 
           const currentS3Config = normalizeS3Config(currentS3);
+          normalizedCurrentS3Config = currentS3Config;
           await updateServerStorageMigrationState({
             serverId,
             status: 'running',
@@ -2962,6 +3018,18 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
               message: null,
               startedAt: null
             });
+
+            const normalizedExistingIconPath = normalizePersistedServerIconPath(serverId, previousIconPath);
+            if (currentServer && normalizedExistingIconPath !== previousIconPath) {
+              await updateServerSettings(
+                serverId,
+                currentServer.title || currentServer.name,
+                currentServer.rulesChannelId || null,
+                currentServer.welcomeChannelId || null,
+                normalizedExistingIconPath
+              );
+            }
+
             await broadcastServerStorageMigrationProgress();
             await broadcastServerStorageSettings();
           } catch (migrationError) {
@@ -3003,6 +3071,14 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
       nextIconPath = null;
     } else if (typeof typedPayload.iconDataUrl === 'string' && typedPayload.iconDataUrl.trim()) {
       nextIconPath = await storeServerIcon(serverId, typedPayload.iconDataUrl);
+    } else if (typedPayload.storage?.enabled === true && currentStorageType !== 's3' && normalizedCurrentS3Config) {
+      nextIconPath = await migrateServerIconToS3IfNeeded({
+        serverId,
+        currentIconPath: previousIconPath,
+        s3Config: normalizedCurrentS3Config
+      });
+    } else if (previousIconPath) {
+      nextIconPath = normalizePersistedServerIconPath(serverId, previousIconPath);
     }
 
     await updateServerSettings(serverId, normalizedTitle, rulesChannelId, welcomeChannelId, nextIconPath);
