@@ -121,8 +121,9 @@ const getSafeServerIconPath = (serverId: string, storageName: string) => {
     throw new Error('Invalid server icon path');
   }
 
-  const dir = path.resolve(filesRootDir, 'server-icons', safeServerId);
-  const root = path.resolve(filesRootDir);
+  const serverIconsRootDir = path.resolve(dataDir, 'server-icons');
+  const dir = path.resolve(serverIconsRootDir, safeServerId);
+  const root = path.resolve(serverIconsRootDir);
   if (!dir.startsWith(root)) {
     throw new Error('Unsafe server icon directory');
   }
@@ -2905,6 +2906,7 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
           secretKey: storageInput.secretKey || currentS3?.secretKey || null,
           prefix: storageInput.prefix ?? currentS3?.prefix ?? null
         });
+          normalizedCurrentS3Config = mergedS3Config;
 
           const validation = await validateS3Configuration(mergedS3Config);
         if (!validation.ok) {
