@@ -35,14 +35,17 @@ import {
   getServerStorageSettings,
   updateServerStorageSettings,
   updateServerStorageLastError,
+  updateServerStorageMigrationState,
   updateFolderChannelFileStorage,
   getAllFolderChannelFiles,
+  getAllMessageAttachments,
   getMessageAttachments,
   getMessageById,
   deleteMessageAttachmentById,
   deleteMessageById,
   toggleMessageReaction,
-  getMessageReactionSummary
+  getMessageReactionSummary,
+  updateMessageAttachmentStorage
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -559,6 +562,15 @@ const buildStorageSettingsPayloadForClient = (settings: Awaited<ReturnType<typeo
   return {
     storageType: settings?.storageType || 'data_dir',
     storageLastError: settings?.storageLastError || null,
+    migration: {
+      status: settings?.storageMigrationStatus || 'idle',
+      target: settings?.storageMigrationTarget || null,
+      total: settings?.storageMigrationTotal || 0,
+      done: settings?.storageMigrationDone || 0,
+      message: settings?.storageMigrationMessage || null,
+      startedAt: settings?.storageMigrationStartedAt || null,
+      updatedAt: settings?.storageMigrationUpdatedAt || null
+    },
     s3: settings?.s3
       ? {
         endpoint: settings.s3.endpoint,
@@ -579,57 +591,208 @@ const buildStorageSettingsPayloadForClient = (settings: Awaited<ReturnType<typeo
   };
 };
 
-const migrateDataDirFilesToS3 = async (serverId: string, s3Config: S3StorageConfig) => {
-  const allFiles = await getAllFolderChannelFiles();
+type StorageMigrationTarget = 'data_dir' | 's3';
 
-  for (const file of allFiles) {
-    if (file.storage_provider === 's3' && file.storage_key) {
-      continue;
-    }
+type StorageMigrationProgressState = {
+  total: number;
+  done: number;
+  startedAt: string;
+};
 
-    const legacyPath = resolveSafeStoredFilePath(file.channel_id, file.storage_name);
-    if (!fs.existsSync(legacyPath)) {
-      console.warn('[WS DEBUG] Skipping legacy file migration because source is missing', {
-        channelId: file.channel_id,
-        fileId: file.id
-      });
-      continue;
-    }
+const broadcastServerStorageSettings = async () => {
+  const settings = await getServerStorageSettings();
+  connectionManager.broadcastToAuthenticated({
+    type: 'server_storage_settings',
+    payload: buildStorageSettingsPayloadForClient(settings)
+  });
+};
 
-    const storageKey = buildS3StorageKey(s3Config.prefix, file.channel_id, file.storage_name);
-    try {
-      const buffer = fs.readFileSync(legacyPath);
-      await uploadFileToS3({
-        config: s3Config,
-        key: storageKey,
-        buffer,
-        mimeType: file.mime_type
-      });
+const broadcastServerStorageMigrationProgress = async () => {
+  const settings = await getServerStorageSettings();
+  connectionManager.broadcastToAuthenticated({
+    type: 'server_storage_migration_progress',
+    payload: buildStorageSettingsPayloadForClient(settings)
+  });
+};
 
-      await updateFolderChannelFileStorage({
-        fileId: file.id,
-        storageProvider: 's3',
-        storageKey,
-        migratedToS3At: new Date().toISOString()
-      });
+const persistMigrationProgress = async (
+  serverId: string,
+  target: StorageMigrationTarget,
+  progress: StorageMigrationProgressState,
+  message: string | null,
+  status: 'running' | 'failed' | 'idle' = 'running'
+) => {
+  await updateServerStorageMigrationState({
+    serverId,
+    status,
+    target: status === 'idle' ? null : target,
+    total: progress.total,
+    done: progress.done,
+    message,
+    startedAt: status === 'idle' ? null : progress.startedAt
+  });
+  await broadcastServerStorageMigrationProgress();
+  await broadcastServerStorageSettings();
+};
 
-      try {
-        fs.unlinkSync(legacyPath);
-      } catch {
-        // keep source file when cleanup fails
-      }
-    } catch (error) {
-      console.error('[WS DEBUG] Failed migrating legacy file to S3', {
-        fileId: file.id,
-        channelId: file.channel_id,
-        error
-      });
-      await updateServerStorageLastError({
-        serverId,
-        storageLastError: 'Some legacy files could not be migrated to S3. Check server logs.'
-      });
-    }
+const incrementMigrationProgress = async (
+  serverId: string,
+  target: StorageMigrationTarget,
+  progress: StorageMigrationProgressState
+) => {
+  progress.done += 1;
+  await persistMigrationProgress(serverId, target, progress, null, 'running');
+};
+
+const migrateFolderFileToS3 = async (file: Awaited<ReturnType<typeof getAllFolderChannelFiles>>[number], s3Config: S3StorageConfig) => {
+  if (file.storage_provider === 's3' && file.storage_key) {
+    return false;
   }
+
+  const sourcePath = resolveSafeStoredFilePath(file.channel_id, file.storage_name);
+  if (!fs.existsSync(sourcePath)) {
+    throw new Error(`Missing local folder file source for ${file.id}`);
+  }
+
+  const buffer = fs.readFileSync(sourcePath);
+  const storageKey = buildS3StorageKey(s3Config.prefix, file.channel_id, file.storage_name);
+  await uploadFileToS3({
+    config: s3Config,
+    key: storageKey,
+    buffer,
+    mimeType: file.mime_type
+  });
+  await updateFolderChannelFileStorage({
+    fileId: file.id,
+    storageProvider: 's3',
+    storageKey,
+    migratedToS3At: new Date().toISOString()
+  });
+  try {
+    fs.unlinkSync(sourcePath);
+  } catch {
+    // keep source file when cleanup fails
+  }
+  return true;
+};
+
+const migrateFolderFileToDataDir = async (file: Awaited<ReturnType<typeof getAllFolderChannelFiles>>[number], s3Config: S3StorageConfig) => {
+  if (file.storage_provider === 'data_dir') {
+    return false;
+  }
+  if (!file.storage_key) {
+    throw new Error(`Missing S3 storage key for folder file ${file.id}`);
+  }
+
+  const targetPath = resolveSafeStoredFilePath(file.channel_id, file.storage_name);
+  ensureChannelFilesDir(file.channel_id);
+  const buffer = await downloadFileFromS3({ config: s3Config, key: file.storage_key });
+  fs.writeFileSync(targetPath, buffer);
+  await updateFolderChannelFileStorage({
+    fileId: file.id,
+    storageProvider: 'data_dir',
+    storageKey: null,
+    migratedToS3At: null
+  });
+  try {
+    await deleteFileFromS3({ config: s3Config, key: file.storage_key });
+  } catch {
+    // keep source object when cleanup fails
+  }
+  return true;
+};
+
+const migrateMessageAttachmentToS3 = async (attachment: Awaited<ReturnType<typeof getAllMessageAttachments>>[number], s3Config: S3StorageConfig) => {
+  if (attachment.storage_provider === 's3' && attachment.storage_key) {
+    return false;
+  }
+
+  const sourcePath = resolveSafeStoredFilePath(attachment.channel_id, attachment.storage_name);
+  if (!fs.existsSync(sourcePath)) {
+    throw new Error(`Missing local message attachment source for ${attachment.id}`);
+  }
+
+  const buffer = fs.readFileSync(sourcePath);
+  const storageKey = buildS3StorageKey(s3Config.prefix, attachment.channel_id, attachment.storage_name);
+  await uploadFileToS3({
+    config: s3Config,
+    key: storageKey,
+    buffer,
+    mimeType: attachment.mime_type
+  });
+  await updateMessageAttachmentStorage({
+    attachmentId: attachment.id,
+    storageProvider: 's3',
+    storageKey
+  });
+  try {
+    fs.unlinkSync(sourcePath);
+  } catch {
+    // keep source file when cleanup fails
+  }
+  return true;
+};
+
+const migrateMessageAttachmentToDataDir = async (attachment: Awaited<ReturnType<typeof getAllMessageAttachments>>[number], s3Config: S3StorageConfig) => {
+  if (attachment.storage_provider === 'data_dir') {
+    return false;
+  }
+  if (!attachment.storage_key) {
+    throw new Error(`Missing S3 storage key for message attachment ${attachment.id}`);
+  }
+
+  const targetPath = resolveSafeStoredFilePath(attachment.channel_id, attachment.storage_name);
+  ensureChannelFilesDir(attachment.channel_id);
+  const buffer = await downloadFileFromS3({ config: s3Config, key: attachment.storage_key });
+  fs.writeFileSync(targetPath, buffer);
+  await updateMessageAttachmentStorage({
+    attachmentId: attachment.id,
+    storageProvider: 'data_dir',
+    storageKey: null
+  });
+  try {
+    await deleteFileFromS3({ config: s3Config, key: attachment.storage_key });
+  } catch {
+    // keep source object when cleanup fails
+  }
+  return true;
+};
+
+const runStorageMigration = async (input: {
+  serverId: string;
+  target: StorageMigrationTarget;
+  s3Config: S3StorageConfig;
+}) => {
+  const startedAt = new Date().toISOString();
+  const folderFiles = await getAllFolderChannelFiles();
+  const attachments = await getAllMessageAttachments();
+  const progress: StorageMigrationProgressState = {
+    total: folderFiles.length + attachments.length,
+    done: 0,
+    startedAt
+  };
+
+  await persistMigrationProgress(input.serverId, input.target, progress, null, 'running');
+
+  for (const file of folderFiles) {
+    if (input.target === 's3') {
+      await migrateFolderFileToS3(file, input.s3Config);
+    } else {
+      await migrateFolderFileToDataDir(file, input.s3Config);
+    }
+    await incrementMigrationProgress(input.serverId, input.target, progress);
+  }
+
+  for (const attachment of attachments) {
+    if (input.target === 's3') {
+      await migrateMessageAttachmentToS3(attachment, input.s3Config);
+    } else {
+      await migrateMessageAttachmentToDataDir(attachment, input.s3Config);
+    }
+    await incrementMigrationProgress(input.serverId, input.target, progress);
+  }
+
+  return progress;
 };
 
 export const handleMessage = async (client: ClientConnection, messageStr: string) => {
@@ -2381,33 +2544,131 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
           return;
         }
 
-        await updateServerStorageSettings({
+        await updateServerStorageMigrationState({
           serverId,
-          storageType: 's3',
-          s3Endpoint: mergedS3Config.endpoint,
-          s3Region: mergedS3Config.region,
-          s3Bucket: mergedS3Config.bucket,
-          s3AccessKey: mergedS3Config.accessKey,
-          s3SecretKey: mergedS3Config.secretKey,
-          s3Prefix: mergedS3Config.prefix || null,
-          storageLastError: null
+          status: 'running',
+          target: 's3',
+          total: 0,
+          done: 0,
+          message: null,
+          startedAt: new Date().toISOString()
         });
+        await broadcastServerStorageMigrationProgress();
+        await broadcastServerStorageSettings();
 
-        migrateDataDirFilesToS3(serverId, mergedS3Config).catch((migrationError) => {
-          console.error('[WS DEBUG] Background migration to S3 failed:', migrationError);
-        });
+        try {
+          const progress = await runStorageMigration({ serverId, target: 's3', s3Config: mergedS3Config });
+          await updateServerStorageSettings({
+            serverId,
+            storageType: 's3',
+            s3Endpoint: mergedS3Config.endpoint,
+            s3Region: mergedS3Config.region,
+            s3Bucket: mergedS3Config.bucket,
+            s3AccessKey: mergedS3Config.accessKey,
+            s3SecretKey: mergedS3Config.secretKey,
+            s3Prefix: mergedS3Config.prefix || null,
+            storageLastError: null
+          });
+          await updateServerStorageMigrationState({
+            serverId,
+            status: 'idle',
+            target: null,
+            total: progress.total,
+            done: progress.done,
+            message: null,
+            startedAt: null
+          });
+          await broadcastServerStorageMigrationProgress();
+          await broadcastServerStorageSettings();
+        } catch (migrationError) {
+          const message = migrationError instanceof Error ? migrationError.message : 'Storage migration to S3 failed';
+          await updateServerStorageLastError({ serverId, storageLastError: message });
+          await updateServerStorageMigrationState({
+            serverId,
+            status: 'failed',
+            target: 's3',
+            total: 0,
+            done: 0,
+            message,
+            startedAt: new Date().toISOString()
+          });
+          await broadcastServerStorageMigrationProgress();
+          await broadcastServerStorageSettings();
+          throw migrationError;
+        }
       } else {
-        await updateServerStorageSettings({
-          serverId,
-          storageType: 'data_dir',
-          s3Endpoint: currentS3?.endpoint || null,
-          s3Region: currentS3?.region || null,
-          s3Bucket: currentS3?.bucket || null,
-          s3AccessKey: currentS3?.accessKey || null,
-          s3SecretKey: currentS3?.secretKey || null,
-          s3Prefix: currentS3?.prefix || null,
-          storageLastError: null
-        });
+        if (currentStorage?.storageType === 's3') {
+          if (!currentS3) {
+            client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Current S3 configuration is missing' } }));
+            return;
+          }
+
+          const currentS3Config = normalizeS3Config(currentS3);
+          await updateServerStorageMigrationState({
+            serverId,
+            status: 'running',
+            target: 'data_dir',
+            total: 0,
+            done: 0,
+            message: null,
+            startedAt: new Date().toISOString()
+          });
+          await broadcastServerStorageMigrationProgress();
+          await broadcastServerStorageSettings();
+
+          try {
+            const progress = await runStorageMigration({ serverId, target: 'data_dir', s3Config: currentS3Config });
+            await updateServerStorageSettings({
+              serverId,
+              storageType: 'data_dir',
+              s3Endpoint: currentS3?.endpoint || null,
+              s3Region: currentS3?.region || null,
+              s3Bucket: currentS3?.bucket || null,
+              s3AccessKey: currentS3?.accessKey || null,
+              s3SecretKey: currentS3?.secretKey || null,
+              s3Prefix: currentS3?.prefix || null,
+              storageLastError: null
+            });
+            await updateServerStorageMigrationState({
+              serverId,
+              status: 'idle',
+              target: null,
+              total: progress.total,
+              done: progress.done,
+              message: null,
+              startedAt: null
+            });
+            await broadcastServerStorageMigrationProgress();
+            await broadcastServerStorageSettings();
+          } catch (migrationError) {
+            const message = migrationError instanceof Error ? migrationError.message : 'Storage migration to data directory failed';
+            await updateServerStorageLastError({ serverId, storageLastError: message });
+            await updateServerStorageMigrationState({
+              serverId,
+              status: 'failed',
+              target: 'data_dir',
+              total: 0,
+              done: 0,
+              message,
+              startedAt: new Date().toISOString()
+            });
+            await broadcastServerStorageMigrationProgress();
+            await broadcastServerStorageSettings();
+            throw migrationError;
+          }
+        } else {
+          await updateServerStorageSettings({
+            serverId,
+            storageType: 'data_dir',
+            s3Endpoint: currentS3?.endpoint || null,
+            s3Region: currentS3?.region || null,
+            s3Bucket: currentS3?.bucket || null,
+            s3AccessKey: currentS3?.accessKey || null,
+            s3SecretKey: currentS3?.secretKey || null,
+            s3Prefix: currentS3?.prefix || null,
+            storageLastError: null
+          });
+        }
       }
     }
 

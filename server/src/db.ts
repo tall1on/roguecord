@@ -71,7 +71,14 @@ function initializeDatabase() {
         s3_secret_key TEXT,
         s3_prefix TEXT,
         storage_last_error TEXT,
-        storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        storage_migration_status TEXT NOT NULL DEFAULT 'idle',
+        storage_migration_target TEXT,
+        storage_migration_total INTEGER NOT NULL DEFAULT 0,
+        storage_migration_done INTEGER NOT NULL DEFAULT 0,
+        storage_migration_message TEXT,
+        storage_migration_started_at DATETIME,
+        storage_migration_updated_at DATETIME
       )
     `, (err) => {
       if (err) {
@@ -607,6 +614,13 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     const hasS3Prefix = columns.some((column) => column.name === 's3_prefix');
     const hasStorageLastError = columns.some((column) => column.name === 'storage_last_error');
     const hasStorageUpdatedAt = columns.some((column) => column.name === 'storage_updated_at');
+    const hasStorageMigrationStatus = columns.some((column) => column.name === 'storage_migration_status');
+    const hasStorageMigrationTarget = columns.some((column) => column.name === 'storage_migration_target');
+    const hasStorageMigrationTotal = columns.some((column) => column.name === 'storage_migration_total');
+    const hasStorageMigrationDone = columns.some((column) => column.name === 'storage_migration_done');
+    const hasStorageMigrationMessage = columns.some((column) => column.name === 'storage_migration_message');
+    const hasStorageMigrationStartedAt = columns.some((column) => column.name === 'storage_migration_started_at');
+    const hasStorageMigrationUpdatedAt = columns.some((column) => column.name === 'storage_migration_updated_at');
 
     const pendingAlterStatements: string[] = [];
     if (!hasTitle) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN title TEXT NOT NULL DEFAULT 'My Server'");
@@ -623,6 +637,13 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     if (!hasS3Prefix) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_prefix TEXT');
     if (!hasStorageLastError) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_last_error TEXT');
     if (!hasStorageUpdatedAt) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_updated_at DATETIME');
+    if (!hasStorageMigrationStatus) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN storage_migration_status TEXT NOT NULL DEFAULT 'idle'");
+    if (!hasStorageMigrationTarget) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_migration_target TEXT');
+    if (!hasStorageMigrationTotal) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN storage_migration_total INTEGER NOT NULL DEFAULT 0");
+    if (!hasStorageMigrationDone) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN storage_migration_done INTEGER NOT NULL DEFAULT 0");
+    if (!hasStorageMigrationMessage) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_migration_message TEXT');
+    if (!hasStorageMigrationStartedAt) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_migration_started_at DATETIME');
+    if (!hasStorageMigrationUpdatedAt) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_migration_updated_at DATETIME');
 
     const finalizeMigration = () => {
       db.run(
@@ -631,7 +652,14 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
           SET
             title = COALESCE(NULLIF(title, ''), name, 'My Server'),
             updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP),
-            storage_updated_at = COALESCE(storage_updated_at, CURRENT_TIMESTAMP)
+            storage_updated_at = COALESCE(storage_updated_at, CURRENT_TIMESTAMP),
+            storage_migration_status = CASE
+              WHEN storage_migration_status IN ('idle', 'running', 'failed') THEN storage_migration_status
+              ELSE 'idle'
+            END,
+            storage_migration_total = COALESCE(storage_migration_total, 0),
+            storage_migration_done = COALESCE(storage_migration_done, 0),
+            storage_migration_updated_at = COALESCE(storage_migration_updated_at, storage_updated_at, CURRENT_TIMESTAMP)
         `,
         (updateErr) => {
           done(updateErr || undefined);
@@ -670,7 +698,14 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                 s3_secret_key TEXT,
                 s3_prefix TEXT,
                 storage_last_error TEXT,
-                storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                storage_migration_status TEXT NOT NULL DEFAULT 'idle',
+                storage_migration_target TEXT,
+                storage_migration_total INTEGER NOT NULL DEFAULT 0,
+                storage_migration_done INTEGER NOT NULL DEFAULT 0,
+                storage_migration_message TEXT,
+                storage_migration_started_at DATETIME,
+                storage_migration_updated_at DATETIME
               )
             `,
             (createErr) => {
@@ -697,7 +732,14 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                     s3_secret_key,
                     s3_prefix,
                     storage_last_error,
-                    storage_updated_at
+                    storage_updated_at,
+                    storage_migration_status,
+                    storage_migration_target,
+                    storage_migration_total,
+                    storage_migration_done,
+                    storage_migration_message,
+                    storage_migration_started_at,
+                    storage_migration_updated_at
                   )
                   SELECT
                     id,
@@ -715,7 +757,17 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                     s3_secret_key,
                     s3_prefix,
                     storage_last_error,
-                    storage_updated_at
+                    storage_updated_at,
+                    CASE
+                      WHEN storage_migration_status IN ('idle', 'running', 'failed') THEN storage_migration_status
+                      ELSE 'idle'
+                    END,
+                    storage_migration_target,
+                    COALESCE(storage_migration_total, 0),
+                    COALESCE(storage_migration_done, 0),
+                    storage_migration_message,
+                    storage_migration_started_at,
+                    storage_migration_updated_at
                   FROM servers
                 `,
                 (copyErr) => {
