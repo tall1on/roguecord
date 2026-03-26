@@ -359,22 +359,22 @@ export const useChatStore = defineStore('chat', () => {
       prefix: payload?.s3?.prefix || ''
     },
     migration: {
-      status: payload?.storageMigrationStatus === 'running' || payload?.storageMigrationStatus === 'failed'
-        ? payload.storageMigrationStatus
+      status: payload?.migration?.status === 'running' || payload?.migration?.status === 'failed'
+        ? payload.migration.status
         : 'idle',
-      target: payload?.storageMigrationTarget === 's3' || payload?.storageMigrationTarget === 'data_dir'
-        ? payload.storageMigrationTarget
+      target: payload?.migration?.target === 's3' || payload?.migration?.target === 'data_dir'
+        ? payload.migration.target
         : null,
-      total: Number.isFinite(Number(payload?.storageMigrationTotal)) ? Math.max(0, Number(payload.storageMigrationTotal)) : 0,
-      done: Number.isFinite(Number(payload?.storageMigrationDone)) ? Math.max(0, Number(payload.storageMigrationDone)) : 0,
-      message: typeof payload?.storageMigrationMessage === 'string' && payload.storageMigrationMessage.trim()
-        ? payload.storageMigrationMessage
+      total: Number.isFinite(Number(payload?.migration?.total)) ? Math.max(0, Number(payload.migration.total)) : 0,
+      done: Number.isFinite(Number(payload?.migration?.done)) ? Math.max(0, Number(payload.migration.done)) : 0,
+      message: typeof payload?.migration?.message === 'string' && payload.migration.message.trim()
+        ? payload.migration.message
         : null,
-      startedAt: typeof payload?.storageMigrationStartedAt === 'string' && payload.storageMigrationStartedAt.trim()
-        ? payload.storageMigrationStartedAt
+      startedAt: typeof payload?.migration?.startedAt === 'string' && payload.migration.startedAt.trim()
+        ? payload.migration.startedAt
         : null,
-      updatedAt: typeof payload?.storageMigrationUpdatedAt === 'string' && payload.storageMigrationUpdatedAt.trim()
-        ? payload.storageMigrationUpdatedAt
+      updatedAt: typeof payload?.migration?.updatedAt === 'string' && payload.migration.updatedAt.trim()
+        ? payload.migration.updatedAt
         : null
     }
   });
@@ -1669,19 +1669,15 @@ export const useChatStore = defineStore('chat', () => {
       removeIcon: icon?.removeIcon === true,
       storage: storage
         ? {
-          storageType: storage.storageType,
-          s3: storage.s3
-            ? {
-              provider: storage.s3.provider,
-              providerUrl: storage.s3.providerUrl,
-              endpoint: storage.s3.endpoint,
-              region: storage.s3.region,
-              bucket: storage.s3.bucket,
-              accessKey: storage.s3.accessKey,
-              secretKey: storage.s3.secretKey,
-              prefix: storage.s3.prefix
-            }
-            : undefined
+          enabled: storage.storageType === 's3',
+          provider: storage.s3?.provider,
+          providerUrl: storage.s3?.providerUrl,
+          endpoint: storage.s3?.endpoint,
+          region: storage.s3?.region,
+          bucket: storage.s3?.bucket,
+          accessKey: storage.s3?.accessKey,
+          secretKey: storage.s3?.secretKey,
+          prefix: storage.s3?.prefix
         }
         : undefined
     });
@@ -1720,19 +1716,15 @@ export const useChatStore = defineStore('chat', () => {
 
       send('test_server_storage_s3', {
         storage: {
-          storageType: storage.storageType,
-          s3: storage.s3
-            ? {
-              provider: storage.s3.provider,
-              providerUrl: storage.s3.providerUrl,
-              endpoint: storage.s3.endpoint,
-              region: storage.s3.region,
-              bucket: storage.s3.bucket,
-              accessKey: storage.s3.accessKey,
-              secretKey: storage.s3.secretKey,
-              prefix: storage.s3.prefix
-            }
-            : undefined
+          enabled: storage.storageType === 's3',
+          provider: storage.s3?.provider,
+          providerUrl: storage.s3?.providerUrl,
+          endpoint: storage.s3?.endpoint,
+          region: storage.s3?.region,
+          bucket: storage.s3?.bucket,
+          accessKey: storage.s3?.accessKey,
+          secretKey: storage.s3?.secretKey,
+          prefix: storage.s3?.prefix
         }
       });
     });

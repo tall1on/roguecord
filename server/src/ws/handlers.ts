@@ -2789,6 +2789,17 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
       accessKey?: string;
       secretKey?: string;
       prefix?: string;
+      storageType?: 'data_dir' | 's3';
+      s3?: {
+        provider?: StorageSettingsProvider;
+        providerUrl?: string;
+        endpoint?: string;
+        region?: string;
+        bucket?: string;
+        accessKey?: string;
+        secretKey?: string;
+        prefix?: string;
+      };
     };
   };
 
@@ -2812,7 +2823,21 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
     if (typedPayload.storage) {
       const currentStorage = await getServerStorageSettings();
       const currentS3 = currentStorage?.s3;
-      const storageInput = typedPayload.storage as StorageSettingsInput;
+      const rawStorageInput = typedPayload.storage;
+      const nestedS3Input = rawStorageInput?.s3;
+      const storageInput: StorageSettingsInput = {
+        enabled: typeof rawStorageInput?.enabled === 'boolean'
+          ? rawStorageInput.enabled
+          : rawStorageInput?.storageType === 's3',
+        provider: rawStorageInput?.provider ?? nestedS3Input?.provider,
+        providerUrl: rawStorageInput?.providerUrl ?? nestedS3Input?.providerUrl,
+        endpoint: rawStorageInput?.endpoint ?? nestedS3Input?.endpoint,
+        region: rawStorageInput?.region ?? nestedS3Input?.region,
+        bucket: rawStorageInput?.bucket ?? nestedS3Input?.bucket,
+        accessKey: rawStorageInput?.accessKey ?? nestedS3Input?.accessKey,
+        secretKey: rawStorageInput?.secretKey ?? nestedS3Input?.secretKey,
+        prefix: rawStorageInput?.prefix ?? nestedS3Input?.prefix
+      };
 
       if (storageInput.enabled) {
         const mergedS3Config = normalizeS3Config({
@@ -3031,6 +3056,7 @@ const handleTestServerStorageS3 = async (
   client: ClientConnection,
   payload: {
     storage?: {
+      enabled?: boolean;
       provider?: StorageSettingsProvider;
       providerUrl?: string;
       endpoint?: string;
@@ -3039,6 +3065,17 @@ const handleTestServerStorageS3 = async (
       accessKey?: string;
       secretKey?: string;
       prefix?: string;
+      storageType?: 'data_dir' | 's3';
+      s3?: {
+        provider?: StorageSettingsProvider;
+        providerUrl?: string;
+        endpoint?: string;
+        region?: string;
+        bucket?: string;
+        accessKey?: string;
+        secretKey?: string;
+        prefix?: string;
+      };
     };
   }
 ) => {
@@ -3052,7 +3089,21 @@ const handleTestServerStorageS3 = async (
 
   const currentStorage = await getServerStorageSettings();
   const currentS3 = currentStorage?.s3;
-  const storageInput = (payload?.storage || {}) as StorageSettingsInput;
+  const rawStorageInput = payload?.storage || {};
+  const nestedS3Input = rawStorageInput?.s3;
+  const storageInput: StorageSettingsInput = {
+    enabled: typeof rawStorageInput?.enabled === 'boolean'
+      ? rawStorageInput.enabled
+      : rawStorageInput?.storageType === 's3',
+    provider: rawStorageInput?.provider ?? nestedS3Input?.provider,
+    providerUrl: rawStorageInput?.providerUrl ?? nestedS3Input?.providerUrl,
+    endpoint: rawStorageInput?.endpoint ?? nestedS3Input?.endpoint,
+    region: rawStorageInput?.region ?? nestedS3Input?.region,
+    bucket: rawStorageInput?.bucket ?? nestedS3Input?.bucket,
+    accessKey: rawStorageInput?.accessKey ?? nestedS3Input?.accessKey,
+    secretKey: rawStorageInput?.secretKey ?? nestedS3Input?.secretKey,
+    prefix: rawStorageInput?.prefix ?? nestedS3Input?.prefix
+  };
 
   try {
     const mergedS3Config = normalizeS3Config({
