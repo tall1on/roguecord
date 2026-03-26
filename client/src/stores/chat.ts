@@ -150,10 +150,23 @@ export interface ServerStorageTestResult {
   message: string;
 }
 
+export type ServerStorageMigrationStatus = 'idle' | 'running' | 'failed';
+
+export interface ServerStorageMigrationState {
+  status: ServerStorageMigrationStatus;
+  target: 'data_dir' | 's3' | null;
+  total: number;
+  done: number;
+  message: string | null;
+  startedAt: string | null;
+  updatedAt: string | null;
+}
+
 export interface ServerStorageSettings {
   storageType: 'data_dir' | 's3';
   storageLastError: string | null;
   s3: ServerStorageS3Settings;
+  migration: ServerStorageMigrationState;
 }
 
 export interface ActiveMainPanel {
@@ -272,6 +285,15 @@ export const useChatStore = defineStore('chat', () => {
       accessKey: '',
       secretKey: '',
       prefix: ''
+    },
+    migration: {
+      status: 'idle',
+      target: null,
+      total: 0,
+      done: 0,
+      message: null,
+      startedAt: null,
+      updatedAt: null
     }
   });
   const lastError = ref<string | null>(null);
@@ -318,6 +340,38 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const uploadChunkSizeBytes = 8 * 1024 * 1024;
+
+  const normalizeServerStorageSettings = (payload: any): ServerStorageSettings => ({
+    storageType: payload.storageType === 's3' ? 's3' : 'data_dir',
+    storageLastError: typeof payload.storageLastError === 'string' ? payload.storageLastError : null,
+    s3: {
+      endpoint: payload?.s3?.endpoint || '',
+      region: payload?.s3?.region || '',
+      bucket: payload?.s3?.bucket || '',
+      accessKey: payload?.s3?.accessKey || '',
+      secretKey: payload?.s3?.secretKey || '',
+      prefix: payload?.s3?.prefix || ''
+    },
+    migration: {
+      status: payload?.storageMigrationStatus === 'running' || payload?.storageMigrationStatus === 'failed'
+        ? payload.storageMigrationStatus
+        : 'idle',
+      target: payload?.storageMigrationTarget === 's3' || payload?.storageMigrationTarget === 'data_dir'
+        ? payload.storageMigrationTarget
+        : null,
+      total: Number.isFinite(Number(payload?.storageMigrationTotal)) ? Math.max(0, Number(payload.storageMigrationTotal)) : 0,
+      done: Number.isFinite(Number(payload?.storageMigrationDone)) ? Math.max(0, Number(payload.storageMigrationDone)) : 0,
+      message: typeof payload?.storageMigrationMessage === 'string' && payload.storageMigrationMessage.trim()
+        ? payload.storageMigrationMessage
+        : null,
+      startedAt: typeof payload?.storageMigrationStartedAt === 'string' && payload.storageMigrationStartedAt.trim()
+        ? payload.storageMigrationStartedAt
+        : null,
+      updatedAt: typeof payload?.storageMigrationUpdatedAt === 'string' && payload.storageMigrationUpdatedAt.trim()
+        ? payload.storageMigrationUpdatedAt
+        : null
+    }
+  });
 
   const readBlobAsArrayBuffer = (blob: Blob) => {
     return new Promise<ArrayBuffer>((resolve, reject) => {
@@ -945,6 +999,15 @@ export const useChatStore = defineStore('chat', () => {
         accessKey: '',
         secretKey: '',
         prefix: ''
+      },
+      migration: {
+        status: 'idle',
+        target: null,
+        total: 0,
+        done: 0,
+        message: null,
+        startedAt: null,
+        updatedAt: null
       }
     };
   };
@@ -1221,18 +1284,11 @@ export const useChatStore = defineStore('chat', () => {
         break;
 
       case 'server_storage_settings':
-        serverStorageSettings.value = {
-          storageType: payload.storageType === 's3' ? 's3' : 'data_dir',
-          storageLastError: typeof payload.storageLastError === 'string' ? payload.storageLastError : null,
-          s3: {
-            endpoint: payload?.s3?.endpoint || '',
-            region: payload?.s3?.region || '',
-            bucket: payload?.s3?.bucket || '',
-            accessKey: payload?.s3?.accessKey || '',
-            secretKey: payload?.s3?.secretKey || '',
-            prefix: payload?.s3?.prefix || ''
-          }
-        };
+        serverStorageSettings.value = normalizeServerStorageSettings(payload);
+        break;
+
+      case 'server_storage_migration_progress':
+        serverStorageSettings.value = normalizeServerStorageSettings(payload);
         break;
 
       case 'server_storage_test_result': {

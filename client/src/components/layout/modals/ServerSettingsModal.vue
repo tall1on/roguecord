@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { useChatStore } from '../../../stores/chat'
+import { useChatStore, type ServerStorageSettings } from '../../../stores/chat'
 
 type ServerSettingsNavItem = {
   id: string
@@ -32,7 +32,7 @@ const form = defineModel<{
   }
 }>('form', { required: true })
 
-defineProps<{
+const props = defineProps<{
   activeSection: string
   navGroups: ServerSettingsNavGroup[]
   saveDisabled: boolean
@@ -41,6 +41,7 @@ defineProps<{
   s3TestMessage: string | null
   saveMessage: string | null
   saveError: string | null
+  storageSettings: ServerStorageSettings
   iconPreviewUrl: string | null
   iconError: string | null
   canRemoveIcon: boolean
@@ -58,6 +59,44 @@ const emit = defineEmits<{
 const chatStore = useChatStore()
 const textChannels = computed(() => chatStore.activeServerChannels.filter((c) => c.type === 'text'))
 const storageStatusLabel = computed(() => (form.value.storage.status === 's3' ? 'S3 enabled' : 'data-dir enabled'))
+const migration = computed(() => props.storageSettings.migration)
+const migrationVisible = computed(() => migration.value.status === 'running' || migration.value.status === 'failed')
+const migrationProgressPercent = computed(() => {
+  if (migration.value.total <= 0) {
+    return 0
+  }
+
+  return Math.min(100, Math.max(0, Math.round((migration.value.done / migration.value.total) * 100)))
+})
+const migrationStatusLabel = computed(() => {
+  if (migration.value.status === 'running') {
+    return 'Migration in progress'
+  }
+
+  if (migration.value.status === 'failed') {
+    return 'Migration failed'
+  }
+
+  return 'Migration idle'
+})
+const migrationStatusTone = computed(() => {
+  if (migration.value.status === 'failed') {
+    return 'border-rose-400/20 bg-rose-400/10'
+  }
+
+  return 'border-amber-400/20 bg-amber-400/10'
+})
+const migrationTargetLabel = computed(() => {
+  if (migration.value.target === 's3') {
+    return 'S3'
+  }
+
+  if (migration.value.target === 'data_dir') {
+    return 'data-dir'
+  }
+
+  return 'Unknown'
+})
 const iconFileInput = ref<HTMLInputElement | null>(null)
 
 const openIconPicker = () => {
@@ -230,6 +269,56 @@ const onIconInputChange = (event: Event) => {
               <p v-if="form.storage.lastError" class="mt-2 text-xs text-rose-300">
                 Last storage error: {{ form.storage.lastError }}
               </p>
+            </div>
+
+            <div
+              v-if="migrationVisible"
+              class="rounded-xl border p-5 shadow-sm"
+              :class="migrationStatusTone"
+            >
+              <div class="flex flex-col gap-4">
+                <div class="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                  <div>
+                    <p class="text-xs font-bold uppercase tracking-wider text-zinc-300">Storage migration</p>
+                    <p class="mt-1 text-sm font-semibold text-white">{{ migrationStatusLabel }}</p>
+                    <p class="mt-1 text-xs text-zinc-300/80">
+                      Target provider: <span class="font-semibold text-white">{{ migrationTargetLabel }}</span>
+                    </p>
+                  </div>
+                  <span class="inline-flex items-center rounded-full border border-white/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-white/90">
+                    {{ migration.status }}
+                  </span>
+                </div>
+
+                <div v-if="migration.total > 0" class="space-y-2">
+                  <div class="h-2 w-full overflow-hidden rounded-full border border-white/5 bg-zinc-950/80">
+                    <div
+                      class="h-full rounded-full transition-all duration-300"
+                      :class="migration.status === 'failed' ? 'bg-rose-400' : 'bg-indigo-500'"
+                      :style="{ width: `${migrationProgressPercent}%` }"
+                    />
+                  </div>
+                  <div class="flex items-center justify-between text-xs text-zinc-300/80">
+                    <span>{{ migration.done }} / {{ migration.total }} processed</span>
+                    <span>{{ migrationProgressPercent }}%</span>
+                  </div>
+                </div>
+
+                <div v-else class="flex items-center gap-3 rounded-lg bg-zinc-950/50 px-3 py-2 text-xs text-zinc-200">
+                  <span
+                    v-if="migration.status === 'running'"
+                    class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white/20 border-t-indigo-400"
+                  />
+                  <span>{{ migration.status === 'running' ? 'Preparing migration progress…' : 'Migration stopped before progress totals were available.' }}</span>
+                </div>
+
+                <p v-if="migration.message" class="text-xs text-zinc-100/90">
+                  {{ migration.message }}
+                </p>
+                <p v-if="migration.status === 'running'" class="text-xs text-zinc-300/80">
+                  The storage provider switch is still being applied. Keep using the current status above until migration finishes.
+                </p>
+              </div>
             </div>
 
             <div class="flex items-center justify-between bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm">

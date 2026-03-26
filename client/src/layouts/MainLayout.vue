@@ -604,6 +604,7 @@ onUnmounted(() => {
       :s3-test-message="s3ConnectionTestMessage"
       :save-message="serverSettingsSaveMessage"
       :save-error="serverSettingsSaveError"
+      :storage-settings="chatStore.serverStorageSettings"
       :icon-preview-url="serverIconPreviewUrl"
       :icon-error="serverIconError"
       :can-remove-icon="Boolean(serverIconPreviewUrl || chatStore.server?.iconPath)"

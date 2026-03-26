@@ -82,6 +82,13 @@ export interface ServerStorageSettings {
   s3: ServerS3Config | null;
   storageLastError: string | null;
   storageUpdatedAt: string | null;
+  storageMigrationStatus: 'idle' | 'running' | 'failed';
+  storageMigrationTarget: 'data_dir' | 's3' | null;
+  storageMigrationTotal: number;
+  storageMigrationDone: number;
+  storageMigrationMessage: string | null;
+  storageMigrationStartedAt: string | null;
+  storageMigrationUpdatedAt: string | null;
 }
 
 const mapServerRow = (row: any): Server => ({
@@ -111,7 +118,18 @@ const mapServerStorageSettings = (row: any): ServerStorageSettings => ({
     }
     : null,
   storageLastError: row.storage_last_error || null,
-  storageUpdatedAt: row.storage_updated_at || null
+  storageUpdatedAt: row.storage_updated_at || null,
+  storageMigrationStatus: row.storage_migration_status === 'running' || row.storage_migration_status === 'failed'
+    ? row.storage_migration_status
+    : 'idle',
+  storageMigrationTarget: row.storage_migration_target === 's3' || row.storage_migration_target === 'data_dir'
+    ? row.storage_migration_target
+    : null,
+  storageMigrationTotal: Number.isFinite(Number(row.storage_migration_total)) ? Number(row.storage_migration_total) : 0,
+  storageMigrationDone: Number.isFinite(Number(row.storage_migration_done)) ? Number(row.storage_migration_done) : 0,
+  storageMigrationMessage: row.storage_migration_message || null,
+  storageMigrationStartedAt: row.storage_migration_started_at || null,
+  storageMigrationUpdatedAt: row.storage_migration_updated_at || null
 });
 
 export const getServer = async (): Promise<Server | undefined> => {
@@ -198,6 +216,41 @@ export const updateServerStorageLastError = async (input: {
   await dbRun(
     'UPDATE servers SET storage_last_error = ?, storage_updated_at = CURRENT_TIMESTAMP WHERE id = ?',
     [input.storageLastError, input.serverId]
+  );
+};
+
+export const updateServerStorageMigrationState = async (input: {
+  serverId: string;
+  status: 'idle' | 'running' | 'failed';
+  target: 'data_dir' | 's3' | null;
+  total: number;
+  done: number;
+  message: string | null;
+  startedAt: string | null;
+}): Promise<void> => {
+  await dbRun(
+    `
+      UPDATE servers
+      SET
+        storage_migration_status = ?,
+        storage_migration_target = ?,
+        storage_migration_total = ?,
+        storage_migration_done = ?,
+        storage_migration_message = ?,
+        storage_migration_started_at = ?,
+        storage_migration_updated_at = CURRENT_TIMESTAMP,
+        storage_updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `,
+    [
+      input.status,
+      input.target,
+      Math.max(0, Math.floor(input.total)),
+      Math.max(0, Math.floor(input.done)),
+      input.message,
+      input.startedAt,
+      input.serverId
+    ]
   );
 };
 
@@ -573,6 +626,10 @@ export interface MessageAttachment {
   created_at: string;
 }
 
+export interface MessageAttachmentWithChannel extends MessageAttachment {
+  channel_id: string;
+}
+
 export interface MessageWithUser extends Message {
   user: User;
 }
@@ -901,6 +958,42 @@ export const getMessageAttachments = async (messageIds: string[]): Promise<Recor
   }, {});
 };
 
+export const getAllMessageAttachments = async (): Promise<MessageAttachmentWithChannel[]> => {
+  try {
+    return await dbAll<MessageAttachmentWithChannel>(
+      `
+        SELECT a.*, m.channel_id
+        FROM message_attachments a
+        INNER JOIN messages m ON m.id = a.message_id
+        ORDER BY a.created_at ASC, a.id ASC
+      `
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key')) {
+      throw error;
+    }
+
+    return await dbAll<MessageAttachmentWithChannel>(
+      `
+        SELECT
+          a.id,
+          a.message_id,
+          a.original_name,
+          a.storage_name,
+          'data_dir' AS storage_provider,
+          NULL AS storage_key,
+          a.mime_type,
+          a.size_bytes,
+          a.created_at,
+          m.channel_id
+        FROM message_attachments a
+        INNER JOIN messages m ON m.id = a.message_id
+        ORDER BY a.created_at ASC, a.id ASC
+      `
+    );
+  }
+};
+
 export const getMessageById = async (id: string): Promise<Message | undefined> => {
   const message = await dbGet<Omit<Message, 'reactions'>>('SELECT * FROM messages WHERE id = ?', [id]);
   if (!message) return undefined;
@@ -910,6 +1003,28 @@ export const getMessageById = async (id: string): Promise<Message | undefined> =
 
 export const deleteMessageAttachmentById = async (id: string): Promise<void> => {
   await dbRun('DELETE FROM message_attachments WHERE id = ?', [id]);
+};
+
+export const updateMessageAttachmentStorage = async (input: {
+  attachmentId: string;
+  storageProvider: 'data_dir' | 's3';
+  storageKey: string | null;
+}): Promise<void> => {
+  try {
+    await dbRun(
+      `
+        UPDATE message_attachments
+        SET storage_provider = ?,
+            storage_key = ?
+        WHERE id = ?
+      `,
+      [input.storageProvider, input.storageKey, input.attachmentId]
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key')) {
+      throw error;
+    }
+  }
 };
 
 export const deleteMessageById = async (id: string): Promise<void> => {
