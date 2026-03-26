@@ -55,6 +55,8 @@ const s3ConnectionTestMessage = ref<string | null>(null)
 const s3LastSuccessfulFingerprint = ref<string | null>(null)
 const serverSettingsSaveMessage = ref<string | null>(null)
 const serverSettingsSaveError = ref<string | null>(null)
+const serverSettingsStorageSavePending = ref(false)
+const serverSettingsStorageMigrationLock = ref(false)
 const serverIconDataUrl = ref<string | null>(null)
 const removeServerIcon = ref(false)
 const serverIconPreviewUrl = ref<string | null>(null)
@@ -167,6 +169,36 @@ const hasServerSettingsChanges = computed(() =>
   removeServerIcon.value
 )
 
+const isStorageModeSwitchPending = computed(() => {
+  const currentStorageType = chatStore.serverStorageSettings.storageType
+  const nextStorageType = serverSettingsForm.value.storage.enabled ? 's3' : 'data_dir'
+  return hasStorageSettingsChanges.value && currentStorageType !== nextStorageType
+})
+
+const isServerSettingsStorageLocked = computed(() =>
+  serverSettingsStorageSavePending.value ||
+  serverSettingsStorageMigrationLock.value ||
+  chatStore.serverStorageSettings.migration.status === 'running'
+)
+
+const serverSettingsSaveDisabled = computed(() => !canSaveServerSettings.value || isServerSettingsStorageLocked.value)
+
+const serverSettingsSaveButtonLabel = computed(() => {
+  if (serverSettingsStorageSavePending.value) {
+    return 'Saving storage changes...'
+  }
+
+  if (chatStore.serverStorageSettings.migration.status === 'running') {
+    return 'Storage migration running...'
+  }
+
+  if (serverSettingsStorageMigrationLock.value) {
+    return 'Waiting for migration status...'
+  }
+
+  return 'Save Changes'
+})
+
 const canSaveServerSettings = computed(() => {
   if (!hasStorageSettingsChanges.value) {
     return true
@@ -178,6 +210,11 @@ const canSaveServerSettings = computed(() => {
 
   return s3ConnectionTestState.value === 'success' && s3LastSuccessfulFingerprint.value === getCurrentStorageFingerprint()
 })
+
+const resetServerSettingsStorageLock = () => {
+  serverSettingsStorageSavePending.value = false
+  serverSettingsStorageMigrationLock.value = false
+}
 
 const login = () => {
   if (usernameInput.value.trim()) {
@@ -255,6 +292,10 @@ const saveServerSettings = () => {
     return
   }
 
+  if (isServerSettingsStorageLocked.value) {
+    return
+  }
+
   serverSettingsSaveError.value = null
   serverSettingsSaveMessage.value = null
 
@@ -273,6 +314,11 @@ const saveServerSettings = () => {
   if (nextStoragePayload && !canSaveServerSettings.value) {
     serverSettingsSaveError.value = 'Run a successful S3 connection test before saving.'
     return
+  }
+
+  if (isStorageModeSwitchPending.value) {
+    serverSettingsStorageSavePending.value = true
+    serverSettingsStorageMigrationLock.value = true
   }
 
   chatStore.updateServerSettings(
@@ -346,12 +392,21 @@ const handleChatStoreMessage = (message: any) => {
   if (message.type === 'server_settings_updated' || message.type === 'SERVER_UPDATED') {
     serverSettingsSaveMessage.value = 'Settings saved.'
     serverSettingsSaveError.value = null
+
+    if (serverSettingsStorageSavePending.value) {
+      serverSettingsStorageSavePending.value = false
+    }
+
     return
   }
 
   if (message.type === 'error') {
     serverSettingsSaveError.value = message.payload?.message || 'Failed to save settings'
     serverSettingsSaveMessage.value = null
+
+    if (serverSettingsStorageSavePending.value) {
+      resetServerSettingsStorageLock()
+    }
   }
 }
 
@@ -449,6 +504,7 @@ watch(showServerSettingsModal, (newVal) => {
     s3LastSuccessfulFingerprint.value = null
     serverSettingsSaveMessage.value = null
     serverSettingsSaveError.value = null
+    resetServerSettingsStorageLock()
   }
 })
 
@@ -467,6 +523,16 @@ watch(
     serverSettingsForm.value.storage.accessKey = storageSettings.s3.accessKey
     serverSettingsForm.value.storage.secretKey = storageSettings.s3.secretKey
     serverSettingsForm.value.storage.prefix = storageSettings.s3.prefix
+
+    if (storageSettings.migration.status === 'running') {
+      serverSettingsStorageSavePending.value = false
+      serverSettingsStorageMigrationLock.value = true
+      return
+    }
+
+    if (serverSettingsStorageMigrationLock.value) {
+      serverSettingsStorageMigrationLock.value = false
+    }
   },
   { deep: true }
 )
@@ -598,13 +664,15 @@ onUnmounted(() => {
       v-model:form="serverSettingsForm"
       :active-section="activeServerSettingsSection"
       :nav-groups="serverSettingsNavGroups"
-      :save-disabled="!canSaveServerSettings"
+      :save-disabled="serverSettingsSaveDisabled"
+      :save-label="serverSettingsSaveButtonLabel"
       :has-unsaved-changes="hasServerSettingsChanges"
       :s3-test-state="s3ConnectionTestState"
       :s3-test-message="s3ConnectionTestMessage"
       :save-message="serverSettingsSaveMessage"
       :save-error="serverSettingsSaveError"
       :storage-settings="chatStore.serverStorageSettings"
+      :storage-locked="isServerSettingsStorageLocked"
       :icon-preview-url="serverIconPreviewUrl"
       :icon-error="serverIconError"
       :can-remove-icon="Boolean(serverIconPreviewUrl || chatStore.server?.iconPath)"

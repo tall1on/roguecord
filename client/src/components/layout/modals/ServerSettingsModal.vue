@@ -36,12 +36,14 @@ const props = defineProps<{
   activeSection: string
   navGroups: ServerSettingsNavGroup[]
   saveDisabled: boolean
+  saveLabel: string
   hasUnsavedChanges: boolean
   s3TestState: 'idle' | 'testing' | 'success' | 'error'
   s3TestMessage: string | null
   saveMessage: string | null
   saveError: string | null
   storageSettings: ServerStorageSettings
+  storageLocked: boolean
   iconPreviewUrl: string | null
   iconError: string | null
   canRemoveIcon: boolean
@@ -96,6 +98,17 @@ const migrationTargetLabel = computed(() => {
   }
 
   return 'Unknown'
+})
+const storageLockMessage = computed(() => {
+  if (props.storageSettings.migration.status === 'running') {
+    return 'Storage mode is switching. Save is disabled until the migration finishes.'
+  }
+
+  if (props.storageLocked) {
+    return 'Storage change is being applied. Wait for migration status before saving again.'
+  }
+
+  return null
 })
 const iconFileInput = ref<HTMLInputElement | null>(null)
 
@@ -326,8 +339,8 @@ const onIconInputChange = (event: Event) => {
                 <p class="text-sm font-semibold text-white">Enable S3 storage for new uploads</p>
                 <p class="text-xs text-zinc-500">When enabled and valid, new files are uploaded to S3 instead of data-dir.</p>
               </div>
-              <label class="inline-flex items-center cursor-pointer">
-                <input v-model="form.storage.enabled" type="checkbox" class="sr-only" />
+              <label class="inline-flex items-center" :class="props.storageLocked ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'">
+                <input v-model="form.storage.enabled" type="checkbox" class="sr-only" :disabled="props.storageLocked" />
                 <span class="h-6 w-11 rounded-full transition-colors" :class="form.storage.enabled ? 'bg-indigo-600' : 'bg-zinc-700'">
                   <span
                     class="block h-5 w-5 rounded-full bg-white transition-transform mt-0.5"
@@ -359,6 +372,7 @@ const onIconInputChange = (event: Event) => {
                   v-model="form.storage.endpoint"
                   type="text"
                   class="w-full bg-zinc-950 text-white rounded-lg p-2.5 outline-none border border-white/10 focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50"
+                  :disabled="props.storageLocked"
                   placeholder="https://my-bucket.nbg1.your-objectstorage.com"
                 />
               </div>
@@ -369,6 +383,7 @@ const onIconInputChange = (event: Event) => {
                   v-model="form.storage.prefix"
                   type="text"
                   class="w-full bg-zinc-950 text-white rounded-lg p-2.5 outline-none border border-white/10 focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50"
+                  :disabled="props.storageLocked"
                   placeholder="guild-a"
                 />
               </div>
@@ -379,6 +394,7 @@ const onIconInputChange = (event: Event) => {
                   v-model="form.storage.accessKey"
                   type="text"
                   class="w-full bg-zinc-950 text-white rounded-lg p-2.5 outline-none border border-white/10 focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50"
+                  :disabled="props.storageLocked"
                   autocomplete="off"
                 />
               </div>
@@ -389,6 +405,7 @@ const onIconInputChange = (event: Event) => {
                   v-model="form.storage.secretKey"
                   type="password"
                   class="w-full bg-zinc-950 text-white rounded-lg p-2.5 outline-none border border-white/10 focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50"
+                  :disabled="props.storageLocked"
                   autocomplete="new-password"
                 />
               </div>
@@ -396,7 +413,7 @@ const onIconInputChange = (event: Event) => {
               <div class="md:col-span-2 flex items-center gap-3">
                 <button
                   class="bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-700 disabled:text-zinc-300 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
-                  :disabled="s3TestState === 'testing'"
+                  :disabled="s3TestState === 'testing' || props.storageLocked"
                   @click="emit('test-storage')"
                 >
                   {{ s3TestState === 'testing' ? 'Testing...' : 'Test Connection' }}
@@ -413,6 +430,7 @@ const onIconInputChange = (event: Event) => {
 
             <p v-if="saveError" class="text-sm text-rose-300">{{ saveError }}</p>
             <p v-if="saveMessage" class="text-sm text-emerald-300">{{ saveMessage }}</p>
+            <p v-if="storageLockMessage" class="text-sm text-amber-200">{{ storageLockMessage }}</p>
           </div>
         </div>
 
@@ -430,7 +448,7 @@ const onIconInputChange = (event: Event) => {
               :disabled="saveDisabled"
               @click="emit('save')"
             >
-              Save Changes
+              {{ saveLabel }}
             </button>
           </div>
         </div>
