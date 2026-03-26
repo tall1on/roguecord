@@ -54,7 +54,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { dataDir } from '../db';
 import {
+  buildS3ManagedFilesPrefix,
   buildS3StorageKey,
+  clearS3KeysByPrefix,
+  deleteS3Keys,
   deleteFileFromS3,
   downloadFileFromS3,
   listS3KeysByPrefix,
@@ -599,6 +602,27 @@ type StorageMigrationProgressState = {
   startedAt: string;
 };
 
+type ManagedStorageRecord = {
+  kind: 'folder_file' | 'message_attachment';
+  id: string;
+  channelId: string;
+  storageName: string;
+  mimeType: string | null;
+  storageProvider: 'data_dir' | 's3';
+  storageKey: string | null;
+  migratedToS3At: string | null;
+};
+
+type ManagedStorageMigrationResult = {
+  progress: StorageMigrationProgressState;
+  migratedRecordIds: string[];
+};
+
+type ManagedStorageMigrationCheckpoint = {
+  record: ManagedStorageRecord;
+  targetStorageKey: string | null;
+};
+
 const broadcastServerStorageSettings = async () => {
   const settings = await getServerStorageSettings();
   connectionManager.broadcastToAuthenticated({
@@ -642,6 +666,209 @@ const incrementMigrationProgress = async (
 ) => {
   progress.done += 1;
   await persistMigrationProgress(serverId, target, progress, null, 'running');
+};
+
+const mapFolderFileToManagedRecord = (file: Awaited<ReturnType<typeof getAllFolderChannelFiles>>[number]): ManagedStorageRecord => ({
+  kind: 'folder_file',
+  id: file.id,
+  channelId: file.channel_id,
+  storageName: file.storage_name,
+  mimeType: file.mime_type || null,
+  storageProvider: file.storage_provider,
+  storageKey: file.storage_key,
+  migratedToS3At: file.migrated_to_s3_at || null
+});
+
+const mapAttachmentToManagedRecord = (attachment: Awaited<ReturnType<typeof getAllMessageAttachments>>[number]): ManagedStorageRecord => ({
+  kind: 'message_attachment',
+  id: attachment.id,
+  channelId: attachment.channel_id,
+  storageName: attachment.storage_name,
+  mimeType: attachment.mime_type || null,
+  storageProvider: attachment.storage_provider,
+  storageKey: attachment.storage_key,
+  migratedToS3At: null
+});
+
+const updateManagedStorageRecord = async (record: ManagedStorageRecord) => {
+  if (record.kind === 'folder_file') {
+    await updateFolderChannelFileStorage({
+      fileId: record.id,
+      storageProvider: record.storageProvider,
+      storageKey: record.storageKey,
+      migratedToS3At: record.migratedToS3At
+    });
+    return;
+  }
+
+  await updateMessageAttachmentStorage({
+    attachmentId: record.id,
+    storageProvider: record.storageProvider,
+    storageKey: record.storageKey
+  });
+};
+
+const listManagedStorageRecords = async (): Promise<ManagedStorageRecord[]> => {
+  const folderFiles = await getAllFolderChannelFiles();
+  const attachments = await getAllMessageAttachments();
+  return [
+    ...folderFiles.map(mapFolderFileToManagedRecord),
+    ...attachments.map(mapAttachmentToManagedRecord)
+  ];
+};
+
+const clearManagedLocalFilesArea = () => {
+  ensureFilesRootDir();
+  if (!fs.existsSync(filesRootDir)) {
+    return;
+  }
+
+  for (const entry of fs.readdirSync(filesRootDir, { withFileTypes: true })) {
+    const fullPath = path.join(filesRootDir, entry.name);
+    fs.rmSync(fullPath, { recursive: true, force: true });
+  }
+};
+
+const clearManagedS3FilesArea = async (s3Config: S3StorageConfig) => {
+  return clearS3KeysByPrefix({
+    config: s3Config,
+    prefix: buildS3ManagedFilesPrefix(s3Config.prefix)
+  });
+};
+
+const rollbackManagedStorageMigration = async (input: {
+  target: StorageMigrationTarget;
+  s3Config: S3StorageConfig;
+  checkpoints: ManagedStorageMigrationCheckpoint[];
+  clearedTargetS3Keys: string[];
+}) => {
+  if (input.target === 'data_dir') {
+    clearManagedLocalFilesArea();
+  }
+
+  for (let index = input.checkpoints.length - 1; index >= 0; index -= 1) {
+    const checkpoint = input.checkpoints[index];
+    const previous = checkpoint.record;
+    const localPath = resolveSafeStoredFilePath(previous.channelId, previous.storageName);
+
+    if (input.target === 's3') {
+      if (checkpoint.targetStorageKey) {
+        try {
+          const buffer = await downloadFileFromS3({ config: input.s3Config, key: checkpoint.targetStorageKey });
+          ensureChannelFilesDir(previous.channelId);
+          fs.writeFileSync(localPath, buffer);
+        } finally {
+          await deleteS3Keys({ config: input.s3Config, keys: [checkpoint.targetStorageKey] });
+        }
+      }
+      await updateManagedStorageRecord(previous);
+      continue;
+    }
+
+    if (!previous.storageKey) {
+      throw new Error(`Rollback missing original S3 key for ${previous.kind} ${previous.id}`);
+    }
+
+    if (!fs.existsSync(localPath)) {
+      throw new Error(`Rollback missing staged local file for ${previous.kind} ${previous.id}`);
+    }
+
+    const buffer = fs.readFileSync(localPath);
+    await uploadFileToS3({
+      config: input.s3Config,
+      key: previous.storageKey,
+      buffer,
+      mimeType: previous.mimeType
+    });
+    fs.unlinkSync(localPath);
+    await updateManagedStorageRecord(previous);
+  }
+
+  if (input.target === 's3' && input.clearedTargetS3Keys.length > 0) {
+    const recordsByKey = new Map<string, ManagedStorageRecord>();
+    for (const checkpoint of input.checkpoints) {
+      if (checkpoint.targetStorageKey) {
+        recordsByKey.set(checkpoint.targetStorageKey, checkpoint.record);
+      }
+    }
+
+    for (const key of input.clearedTargetS3Keys) {
+      const originalRecord = recordsByKey.get(key);
+      if (!originalRecord) {
+        continue;
+      }
+
+      const localPath = resolveSafeStoredFilePath(originalRecord.channelId, originalRecord.storageName);
+      if (!fs.existsSync(localPath)) {
+        continue;
+      }
+
+      const buffer = fs.readFileSync(localPath);
+      await uploadFileToS3({
+        config: input.s3Config,
+        key,
+        buffer,
+        mimeType: originalRecord.mimeType
+      });
+    }
+  }
+};
+
+const migrateManagedStorageRecord = async (record: ManagedStorageRecord, target: StorageMigrationTarget, s3Config: S3StorageConfig): Promise<ManagedStorageMigrationCheckpoint | null> => {
+  if (target === 's3') {
+    if (record.storageProvider === 's3' && record.storageKey) {
+      return null;
+    }
+
+    const sourcePath = resolveSafeStoredFilePath(record.channelId, record.storageName);
+    if (!fs.existsSync(sourcePath)) {
+      throw new Error(`Missing local managed file source for ${record.kind} ${record.id}`);
+    }
+
+    const buffer = fs.readFileSync(sourcePath);
+    const targetStorageKey = buildS3StorageKey(s3Config.prefix, record.channelId, record.storageName);
+    await uploadFileToS3({
+      config: s3Config,
+      key: targetStorageKey,
+      buffer,
+      mimeType: record.mimeType
+    });
+
+    await updateManagedStorageRecord({
+      ...record,
+      storageProvider: 's3',
+      storageKey: targetStorageKey,
+      migratedToS3At: record.kind === 'folder_file' ? new Date().toISOString() : record.migratedToS3At
+    });
+
+    return {
+      record,
+      targetStorageKey
+    };
+  }
+
+  if (record.storageProvider === 'data_dir') {
+    return null;
+  }
+  if (!record.storageKey) {
+    throw new Error(`Missing S3 storage key for ${record.kind} ${record.id}`);
+  }
+
+  const targetPath = resolveSafeStoredFilePath(record.channelId, record.storageName);
+  ensureChannelFilesDir(record.channelId);
+  const buffer = await downloadFileFromS3({ config: s3Config, key: record.storageKey });
+  fs.writeFileSync(targetPath, buffer);
+  await updateManagedStorageRecord({
+    ...record,
+    storageProvider: 'data_dir',
+    storageKey: null,
+    migratedToS3At: record.kind === 'folder_file' ? null : record.migratedToS3At
+  });
+
+  return {
+    record,
+    targetStorageKey: null
+  };
 };
 
 const migrateFolderFileToS3 = async (file: Awaited<ReturnType<typeof getAllFolderChannelFiles>>[number], s3Config: S3StorageConfig) => {
@@ -762,37 +989,59 @@ const runStorageMigration = async (input: {
   serverId: string;
   target: StorageMigrationTarget;
   s3Config: S3StorageConfig;
-}) => {
+}): Promise<ManagedStorageMigrationResult> => {
   const startedAt = new Date().toISOString();
-  const folderFiles = await getAllFolderChannelFiles();
-  const attachments = await getAllMessageAttachments();
+  const records = await listManagedStorageRecords();
   const progress: StorageMigrationProgressState = {
-    total: folderFiles.length + attachments.length,
+    total: records.length,
     done: 0,
     startedAt
   };
+  const checkpoints: ManagedStorageMigrationCheckpoint[] = [];
+  let clearedTargetS3Keys: string[] = [];
 
   await persistMigrationProgress(input.serverId, input.target, progress, null, 'running');
 
-  for (const file of folderFiles) {
-    if (input.target === 's3') {
-      await migrateFolderFileToS3(file, input.s3Config);
-    } else {
-      await migrateFolderFileToDataDir(file, input.s3Config);
-    }
-    await incrementMigrationProgress(input.serverId, input.target, progress);
+  if (input.target === 's3') {
+    clearedTargetS3Keys = await clearManagedS3FilesArea(input.s3Config);
+  } else {
+    clearManagedLocalFilesArea();
   }
 
-  for (const attachment of attachments) {
-    if (input.target === 's3') {
-      await migrateMessageAttachmentToS3(attachment, input.s3Config);
-    } else {
-      await migrateMessageAttachmentToDataDir(attachment, input.s3Config);
+  try {
+    for (const record of records) {
+      const checkpoint = await migrateManagedStorageRecord(record, input.target, input.s3Config);
+      if (checkpoint) {
+        checkpoints.push(checkpoint);
+      }
+      await incrementMigrationProgress(input.serverId, input.target, progress);
     }
-    await incrementMigrationProgress(input.serverId, input.target, progress);
+  } catch (error) {
+    await rollbackManagedStorageMigration({
+      target: input.target,
+      s3Config: input.s3Config,
+      checkpoints,
+      clearedTargetS3Keys
+    });
+    throw error;
   }
 
-  return progress;
+  if (input.target === 's3') {
+    clearManagedLocalFilesArea();
+  } else {
+    const migratedSourceKeys = checkpoints
+      .map((checkpoint) => checkpoint.record.storageKey)
+      .filter((key): key is string => Boolean(key));
+    await deleteS3Keys({
+      config: input.s3Config,
+      keys: migratedSourceKeys
+    });
+  }
+
+  return {
+    progress,
+    migratedRecordIds: checkpoints.map((checkpoint) => checkpoint.record.id)
+  };
 };
 
 export const handleMessage = async (client: ClientConnection, messageStr: string) => {
@@ -2557,7 +2806,7 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
         await broadcastServerStorageSettings();
 
         try {
-          const progress = await runStorageMigration({ serverId, target: 's3', s3Config: mergedS3Config });
+          const migrationResult = await runStorageMigration({ serverId, target: 's3', s3Config: mergedS3Config });
           await updateServerStorageSettings({
             serverId,
             storageType: 's3',
@@ -2573,8 +2822,8 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
             serverId,
             status: 'idle',
             target: null,
-            total: progress.total,
-            done: progress.done,
+            total: migrationResult.progress.total,
+            done: migrationResult.progress.done,
             message: null,
             startedAt: null
           });
@@ -2617,7 +2866,7 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
           await broadcastServerStorageSettings();
 
           try {
-            const progress = await runStorageMigration({ serverId, target: 'data_dir', s3Config: currentS3Config });
+            const migrationResult = await runStorageMigration({ serverId, target: 'data_dir', s3Config: currentS3Config });
             await updateServerStorageSettings({
               serverId,
               storageType: 'data_dir',
@@ -2633,8 +2882,8 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
               serverId,
               status: 'idle',
               target: null,
-              total: progress.total,
-              done: progress.done,
+              total: migrationResult.progress.total,
+              done: migrationResult.progress.done,
               message: null,
               startedAt: null
             });

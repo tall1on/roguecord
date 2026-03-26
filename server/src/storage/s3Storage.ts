@@ -416,6 +416,11 @@ export const buildS3StorageKey = (prefix: string | null | undefined, channelId: 
   return normalizedPrefix ? `${normalizedPrefix}/${keyWithoutPrefix}` : keyWithoutPrefix;
 };
 
+export const buildS3ManagedFilesPrefix = (prefix: string | null | undefined) => {
+  const normalizedPrefix = normalizePrefix(prefix);
+  return normalizedPrefix ? `${normalizedPrefix}/channels/` : 'channels/';
+};
+
 export const validateS3Configuration = async (config: S3StorageConfig): Promise<{ ok: true } | { ok: false; message: string }> => {
   let normalized: S3StorageConfig;
   let resolved: ResolvedS3Config;
@@ -487,6 +492,39 @@ export const uploadFileToS3 = async (input: {
     Body: input.buffer,
     ContentType: input.mimeType || 'application/octet-stream'
   }));
+};
+
+export const deleteS3Keys = async (input: {
+  config: S3StorageConfig;
+  keys: string[];
+}) => {
+  const uniqueKeys = Array.from(new Set((input.keys || []).map((key) => (key || '').trim()).filter(Boolean)));
+  for (const key of uniqueKeys) {
+    await deleteFileFromS3({
+      config: input.config,
+      key
+    });
+  }
+};
+
+export const clearS3KeysByPrefix = async (input: {
+  config: S3StorageConfig;
+  prefix: string;
+}) => {
+  const keys = await listS3KeysByPrefix({
+    config: input.config,
+    prefix: input.prefix
+  });
+  if (!keys.length) {
+    return [];
+  }
+
+  await deleteS3Keys({
+    config: input.config,
+    keys
+  });
+
+  return keys;
 };
 
 export const uploadFilePathToS3Multipart = async (input: {
