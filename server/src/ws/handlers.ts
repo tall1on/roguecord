@@ -718,6 +718,17 @@ type ManagedStorageMigrationCheckpoint = {
   targetStorageKey: string | null;
 };
 
+const areS3ConfigsEquivalent = (left: S3StorageConfig, right: S3StorageConfig) => {
+  return left.provider === right.provider
+    && (left.providerUrl || '') === (right.providerUrl || '')
+    && left.endpoint === right.endpoint
+    && left.region === right.region
+    && left.bucket === right.bucket
+    && left.accessKey === right.accessKey
+    && left.secretKey === right.secretKey
+    && (left.prefix || '') === (right.prefix || '');
+};
+
 const broadcastServerStorageSettings = async () => {
   const settings = await getServerStorageSettings();
   connectionManager.broadcastToAuthenticated({
@@ -909,10 +920,47 @@ const rollbackManagedStorageMigration = async (input: {
   }
 };
 
-const migrateManagedStorageRecord = async (record: ManagedStorageRecord, target: StorageMigrationTarget, s3Config: S3StorageConfig): Promise<ManagedStorageMigrationCheckpoint | null> => {
+const migrateManagedStorageRecord = async (input: {
+  record: ManagedStorageRecord;
+  target: StorageMigrationTarget;
+  sourceS3Config: S3StorageConfig | null;
+  targetS3Config: S3StorageConfig | null;
+}): Promise<ManagedStorageMigrationCheckpoint | null> => {
+  const { record, target, sourceS3Config, targetS3Config } = input;
   if (target === 's3') {
+    if (!targetS3Config) {
+      throw new Error('Missing target S3 configuration for storage migration');
+    }
+
     if (record.storageProvider === 's3' && record.storageKey) {
-      return null;
+      if (sourceS3Config && areS3ConfigsEquivalent(sourceS3Config, targetS3Config)) {
+        return null;
+      }
+
+      if (!sourceS3Config) {
+        throw new Error(`Missing source S3 configuration for ${record.kind} ${record.id}`);
+      }
+
+      const buffer = await downloadFileFromS3({ config: sourceS3Config, key: record.storageKey });
+      const targetStorageKey = buildS3StorageKey(targetS3Config.prefix, record.channelId, record.storageName);
+      await uploadFileToS3({
+        config: targetS3Config,
+        key: targetStorageKey,
+        buffer,
+        mimeType: record.mimeType
+      });
+
+      await updateManagedStorageRecord({
+        ...record,
+        storageProvider: 's3',
+        storageKey: targetStorageKey,
+        migratedToS3At: record.kind === 'folder_file' ? new Date().toISOString() : record.migratedToS3At
+      });
+
+      return {
+        record,
+        targetStorageKey
+      };
     }
 
     const sourcePath = resolveSafeStoredFilePath(record.channelId, record.storageName);
@@ -921,9 +969,9 @@ const migrateManagedStorageRecord = async (record: ManagedStorageRecord, target:
     }
 
     const buffer = fs.readFileSync(sourcePath);
-    const targetStorageKey = buildS3StorageKey(s3Config.prefix, record.channelId, record.storageName);
+    const targetStorageKey = buildS3StorageKey(targetS3Config.prefix, record.channelId, record.storageName);
     await uploadFileToS3({
-      config: s3Config,
+      config: targetS3Config,
       key: targetStorageKey,
       buffer,
       mimeType: record.mimeType
@@ -948,10 +996,13 @@ const migrateManagedStorageRecord = async (record: ManagedStorageRecord, target:
   if (!record.storageKey) {
     throw new Error(`Missing S3 storage key for ${record.kind} ${record.id}`);
   }
+  if (!sourceS3Config) {
+    throw new Error(`Missing source S3 configuration for ${record.kind} ${record.id}`);
+  }
 
   const targetPath = resolveSafeStoredFilePath(record.channelId, record.storageName);
   ensureChannelFilesDir(record.channelId);
-  const buffer = await downloadFileFromS3({ config: s3Config, key: record.storageKey });
+  const buffer = await downloadFileFromS3({ config: sourceS3Config, key: record.storageKey });
   fs.writeFileSync(targetPath, buffer);
   await updateManagedStorageRecord({
     ...record,
@@ -1083,7 +1134,8 @@ const migrateMessageAttachmentToDataDir = async (attachment: Awaited<ReturnType<
 const runStorageMigration = async (input: {
   serverId: string;
   target: StorageMigrationTarget;
-  s3Config: S3StorageConfig;
+  sourceS3Config: S3StorageConfig | null;
+  targetS3Config: S3StorageConfig | null;
 }): Promise<ManagedStorageMigrationResult> => {
   const startedAt = new Date().toISOString();
   const records = await listManagedStorageRecords();
@@ -1098,14 +1150,22 @@ const runStorageMigration = async (input: {
   await persistMigrationProgress(input.serverId, input.target, progress, null, 'running');
 
   if (input.target === 's3') {
-    clearedTargetS3Keys = await clearManagedS3FilesArea(input.s3Config);
+    if (!input.targetS3Config) {
+      throw new Error('Missing target S3 configuration for storage migration');
+    }
+    clearedTargetS3Keys = await clearManagedS3FilesArea(input.targetS3Config);
   } else {
     clearManagedLocalFilesArea();
   }
 
   try {
     for (const record of records) {
-      const checkpoint = await migrateManagedStorageRecord(record, input.target, input.s3Config);
+      const checkpoint = await migrateManagedStorageRecord({
+        record,
+        target: input.target,
+        sourceS3Config: input.sourceS3Config,
+        targetS3Config: input.targetS3Config
+      });
       if (checkpoint) {
         checkpoints.push(checkpoint);
       }
@@ -1114,7 +1174,9 @@ const runStorageMigration = async (input: {
   } catch (error) {
     await rollbackManagedStorageMigration({
       target: input.target,
-      s3Config: input.s3Config,
+      s3Config: input.target === 's3'
+        ? input.targetS3Config as S3StorageConfig
+        : input.sourceS3Config as S3StorageConfig,
       checkpoints,
       clearedTargetS3Keys
     });
@@ -1128,7 +1190,7 @@ const runStorageMigration = async (input: {
       .map((checkpoint) => checkpoint.record.storageKey)
       .filter((key): key is string => Boolean(key));
     await deleteS3Keys({
-      config: input.s3Config,
+      config: input.sourceS3Config as S3StorageConfig,
       keys: migratedSourceKeys
     });
   }
@@ -2934,7 +2996,12 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
         await broadcastServerStorageSettings();
 
         try {
-          const migrationResult = await runStorageMigration({ serverId, target: 's3', s3Config: mergedS3Config });
+          const migrationResult = await runStorageMigration({
+            serverId,
+            target: 's3',
+            sourceS3Config: currentStorageType === 's3' ? normalizeS3Config(currentS3 || {}) : null,
+            targetS3Config: mergedS3Config
+          });
           await updateServerStorageSettings({
             serverId,
             storageType: 's3',
@@ -2997,7 +3064,12 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
           await broadcastServerStorageSettings();
 
           try {
-            const migrationResult = await runStorageMigration({ serverId, target: 'data_dir', s3Config: currentS3Config });
+            const migrationResult = await runStorageMigration({
+              serverId,
+              target: 'data_dir',
+              sourceS3Config: currentS3Config,
+              targetS3Config: null
+            });
             await updateServerStorageSettings({
               serverId,
               storageType: 'data_dir',
