@@ -68,6 +68,8 @@ export interface Server {
 }
 
 export interface ServerS3Config {
+  provider: 'generic_s3' | 'cloudflare_r2';
+  providerUrl: string | null;
   endpoint: string;
   region: string;
   bucket: string;
@@ -109,6 +111,8 @@ const mapServerStorageSettings = (row: any): ServerStorageSettings => ({
   storageType: row.storage_type === 's3' ? 's3' : 'data_dir',
   s3: row.s3_endpoint && row.s3_region && row.s3_bucket && row.s3_access_key && row.s3_secret_key
     ? {
+      provider: row.storage_provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3',
+      providerUrl: row.storage_provider_url || null,
       endpoint: row.s3_endpoint,
       region: row.s3_region,
       bucket: row.s3_bucket,
@@ -172,6 +176,8 @@ export const getServerStorageSettings = async (): Promise<ServerStorageSettings 
 export const updateServerStorageSettings = async (input: {
   serverId: string;
   storageType: 'data_dir' | 's3';
+  storageProvider: 'generic_s3' | 'cloudflare_r2';
+  storageProviderUrl: string | null;
   s3Endpoint: string | null;
   s3Region: string | null;
   s3Bucket: string | null;
@@ -185,6 +191,8 @@ export const updateServerStorageSettings = async (input: {
       UPDATE servers
       SET
         storage_type = ?,
+        storage_provider = ?,
+        storage_provider_url = ?,
         s3_endpoint = ?,
         s3_region = ?,
         s3_bucket = ?,
@@ -197,6 +205,8 @@ export const updateServerStorageSettings = async (input: {
     `,
     [
       input.storageType,
+      input.storageProvider,
+      input.storageProviderUrl,
       input.s3Endpoint,
       input.s3Region,
       input.s3Bucket,

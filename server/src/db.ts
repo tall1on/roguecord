@@ -64,6 +64,8 @@ function initializeDatabase() {
         rules_channel_id TEXT,
         welcome_channel_id TEXT,
         storage_type TEXT NOT NULL DEFAULT 'data_dir',
+        storage_provider TEXT NOT NULL DEFAULT 'generic_s3',
+        storage_provider_url TEXT,
         s3_endpoint TEXT,
         s3_region TEXT,
         s3_bucket TEXT,
@@ -605,6 +607,8 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     const hasRulesChannelId = columns.some((column) => column.name === 'rules_channel_id');
     const hasWelcomeChannelId = columns.some((column) => column.name === 'welcome_channel_id');
     const hasStorageType = columns.some((column) => column.name === 'storage_type');
+    const hasStorageProvider = columns.some((column) => column.name === 'storage_provider');
+    const hasStorageProviderUrl = columns.some((column) => column.name === 'storage_provider_url');
     const hasS3Endpoint = columns.some((column) => column.name === 's3_endpoint');
     const hasS3Region = columns.some((column) => column.name === 's3_region');
     const hasS3Bucket = columns.some((column) => column.name === 's3_bucket');
@@ -629,6 +633,8 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     if (!hasRulesChannelId) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN rules_channel_id TEXT');
     if (!hasWelcomeChannelId) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN welcome_channel_id TEXT');
     if (!hasStorageType) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN storage_type TEXT NOT NULL DEFAULT 'data_dir'");
+    if (!hasStorageProvider) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN storage_provider TEXT NOT NULL DEFAULT 'generic_s3'");
+    if (!hasStorageProviderUrl) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_provider_url TEXT');
     if (!hasS3Endpoint) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_endpoint TEXT');
     if (!hasS3Region) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_region TEXT');
     if (!hasS3Bucket) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_bucket TEXT');
@@ -652,6 +658,11 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
           SET
             title = COALESCE(NULLIF(title, ''), name, 'My Server'),
             updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP),
+            storage_provider = CASE
+              WHEN storage_provider IN ('generic_s3', 'cloudflare_r2') THEN storage_provider
+              WHEN storage_type = 's3' THEN 'generic_s3'
+              ELSE 'generic_s3'
+            END,
             storage_updated_at = COALESCE(storage_updated_at, CURRENT_TIMESTAMP),
             storage_migration_status = CASE
               WHEN storage_migration_status IN ('idle', 'running', 'failed') THEN storage_migration_status
@@ -691,6 +702,8 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                 rules_channel_id TEXT,
                 welcome_channel_id TEXT,
                 storage_type TEXT NOT NULL DEFAULT 'data_dir',
+                storage_provider TEXT NOT NULL DEFAULT 'generic_s3',
+                storage_provider_url TEXT,
                 s3_endpoint TEXT,
                 s3_region TEXT,
                 s3_bucket TEXT,
@@ -725,6 +738,8 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                     rules_channel_id,
                     welcome_channel_id,
                     storage_type,
+                    storage_provider,
+                    storage_provider_url,
                     s3_endpoint,
                     s3_region,
                     s3_bucket,
@@ -750,6 +765,12 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                     rules_channel_id,
                     welcome_channel_id,
                     storage_type,
+                    CASE
+                      WHEN storage_provider IN ('generic_s3', 'cloudflare_r2') THEN storage_provider
+                      WHEN storage_type = 's3' THEN 'generic_s3'
+                      ELSE 'generic_s3'
+                    END,
+                    storage_provider_url,
                     s3_endpoint,
                     s3_region,
                     s3_bucket,

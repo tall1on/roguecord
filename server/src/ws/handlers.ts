@@ -77,6 +77,20 @@ import {
   sanitizeUploadFileName
 } from '../uploads';
 
+type StorageSettingsProvider = 'generic_s3' | 'cloudflare_r2';
+
+type StorageSettingsInput = {
+  enabled?: boolean;
+  provider?: StorageSettingsProvider;
+  providerUrl?: string;
+  endpoint?: string;
+  region?: string;
+  bucket?: string;
+  accessKey?: string;
+  secretKey?: string;
+  prefix?: string;
+};
+
 const filesRootDir = path.join(dataDir, 'files');
 const serverIconsRootDir = path.join(dataDir, 'server-icons');
 const MAX_FOLDER_FILE_SIZE_BYTES = MAX_UPLOAD_FILE_SIZE_BYTES;
@@ -479,6 +493,8 @@ const parseHetznerEndpointHost = (endpoint: string): { bucket: string; region: s
 };
 
 const normalizeS3Config = (input: {
+  provider?: StorageSettingsProvider | null;
+  providerUrl?: string | null;
   endpoint?: string | null;
   region?: string | null;
   bucket?: string | null;
@@ -486,11 +502,31 @@ const normalizeS3Config = (input: {
   secretKey?: string | null;
   prefix?: string | null;
 }): S3StorageConfig => {
-  const endpoint = sanitizeS3Endpoint(input.endpoint || '');
+  const provider = input.provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3';
+  const providerUrl = (input.providerUrl || '').trim();
+  const rawEndpoint = (input.endpoint || '').trim();
+  const endpoint = rawEndpoint ? sanitizeS3Endpoint(rawEndpoint) : '';
   const requestedRegion = (input.region || '').trim();
   const requestedBucket = (input.bucket || '').trim();
   const accessKey = (input.accessKey || '').trim();
   const secretKey = (input.secretKey || '').trim();
+
+  if (provider === 'cloudflare_r2') {
+    if (!providerUrl) {
+      throw new Error('Cloudflare R2 URL is required');
+    }
+
+    return {
+      provider,
+      providerUrl,
+      endpoint,
+      region: requestedRegion,
+      bucket: requestedBucket,
+      accessKey,
+      secretKey,
+      prefix: sanitizeStoragePrefix(input.prefix)
+    };
+  }
 
   const parsedHetzner = parseHetznerEndpointHost(endpoint);
   const region = requestedRegion || parsedHetzner?.region || '';
@@ -523,6 +559,8 @@ const normalizeS3Config = (input: {
   }
 
   return {
+    provider,
+    providerUrl: null,
     endpoint,
     region,
     bucket,
@@ -576,6 +614,8 @@ const buildStorageSettingsPayloadForClient = (settings: Awaited<ReturnType<typeo
     },
     s3: settings?.s3
       ? {
+        provider: settings.s3.provider,
+        providerUrl: settings.s3.providerUrl || '',
         endpoint: settings.s3.endpoint,
         region: settings.s3.region,
         bucket: settings.s3.bucket,
@@ -584,6 +624,8 @@ const buildStorageSettingsPayloadForClient = (settings: Awaited<ReturnType<typeo
         prefix: settings.s3.prefix || ''
       }
       : {
+        provider: 'generic_s3',
+        providerUrl: '',
         endpoint: '',
         region: '',
         bucket: '',
@@ -2739,6 +2781,8 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
     removeIcon?: boolean;
     storage?: {
       enabled?: boolean;
+      provider?: StorageSettingsProvider;
+      providerUrl?: string;
       endpoint?: string;
       region?: string;
       bucket?: string;
@@ -2768,10 +2812,12 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
     if (typedPayload.storage) {
       const currentStorage = await getServerStorageSettings();
       const currentS3 = currentStorage?.s3;
-      const storageInput = typedPayload.storage;
+      const storageInput = typedPayload.storage as StorageSettingsInput;
 
       if (storageInput.enabled) {
         const mergedS3Config = normalizeS3Config({
+          provider: storageInput.provider || currentS3?.provider || 'generic_s3',
+          providerUrl: storageInput.providerUrl || currentS3?.providerUrl || null,
           endpoint: storageInput.endpoint || currentS3?.endpoint || null,
           region: storageInput.region || currentS3?.region || null,
           bucket: storageInput.bucket || currentS3?.bucket || null,
@@ -2810,6 +2856,8 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
           await updateServerStorageSettings({
             serverId,
             storageType: 's3',
+            storageProvider: mergedS3Config.provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3',
+            storageProviderUrl: mergedS3Config.providerUrl || null,
             s3Endpoint: mergedS3Config.endpoint,
             s3Region: mergedS3Config.region,
             s3Bucket: mergedS3Config.bucket,
@@ -2870,6 +2918,8 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
             await updateServerStorageSettings({
               serverId,
               storageType: 'data_dir',
+              storageProvider: currentS3?.provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3',
+              storageProviderUrl: currentS3?.providerUrl || null,
               s3Endpoint: currentS3?.endpoint || null,
               s3Region: currentS3?.region || null,
               s3Bucket: currentS3?.bucket || null,
@@ -2909,6 +2959,8 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
           await updateServerStorageSettings({
             serverId,
             storageType: 'data_dir',
+            storageProvider: currentS3?.provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3',
+            storageProviderUrl: currentS3?.providerUrl || null,
             s3Endpoint: currentS3?.endpoint || null,
             s3Region: currentS3?.region || null,
             s3Bucket: currentS3?.bucket || null,
@@ -2979,6 +3031,8 @@ const handleTestServerStorageS3 = async (
   client: ClientConnection,
   payload: {
     storage?: {
+      provider?: StorageSettingsProvider;
+      providerUrl?: string;
       endpoint?: string;
       region?: string;
       bucket?: string;
@@ -2998,10 +3052,12 @@ const handleTestServerStorageS3 = async (
 
   const currentStorage = await getServerStorageSettings();
   const currentS3 = currentStorage?.s3;
-  const storageInput = payload?.storage || {};
+  const storageInput = (payload?.storage || {}) as StorageSettingsInput;
 
   try {
     const mergedS3Config = normalizeS3Config({
+      provider: storageInput.provider || currentS3?.provider || 'generic_s3',
+      providerUrl: storageInput.providerUrl || currentS3?.providerUrl || null,
       endpoint: storageInput.endpoint || currentS3?.endpoint || null,
       region: storageInput.region || currentS3?.region || null,
       bucket: storageInput.bucket || currentS3?.bucket || null,

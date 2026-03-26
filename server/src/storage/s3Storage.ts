@@ -12,7 +12,11 @@ import {
 } from '@aws-sdk/client-s3';
 import fs from 'node:fs';
 
+export type S3StorageProvider = 'generic_s3' | 'cloudflare_r2';
+
 export type S3StorageConfig = {
+  provider?: S3StorageProvider;
+  providerUrl?: string | null;
   endpoint: string;
   region: string;
   bucket: string;
@@ -21,9 +25,10 @@ export type S3StorageConfig = {
   prefix?: string | null;
 };
 
-type ResolvedS3Config = S3StorageConfig & {
+type ResolvedS3Config = Omit<S3StorageConfig, 'provider'> & {
+  providerKey: S3StorageProvider;
   forcePathStyle: boolean;
-  provider: 'generic' | 'hetzner';
+  provider: 'generic' | 'hetzner' | 'cloudflare_r2';
 };
 
 type S3ClientMode = {
@@ -51,13 +56,84 @@ const sanitizeEndpoint = (endpoint: string) => {
   return parsed.toString().replace(/\/$/, '');
 };
 
+const sanitizeR2ProviderUrl = (providerUrl: string) => {
+  const trimmed = (providerUrl || '').trim();
+  if (!trimmed) {
+    throw new Error('Cloudflare R2 URL is required');
+  }
+
+  const parsed = new URL(trimmed);
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Cloudflare R2 URL must use https');
+  }
+
+  return parsed.toString().replace(/\/$/, '');
+};
+
+const parseCloudflareR2Url = (providerUrl: string) => {
+  const sanitizedUrl = sanitizeR2ProviderUrl(providerUrl);
+  const parsed = new URL(sanitizedUrl);
+  const hostLabels = parsed.hostname.split('.').filter(Boolean);
+  if (hostLabels.length < 5) {
+    throw new Error('Cloudflare R2 URL must match https://[ACCOUNT_ID].[REGION].r2.cloudflarestorage.com/[BUCKET]');
+  }
+
+  const suffix = hostLabels.slice(-3).join('.');
+  if (suffix !== 'r2.cloudflarestorage.com') {
+    throw new Error('Cloudflare R2 URL host must end with r2.cloudflarestorage.com');
+  }
+
+  const accountId = hostLabels[0] || '';
+  const region = hostLabels.slice(1, -3).join('.');
+  const bucket = parsed.pathname.split('/').filter(Boolean)[0] || '';
+  if (!accountId) {
+    throw new Error('Cloudflare R2 URL is missing account identifier');
+  }
+  if (!region) {
+    throw new Error('Cloudflare R2 URL is missing region segment');
+  }
+  if (!bucket) {
+    throw new Error('Cloudflare R2 URL is missing bucket path segment');
+  }
+
+  return {
+    providerUrl: sanitizedUrl,
+    endpoint: `https://${accountId}.${region}.r2.cloudflarestorage.com`,
+    region,
+    bucket
+  };
+};
+
 const sanitizeConfig = (config: S3StorageConfig): S3StorageConfig => {
+  const requestedProvider = config.provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3';
+  const prefix = normalizePrefix(config.prefix);
+  const accessKey = (config.accessKey || '').trim();
+  const secretKey = (config.secretKey || '').trim();
+
+  if (!accessKey) {
+    throw new Error('S3 access key is required');
+  }
+  if (!secretKey) {
+    throw new Error('S3 secret key is required');
+  }
+
+  if (requestedProvider === 'cloudflare_r2') {
+    const parsedR2 = parseCloudflareR2Url(config.providerUrl || config.endpoint || '');
+    return {
+      provider: 'cloudflare_r2',
+      providerUrl: parsedR2.providerUrl,
+      endpoint: parsedR2.endpoint,
+      region: parsedR2.region,
+      bucket: parsedR2.bucket,
+      accessKey,
+      secretKey,
+      prefix
+    };
+  }
+
   const endpoint = sanitizeEndpoint(config.endpoint);
   const region = (config.region || '').trim();
   const bucket = (config.bucket || '').trim();
-  const accessKey = (config.accessKey || '').trim();
-  const secretKey = (config.secretKey || '').trim();
-  const prefix = normalizePrefix(config.prefix);
 
   if (!region) {
     throw new Error('S3 region is required');
@@ -73,6 +149,8 @@ const sanitizeConfig = (config: S3StorageConfig): S3StorageConfig => {
   }
 
   return {
+    provider: 'generic_s3',
+    providerUrl: null,
     endpoint,
     region,
     bucket,
@@ -130,6 +208,7 @@ const resolveS3ClientConfig = (config: S3StorageConfig): ResolvedS3Config => {
     normalizedBase.hostname = `${parsedHetzner.location}.your-objectstorage.com`;
 
     return {
+      providerKey: 'generic_s3',
       ...config,
       endpoint: normalizedBase.toString().replace(/\/$/, ''),
       region: parsedHetzner.location,
@@ -139,7 +218,17 @@ const resolveS3ClientConfig = (config: S3StorageConfig): ResolvedS3Config => {
     };
   }
 
+  if (config.provider === 'cloudflare_r2') {
+    return {
+      providerKey: 'cloudflare_r2',
+      ...config,
+      forcePathStyle: true,
+      provider: 'cloudflare_r2'
+    };
+  }
+
   return {
+    providerKey: 'generic_s3',
     ...config,
     forcePathStyle: true,
     provider: 'generic'
@@ -404,6 +493,17 @@ const createS3Client = (config: S3StorageConfig, mode?: Pick<S3ClientMode, 'endp
   });
 };
 
+const toS3StorageConfig = (resolved: ResolvedS3Config): S3StorageConfig => ({
+  provider: resolved.providerKey,
+  providerUrl: resolved.providerUrl || null,
+  endpoint: resolved.endpoint,
+  region: resolved.region,
+  bucket: resolved.bucket,
+  accessKey: resolved.accessKey,
+  secretKey: resolved.secretKey,
+  prefix: resolved.prefix || null
+});
+
 const buildValidationDebugDetails = (attempt: S3ClientMode, resolved: ResolvedS3Config) => {
   const endpointHost = new URL(attempt.endpoint).host;
   const addressingStyle = attempt.forcePathStyle ? 'path' : 'virtual-host';
@@ -435,7 +535,7 @@ export const validateS3Configuration = async (config: S3StorageConfig): Promise<
   }
 
   const testKey = buildS3StorageKey(normalized.prefix, '__healthcheck__', `${Date.now()}-roguecord.txt`);
-  const attempts = buildS3ValidationModes(resolved);
+  const attempts = buildS3ValidationModes(normalized);
   const failedReasons: string[] = [];
 
   for (let i = 0; i < attempts.length; i += 1) {
@@ -485,7 +585,7 @@ export const uploadFileToS3 = async (input: {
 }) => {
   const normalized = sanitizeConfig(input.config);
   const resolved = resolveS3ClientConfig(normalized);
-  const client = createS3Client(resolved);
+  const client = createS3Client(toS3StorageConfig(resolved));
   await client.send(new PutObjectCommand({
     Bucket: resolved.bucket,
     Key: input.key,
@@ -535,7 +635,7 @@ export const uploadFilePathToS3Multipart = async (input: {
 }) => {
   const normalized = sanitizeConfig(input.config);
   const resolved = resolveS3ClientConfig(normalized);
-  const client = createS3Client(resolved);
+  const client = createS3Client(toS3StorageConfig(resolved));
   const stat = await fs.promises.stat(input.filePath);
   const partSize = 8 * 1024 * 1024;
 
@@ -607,7 +707,7 @@ export const downloadFileFromS3 = async (input: {
 }): Promise<Buffer> => {
   const normalized = sanitizeConfig(input.config);
   const resolved = resolveS3ClientConfig(normalized);
-  const client = createS3Client(resolved);
+  const client = createS3Client(toS3StorageConfig(resolved));
   const response = await client.send(new GetObjectCommand({
     Bucket: resolved.bucket,
     Key: input.key
@@ -637,7 +737,7 @@ export const getFileStreamFromS3 = async (input: {
 }> => {
   const normalized = sanitizeConfig(input.config);
   const resolved = resolveS3ClientConfig(normalized);
-  const client = createS3Client(resolved);
+  const client = createS3Client(toS3StorageConfig(resolved));
   const response = await client.send(new GetObjectCommand({
     Bucket: resolved.bucket,
     Key: input.key,
@@ -663,7 +763,7 @@ export const deleteFileFromS3 = async (input: {
 }) => {
   const normalized = sanitizeConfig(input.config);
   const resolved = resolveS3ClientConfig(normalized);
-  const client = createS3Client(resolved);
+  const client = createS3Client(toS3StorageConfig(resolved));
   await client.send(new DeleteObjectCommand({
     Bucket: resolved.bucket,
     Key: input.key
@@ -676,7 +776,7 @@ export const listS3KeysByPrefix = async (input: {
 }): Promise<string[]> => {
   const normalized = sanitizeConfig(input.config);
   const resolved = resolveS3ClientConfig(normalized);
-  const client = createS3Client(resolved);
+  const client = createS3Client(toS3StorageConfig(resolved));
 
   const keys: string[] = [];
   let continuationToken: string | undefined;
