@@ -996,7 +996,11 @@ const migrateManagedStorageRecord = async (input: {
 
     const sourcePath = resolveSafeStoredFilePath(record.channelId, record.storageName);
     if (!fs.existsSync(sourcePath)) {
-      throw new Error(`Missing local managed file source for ${record.kind} ${record.id}`);
+      await markManagedS3RecordAsOrphaned();
+      return {
+        record,
+        targetStorageKey: null
+      };
     }
 
     const buffer = fs.readFileSync(sourcePath);
@@ -1067,7 +1071,12 @@ const migrateFolderFileToS3 = async (file: Awaited<ReturnType<typeof getAllFolde
 
   const sourcePath = resolveSafeStoredFilePath(file.channel_id, file.storage_name);
   if (!fs.existsSync(sourcePath)) {
-    throw new Error(`Missing local folder file source for ${file.id}`);
+    console.warn('[STORAGE MIGRATION] Local folder file source missing; skipping record', {
+      fileId: file.id,
+      channelId: file.channel_id,
+      storageName: file.storage_name
+    });
+    return false;
   }
 
   const buffer = fs.readFileSync(sourcePath);
@@ -1102,7 +1111,20 @@ const migrateFolderFileToDataDir = async (file: Awaited<ReturnType<typeof getAll
 
   const targetPath = resolveSafeStoredFilePath(file.channel_id, file.storage_name);
   ensureChannelFilesDir(file.channel_id);
-  const buffer = await downloadFileFromS3({ config: s3Config, key: file.storage_key });
+  let buffer: Buffer;
+  try {
+    buffer = await downloadFileFromS3({ config: s3Config, key: file.storage_key });
+  } catch (error) {
+    if (!isMissingS3ObjectError(error)) {
+      throw error;
+    }
+    console.warn('[STORAGE MIGRATION] S3 folder file source missing; skipping record', {
+      fileId: file.id,
+      channelId: file.channel_id,
+      storageKey: file.storage_key
+    });
+    return false;
+  }
   fs.writeFileSync(targetPath, buffer);
   await updateFolderChannelFileStorage({
     fileId: file.id,
@@ -1125,7 +1147,12 @@ const migrateMessageAttachmentToS3 = async (attachment: Awaited<ReturnType<typeo
 
   const sourcePath = resolveSafeStoredFilePath(attachment.channel_id, attachment.storage_name);
   if (!fs.existsSync(sourcePath)) {
-    throw new Error(`Missing local message attachment source for ${attachment.id}`);
+    console.warn('[STORAGE MIGRATION] Local message attachment source missing; skipping record', {
+      attachmentId: attachment.id,
+      channelId: attachment.channel_id,
+      storageName: attachment.storage_name
+    });
+    return false;
   }
 
   const buffer = fs.readFileSync(sourcePath);
@@ -1159,7 +1186,20 @@ const migrateMessageAttachmentToDataDir = async (attachment: Awaited<ReturnType<
 
   const targetPath = resolveSafeStoredFilePath(attachment.channel_id, attachment.storage_name);
   ensureChannelFilesDir(attachment.channel_id);
-  const buffer = await downloadFileFromS3({ config: s3Config, key: attachment.storage_key });
+  let buffer: Buffer;
+  try {
+    buffer = await downloadFileFromS3({ config: s3Config, key: attachment.storage_key });
+  } catch (error) {
+    if (!isMissingS3ObjectError(error)) {
+      throw error;
+    }
+    console.warn('[STORAGE MIGRATION] S3 message attachment source missing; skipping record', {
+      attachmentId: attachment.id,
+      channelId: attachment.channel_id,
+      storageKey: attachment.storage_key
+    });
+    return false;
+  }
   fs.writeFileSync(targetPath, buffer);
   await updateMessageAttachmentStorage({
     attachmentId: attachment.id,
