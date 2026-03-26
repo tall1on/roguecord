@@ -61,6 +61,7 @@ import {
   deleteFileFromS3,
   downloadFileFromS3,
   downloadFileFromS3ForMigration,
+  isMissingS3ObjectError,
   listS3KeysByPrefix,
   type S3StorageConfig,
   uploadFileToS3,
@@ -928,6 +929,23 @@ const migrateManagedStorageRecord = async (input: {
   targetS3Config: S3StorageConfig | null;
 }): Promise<ManagedStorageMigrationCheckpoint | null> => {
   const { record, target, sourceS3Config, targetS3Config } = input;
+  const markManagedS3RecordAsOrphaned = async () => {
+    console.warn('[STORAGE MIGRATION] Managed S3 record source object missing; marking record as migrated without file copy', {
+      kind: record.kind,
+      id: record.id,
+      key: record.storageKey,
+      target
+    });
+    await updateManagedStorageRecord({
+      ...record,
+      storageProvider: target === 's3' ? 's3' : 'data_dir',
+      storageKey: null,
+      migratedToS3At: target === 's3'
+        ? (record.kind === 'folder_file' ? new Date().toISOString() : record.migratedToS3At)
+        : (record.kind === 'folder_file' ? null : record.migratedToS3At)
+    });
+  };
+
   if (target === 's3') {
     if (!targetS3Config) {
       throw new Error('Missing target S3 configuration for storage migration');
@@ -942,7 +960,19 @@ const migrateManagedStorageRecord = async (input: {
         throw new Error(`Missing source S3 configuration for ${record.kind} ${record.id}`);
       }
 
-      const { buffer } = await downloadFileFromS3ForMigration({ config: sourceS3Config, key: record.storageKey });
+      let buffer: Buffer;
+      try {
+        ({ buffer } = await downloadFileFromS3ForMigration({ config: sourceS3Config, key: record.storageKey }));
+      } catch (error) {
+        if (!isMissingS3ObjectError(error)) {
+          throw error;
+        }
+        await markManagedS3RecordAsOrphaned();
+        return {
+          record,
+          targetStorageKey: null
+        };
+      }
       const targetStorageKey = buildS3StorageKey(targetS3Config.prefix, record.channelId, record.storageName);
       await uploadFileToS3({
         config: targetS3Config,
@@ -1003,7 +1033,19 @@ const migrateManagedStorageRecord = async (input: {
 
   const targetPath = resolveSafeStoredFilePath(record.channelId, record.storageName);
   ensureChannelFilesDir(record.channelId);
-  const { buffer } = await downloadFileFromS3ForMigration({ config: sourceS3Config, key: record.storageKey });
+  let buffer: Buffer;
+  try {
+    ({ buffer } = await downloadFileFromS3ForMigration({ config: sourceS3Config, key: record.storageKey }));
+  } catch (error) {
+    if (!isMissingS3ObjectError(error)) {
+      throw error;
+    }
+    await markManagedS3RecordAsOrphaned();
+    return {
+      record,
+      targetStorageKey: null
+    };
+  }
   fs.writeFileSync(targetPath, buffer);
   await updateManagedStorageRecord({
     ...record,

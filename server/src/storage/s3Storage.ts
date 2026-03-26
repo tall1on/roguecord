@@ -665,6 +665,28 @@ export const uploadFileToS3 = async (input: {
   }));
 };
 
+export const isMissingS3ObjectError = (error: unknown) => {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const awsError = error as {
+    name?: unknown;
+    code?: unknown;
+    Code?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  };
+
+  const codes = [awsError.code, awsError.Code, awsError.name]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => value.trim().toLowerCase());
+  if (codes.includes('nosuchkey') || codes.includes('notfound')) {
+    return true;
+  }
+
+  return awsError.$metadata?.httpStatusCode === 404;
+};
+
 export const deleteS3Keys = async (input: {
   config: S3StorageConfig;
   keys: string[];
@@ -938,4 +960,3 @@ export const listS3KeysByPrefix = async (input: {
 
   return keys;
 };
-
