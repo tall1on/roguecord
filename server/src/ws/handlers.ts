@@ -1153,7 +1153,9 @@ const runStorageMigration = async (input: {
     if (!input.targetS3Config) {
       throw new Error('Missing target S3 configuration for storage migration');
     }
-    clearedTargetS3Keys = await clearManagedS3FilesArea(input.targetS3Config);
+    if (!input.sourceS3Config) {
+      clearedTargetS3Keys = await clearManagedS3FilesArea(input.targetS3Config);
+    }
   } else {
     clearManagedLocalFilesArea();
   }
