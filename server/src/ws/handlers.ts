@@ -60,6 +60,7 @@ import {
   deleteS3Keys,
   deleteFileFromS3,
   downloadFileFromS3,
+  downloadFileFromS3ForMigration,
   listS3KeysByPrefix,
   type S3StorageConfig,
   uploadFileToS3,
@@ -941,7 +942,7 @@ const migrateManagedStorageRecord = async (input: {
         throw new Error(`Missing source S3 configuration for ${record.kind} ${record.id}`);
       }
 
-      const buffer = await downloadFileFromS3({ config: sourceS3Config, key: record.storageKey });
+      const { buffer } = await downloadFileFromS3ForMigration({ config: sourceS3Config, key: record.storageKey });
       const targetStorageKey = buildS3StorageKey(targetS3Config.prefix, record.channelId, record.storageName);
       await uploadFileToS3({
         config: targetS3Config,
@@ -1002,7 +1003,7 @@ const migrateManagedStorageRecord = async (input: {
 
   const targetPath = resolveSafeStoredFilePath(record.channelId, record.storageName);
   ensureChannelFilesDir(record.channelId);
-  const buffer = await downloadFileFromS3({ config: sourceS3Config, key: record.storageKey });
+  const { buffer } = await downloadFileFromS3ForMigration({ config: sourceS3Config, key: record.storageKey });
   fs.writeFileSync(targetPath, buffer);
   await updateManagedStorageRecord({
     ...record,

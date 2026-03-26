@@ -38,9 +38,56 @@ type S3ClientMode = {
   label: string;
 };
 
+type ResolvedS3Runtime = {
+  normalized: S3StorageConfig;
+  resolved: ResolvedS3Config;
+  client: S3Client;
+};
+
 const normalizePrefix = (prefix: string | null | undefined) => {
   const trimmed = (prefix || '').trim().replace(/^\/+/, '').replace(/\/+$/, '');
   return trimmed.length > 0 ? trimmed : null;
+};
+
+const stripPrefixFromKey = (key: string, prefix: string | null) => {
+  const trimmedKey = (key || '').trim().replace(/^\/+/, '');
+  if (!trimmedKey) {
+    return null;
+  }
+
+  if (!prefix) {
+    return trimmedKey;
+  }
+
+  if (trimmedKey === prefix) {
+    return '';
+  }
+
+  const prefixedKey = `${prefix}/`;
+  if (trimmedKey.startsWith(prefixedKey)) {
+    return trimmedKey.slice(prefixedKey.length);
+  }
+
+  return null;
+};
+
+const joinPrefixAndRelativeKey = (prefix: string | null, relativeKey: string) => {
+  const trimmedRelativeKey = (relativeKey || '').trim().replace(/^\/+/, '');
+  if (!trimmedRelativeKey) {
+    return prefix || null;
+  }
+  return prefix ? `${prefix}/${trimmedRelativeKey}` : trimmedRelativeKey;
+};
+
+const dedupeKeys = (keys: Array<string | null | undefined>) => {
+  const unique = new Set<string>();
+  for (const key of keys) {
+    const trimmed = (key || '').trim().replace(/^\/+/, '');
+    if (trimmed) {
+      unique.add(trimmed);
+    }
+  }
+  return Array.from(unique);
 };
 
 const sanitizeEndpoint = (endpoint: string) => {
@@ -506,6 +553,17 @@ const createS3Client = (config: S3StorageConfig, mode?: Pick<S3ClientMode, 'endp
   });
 };
 
+const createResolvedS3Runtime = (config: S3StorageConfig): ResolvedS3Runtime => {
+  const normalized = sanitizeConfig(config);
+  const resolved = resolveS3ClientConfig(normalized);
+  const client = createS3Client(toS3StorageConfig(resolved));
+  return {
+    normalized,
+    resolved,
+    client
+  };
+};
+
 const toS3StorageConfig = (resolved: ResolvedS3Config): S3StorageConfig => ({
   provider: resolved.providerKey,
   providerUrl: resolved.providerUrl || null,
@@ -718,11 +776,9 @@ export const downloadFileFromS3 = async (input: {
   config: S3StorageConfig;
   key: string;
 }): Promise<Buffer> => {
-  const normalized = sanitizeConfig(input.config);
-  const resolved = resolveS3ClientConfig(normalized);
-  const client = createS3Client(toS3StorageConfig(resolved));
-  const response = await client.send(new GetObjectCommand({
-    Bucket: resolved.bucket,
+  const runtime = createResolvedS3Runtime(input.config);
+  const response = await runtime.client.send(new GetObjectCommand({
+    Bucket: runtime.resolved.bucket,
     Key: input.key
   }));
 
@@ -735,6 +791,75 @@ export const downloadFileFromS3 = async (input: {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks);
+};
+
+const buildObjectReadDebugDetails = (resolved: ResolvedS3Config, key: string, attemptedKeys?: string[]) => {
+  const details = [
+    `provider=${resolved.providerKey}`,
+    `bucket=${resolved.bucket}`,
+    `endpoint=${resolved.endpoint}`,
+    `region=${resolved.region}`,
+    `prefix=${resolved.prefix || '(none)'}`,
+    `key=${key}`
+  ];
+  if (attemptedKeys && attemptedKeys.length > 0) {
+    details.push(`attemptedKeys=${attemptedKeys.join(',')}`);
+  }
+  return details.join(', ');
+};
+
+const enrichMissingObjectReadError = (error: unknown, resolved: ResolvedS3Config, key: string, attemptedKeys?: string[]) => {
+  const code = typeof error === 'object' && error && '$metadata' in error
+    ? String((error as any).name || (error as any).Code || (error as any).code || '')
+    : String((error as any)?.name || (error as any)?.Code || (error as any)?.code || '');
+  const message = String((error as any)?.message || 'Unknown S3 error');
+  const isMissingKey = /NoSuchKey/i.test(code) || /The specified key does not exist/i.test(message);
+  if (!isMissingKey) {
+    return error;
+  }
+
+  const details = buildObjectReadDebugDetails(resolved, key, attemptedKeys);
+  return new Error(`S3 source read failed with NoSuchKey (${details}): ${message}`);
+};
+
+export const downloadFileFromS3ForMigration = async (input: {
+  config: S3StorageConfig;
+  key: string;
+}): Promise<{ buffer: Buffer; resolvedKey: string }> => {
+  const runtime = createResolvedS3Runtime(input.config);
+  const normalizedStoredKey = (input.key || '').trim().replace(/^\/+/, '');
+  const normalizedPrefix = runtime.normalized.prefix ?? null;
+  const relativeToCurrentPrefix = stripPrefixFromKey(normalizedStoredKey, normalizedPrefix);
+  const fallbackKeys = runtime.resolved.providerKey === 'cloudflare_r2' && relativeToCurrentPrefix !== null
+    ? [joinPrefixAndRelativeKey(null, relativeToCurrentPrefix), joinPrefixAndRelativeKey(normalizedPrefix, relativeToCurrentPrefix)]
+    : [];
+  const candidateKeys = dedupeKeys([normalizedStoredKey, ...fallbackKeys]);
+
+  let lastError: unknown = null;
+  for (let index = 0; index < candidateKeys.length; index += 1) {
+    const candidateKey = candidateKeys[index];
+    try {
+      const buffer = await downloadFileFromS3({
+        config: input.config,
+        key: candidateKey
+      });
+      return {
+        buffer,
+        resolvedKey: candidateKey
+      };
+    } catch (error) {
+      lastError = error;
+      const message = String((error as any)?.message || '');
+      const name = String((error as any)?.name || (error as any)?.Code || (error as any)?.code || '');
+      const isMissingKey = /NoSuchKey/i.test(name) || /The specified key does not exist/i.test(message);
+      const hasMoreCandidates = index < candidateKeys.length - 1;
+      if (!isMissingKey || !hasMoreCandidates) {
+        throw enrichMissingObjectReadError(error, runtime.resolved, normalizedStoredKey, candidateKeys);
+      }
+    }
+  }
+
+  throw enrichMissingObjectReadError(lastError, runtime.resolved, normalizedStoredKey, candidateKeys);
 };
 
 export const getFileStreamFromS3 = async (input: {
