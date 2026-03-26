@@ -67,7 +67,9 @@ const serverSettingsForm = ref({
   rulesChannelId: '',
   welcomeChannelId: '',
   storage: {
-    enabled: false,
+    storageType: 'data_dir' as 'data_dir' | 's3',
+    provider: 'generic_s3' as 'generic_s3' | 'cloudflare_r2',
+    providerUrl: '',
     endpoint: '',
     region: '',
     bucket: '',
@@ -108,11 +110,30 @@ const activeServer = computed(() => {
   return { name: 'RougeCord' }
 })
 
+const populateServerSettingsStorageForm = () => {
+  const storageSettings = chatStore.serverStorageSettings
+  serverSettingsForm.value.storage.storageType = storageSettings.storageType
+  serverSettingsForm.value.storage.provider = storageSettings.s3.provider
+  serverSettingsForm.value.storage.providerUrl = storageSettings.s3.providerUrl
+  serverSettingsForm.value.storage.endpoint = storageSettings.s3.endpoint
+  serverSettingsForm.value.storage.region = storageSettings.s3.region
+  serverSettingsForm.value.storage.bucket = storageSettings.s3.bucket
+  serverSettingsForm.value.storage.accessKey = storageSettings.s3.accessKey
+  serverSettingsForm.value.storage.secretKey = storageSettings.s3.secretKey
+  serverSettingsForm.value.storage.prefix = storageSettings.s3.prefix
+  serverSettingsForm.value.storage.status = storageSettings.storageType
+  serverSettingsForm.value.storage.lastError = storageSettings.storageLastError
+}
+
 const getCurrentStorageFingerprint = () => {
   const storage = serverSettingsForm.value.storage
   return JSON.stringify({
-    enabled: storage.enabled,
+    storageType: storage.storageType,
+    provider: storage.provider,
+    providerUrl: storage.providerUrl.trim(),
     endpoint: storage.endpoint.trim(),
+    region: storage.region.trim(),
+    bucket: storage.bucket.trim(),
     accessKey: storage.accessKey.trim(),
     secretKey: storage.secretKey.trim(),
     prefix: storage.prefix.trim()
@@ -124,16 +145,24 @@ const hasStorageSettingsChanges = computed(() => {
   const formStorage = serverSettingsForm.value.storage
 
   const currentFingerprint = JSON.stringify({
-    enabled: currentStorage.storageType === 's3',
+    storageType: currentStorage.storageType,
+    provider: currentStorage.s3.provider,
+    providerUrl: (currentStorage.s3.providerUrl || '').trim(),
     endpoint: (currentStorage.s3.endpoint || '').trim(),
+    region: (currentStorage.s3.region || '').trim(),
+    bucket: (currentStorage.s3.bucket || '').trim(),
     accessKey: (currentStorage.s3.accessKey || '').trim(),
     secretKey: (currentStorage.s3.secretKey || '').trim(),
     prefix: (currentStorage.s3.prefix || '').trim()
   })
 
   const nextFingerprint = JSON.stringify({
-    enabled: formStorage.enabled,
+    storageType: formStorage.storageType,
+    provider: formStorage.provider,
+    providerUrl: formStorage.providerUrl.trim(),
     endpoint: formStorage.endpoint.trim(),
+    region: formStorage.region.trim(),
+    bucket: formStorage.bucket.trim(),
     accessKey: formStorage.accessKey.trim(),
     secretKey: formStorage.secretKey.trim(),
     prefix: formStorage.prefix.trim()
@@ -171,7 +200,7 @@ const hasServerSettingsChanges = computed(() =>
 
 const isStorageModeSwitchPending = computed(() => {
   const currentStorageType = chatStore.serverStorageSettings.storageType
-  const nextStorageType = serverSettingsForm.value.storage.enabled ? 's3' : 'data_dir'
+  const nextStorageType = serverSettingsForm.value.storage.storageType
   return hasStorageSettingsChanges.value && currentStorageType !== nextStorageType
 })
 
@@ -204,12 +233,26 @@ const canSaveServerSettings = computed(() => {
     return true
   }
 
-  if (!serverSettingsForm.value.storage.enabled) {
+  if (serverSettingsForm.value.storage.storageType !== 's3') {
     return true
   }
 
   return s3ConnectionTestState.value === 'success' && s3LastSuccessfulFingerprint.value === getCurrentStorageFingerprint()
 })
+
+watch(
+  () => serverSettingsForm.value.storage.provider,
+  (provider) => {
+    if (provider === 'cloudflare_r2') {
+      serverSettingsForm.value.storage.endpoint = ''
+      serverSettingsForm.value.storage.region = ''
+      serverSettingsForm.value.storage.bucket = ''
+      return
+    }
+
+    serverSettingsForm.value.storage.providerUrl = ''
+  }
+)
 
 const resetServerSettingsStorageLock = () => {
   serverSettingsStorageSavePending.value = false
@@ -266,13 +309,22 @@ const handleTestStorageConnection = async () => {
   serverSettingsSaveError.value = null
   serverSettingsSaveMessage.value = null
   s3ConnectionTestState.value = 'testing'
-  s3ConnectionTestMessage.value = 'Testing S3 connection...'
+  s3ConnectionTestMessage.value = 'Testing storage connection...'
 
   const result = await chatStore.testServerStorageSettings({
-    endpoint: serverSettingsForm.value.storage.endpoint,
-    accessKey: serverSettingsForm.value.storage.accessKey,
-    secretKey: serverSettingsForm.value.storage.secretKey,
-    prefix: serverSettingsForm.value.storage.prefix
+    storageType: serverSettingsForm.value.storage.storageType,
+    s3: serverSettingsForm.value.storage.storageType === 's3'
+      ? {
+          provider: serverSettingsForm.value.storage.provider,
+          providerUrl: serverSettingsForm.value.storage.providerUrl,
+          endpoint: serverSettingsForm.value.storage.endpoint,
+          region: serverSettingsForm.value.storage.region,
+          bucket: serverSettingsForm.value.storage.bucket,
+          accessKey: serverSettingsForm.value.storage.accessKey,
+          secretKey: serverSettingsForm.value.storage.secretKey,
+          prefix: serverSettingsForm.value.storage.prefix
+        }
+      : undefined
   })
 
   if (result.ok) {
@@ -300,19 +352,25 @@ const saveServerSettings = () => {
   serverSettingsSaveMessage.value = null
 
   const nextStoragePayload = hasStorageSettingsChanges.value
-    ? {
-        enabled: serverSettingsForm.value.storage.enabled,
-        endpoint: serverSettingsForm.value.storage.endpoint,
-        region: serverSettingsForm.value.storage.region,
-        bucket: serverSettingsForm.value.storage.bucket,
-        accessKey: serverSettingsForm.value.storage.accessKey,
-        secretKey: serverSettingsForm.value.storage.secretKey,
-        prefix: serverSettingsForm.value.storage.prefix
+      ? {
+        storageType: serverSettingsForm.value.storage.storageType,
+        s3: serverSettingsForm.value.storage.storageType === 's3'
+          ? {
+              provider: serverSettingsForm.value.storage.provider,
+              providerUrl: serverSettingsForm.value.storage.providerUrl,
+              endpoint: serverSettingsForm.value.storage.endpoint,
+              region: serverSettingsForm.value.storage.region,
+              bucket: serverSettingsForm.value.storage.bucket,
+              accessKey: serverSettingsForm.value.storage.accessKey,
+              secretKey: serverSettingsForm.value.storage.secretKey,
+              prefix: serverSettingsForm.value.storage.prefix
+            }
+          : undefined
       }
     : undefined
 
   if (nextStoragePayload && !canSaveServerSettings.value) {
-    serverSettingsSaveError.value = 'Run a successful S3 connection test before saving.'
+    serverSettingsSaveError.value = 'Run a successful storage connection test before saving.'
     return
   }
 
@@ -486,15 +544,7 @@ watch(showServerSettingsModal, (newVal) => {
     serverSettingsForm.value.title = chatStore.server.title || chatStore.server.name || ''
     serverSettingsForm.value.rulesChannelId = chatStore.server.rulesChannelId || ''
     serverSettingsForm.value.welcomeChannelId = chatStore.server.welcomeChannelId || ''
-    serverSettingsForm.value.storage.enabled = chatStore.serverStorageSettings.storageType === 's3'
-    serverSettingsForm.value.storage.endpoint = chatStore.serverStorageSettings.s3.endpoint
-    serverSettingsForm.value.storage.region = chatStore.serverStorageSettings.s3.region
-    serverSettingsForm.value.storage.bucket = chatStore.serverStorageSettings.s3.bucket
-    serverSettingsForm.value.storage.accessKey = chatStore.serverStorageSettings.s3.accessKey
-    serverSettingsForm.value.storage.secretKey = chatStore.serverStorageSettings.s3.secretKey
-    serverSettingsForm.value.storage.prefix = chatStore.serverStorageSettings.s3.prefix
-    serverSettingsForm.value.storage.status = chatStore.serverStorageSettings.storageType
-    serverSettingsForm.value.storage.lastError = chatStore.serverStorageSettings.storageLastError
+    populateServerSettingsStorageForm()
     serverIconDataUrl.value = null
     removeServerIcon.value = false
     serverIconError.value = null
@@ -514,15 +564,7 @@ watch(
     if (!showServerSettingsModal.value) {
       return
     }
-    serverSettingsForm.value.storage.status = storageSettings.storageType
-    serverSettingsForm.value.storage.lastError = storageSettings.storageLastError
-    serverSettingsForm.value.storage.enabled = storageSettings.storageType === 's3'
-    serverSettingsForm.value.storage.endpoint = storageSettings.s3.endpoint
-    serverSettingsForm.value.storage.region = storageSettings.s3.region
-    serverSettingsForm.value.storage.bucket = storageSettings.s3.bucket
-    serverSettingsForm.value.storage.accessKey = storageSettings.s3.accessKey
-    serverSettingsForm.value.storage.secretKey = storageSettings.s3.secretKey
-    serverSettingsForm.value.storage.prefix = storageSettings.s3.prefix
+    populateServerSettingsStorageForm()
 
     if (storageSettings.migration.status === 'running') {
       serverSettingsStorageSavePending.value = false
@@ -540,8 +582,12 @@ watch(
 watch(
   () => [
     showServerSettingsModal.value,
-    serverSettingsForm.value.storage.enabled,
+    serverSettingsForm.value.storage.storageType,
+    serverSettingsForm.value.storage.provider,
+    serverSettingsForm.value.storage.providerUrl,
     serverSettingsForm.value.storage.endpoint,
+    serverSettingsForm.value.storage.region,
+    serverSettingsForm.value.storage.bucket,
     serverSettingsForm.value.storage.accessKey,
     serverSettingsForm.value.storage.secretKey,
     serverSettingsForm.value.storage.prefix
@@ -553,7 +599,7 @@ watch(
 
     if (s3LastSuccessfulFingerprint.value !== getCurrentStorageFingerprint()) {
       s3ConnectionTestState.value = 'idle'
-      s3ConnectionTestMessage.value = 'S3 inputs changed. Test connection again before saving.'
+      s3ConnectionTestMessage.value = 'Storage inputs changed. Test connection again before saving.'
     }
   }
 )

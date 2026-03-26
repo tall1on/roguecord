@@ -20,7 +20,9 @@ const form = defineModel<{
   rulesChannelId: string
   welcomeChannelId: string
   storage: {
-    enabled: boolean
+    storageType: 'data_dir' | 's3'
+    provider: 'generic_s3' | 'cloudflare_r2'
+    providerUrl: string
     endpoint: string
     region: string
     bucket: string
@@ -60,7 +62,15 @@ const emit = defineEmits<{
 
 const chatStore = useChatStore()
 const textChannels = computed(() => chatStore.activeServerChannels.filter((c) => c.type === 'text'))
-const storageStatusLabel = computed(() => (form.value.storage.status === 's3' ? 'S3 enabled' : 'data-dir enabled'))
+const storageStatusLabel = computed(() => {
+  if (form.value.storage.status === 's3') {
+    return props.storageSettings.s3.provider === 'cloudflare_r2' ? 'Cloudflare R2 enabled' : 'Generic S3 enabled'
+  }
+
+  return 'data-dir enabled'
+})
+const isS3Selected = computed(() => form.value.storage.storageType === 's3')
+const isCloudflareR2Selected = computed(() => isS3Selected.value && form.value.storage.provider === 'cloudflare_r2')
 const migration = computed(() => props.storageSettings.migration)
 const migrationVisible = computed(() => migration.value.status === 'running' || migration.value.status === 'failed')
 const migrationProgressPercent = computed(() => {
@@ -90,7 +100,7 @@ const migrationStatusTone = computed(() => {
 })
 const migrationTargetLabel = computed(() => {
   if (migration.value.target === 's3') {
-    return 'S3'
+    return props.storageSettings.s3.provider === 'cloudflare_r2' ? 'Cloudflare R2' : 'S3-compatible storage'
   }
 
   if (migration.value.target === 'data_dir') {
@@ -167,7 +177,7 @@ const onIconInputChange = (event: Event) => {
 
         <div class="px-8 pt-8 pb-4">
           <h3 class="text-2xl font-bold text-white tracking-tight">
-            {{ activeSection === 'general-settings' ? 'Server Overview' : activeSection === 'storage-settings' ? 'Storage / S3' : 'Server Settings' }}
+            {{ activeSection === 'general-settings' ? 'Server Overview' : activeSection === 'storage-settings' ? 'Storage Settings' : 'Server Settings' }}
           </h3>
         </div>
 
@@ -277,7 +287,7 @@ const onIconInputChange = (event: Event) => {
                 {{ storageStatusLabel }}
               </p>
               <p class="mt-1 text-xs text-zinc-500">
-                Default is data-dir. S3 is only activated after the configuration has been validated successfully.
+                Default is data-dir. External storage is only activated after the configuration has been validated successfully.
               </p>
               <p v-if="form.storage.lastError" class="mt-2 text-xs text-rose-300">
                 Last storage error: {{ form.storage.lastError }}
@@ -336,37 +346,75 @@ const onIconInputChange = (event: Event) => {
 
             <div class="flex items-center justify-between bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm">
               <div>
-                <p class="text-sm font-semibold text-white">Enable S3 storage for new uploads</p>
-                <p class="text-xs text-zinc-500">When enabled and valid, new files are uploaded to S3 instead of data-dir.</p>
+                <p class="text-sm font-semibold text-white">Storage type</p>
+                <p class="text-xs text-zinc-500">Choose whether new uploads stay on the local data directory or use an S3-compatible provider.</p>
               </div>
-              <label class="inline-flex items-center" :class="props.storageLocked ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'">
-                <input v-model="form.storage.enabled" type="checkbox" class="sr-only" :disabled="props.storageLocked" />
-                <span class="h-6 w-11 rounded-full transition-colors" :class="form.storage.enabled ? 'bg-indigo-600' : 'bg-zinc-700'">
-                  <span
-                    class="block h-5 w-5 rounded-full bg-white transition-transform mt-0.5"
-                    :class="form.storage.enabled ? 'translate-x-5 ml-0.5' : 'translate-x-0.5'"
-                  />
-                </span>
-              </label>
+              <div class="relative w-full max-w-xs">
+                <select
+                  v-model="form.storage.storageType"
+                  class="w-full bg-zinc-950 text-sm font-medium text-white rounded-lg px-3 py-2.5 border border-white/10 appearance-none focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all"
+                  :disabled="props.storageLocked"
+                >
+                  <option value="data_dir">Local data directory</option>
+                  <option value="s3">S3-compatible storage</option>
+                </select>
+                <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-zinc-400">
+                  <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                </div>
+              </div>
             </div>
 
-            <div v-show="form.storage.enabled" class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm">
-              <p class="text-xs font-bold uppercase text-zinc-400 tracking-wider">Hetzner S3 help</p>
-              <p class="mt-1 text-xs text-zinc-500">
-                Use Hetzner endpoint format: https://&lt;bucket-name&gt;.&lt;location&gt;.your-objectstorage.com. Bucket and location are parsed from the endpoint URL.
-              </p>
-              <a
-                href="https://hetzner.cloud/?ref=JmdXQVT3XHM1"
-                target="_blank"
-                rel="noopener noreferrer"
-                class="mt-1 inline-block text-sm text-indigo-300 hover:text-indigo-200 underline"
-              >
-                Create Hetzner account / Object Storage
-              </a>
-            </div>
-
-            <div v-show="form.storage.enabled" class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm grid gap-4 md:grid-cols-2">
+            <div v-show="isS3Selected" class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm space-y-4">
               <div>
+                <label class="block text-xs font-bold text-zinc-400 uppercase mb-2 tracking-wider">Provider</label>
+                <div class="relative">
+                  <select
+                    v-model="form.storage.provider"
+                    class="w-full bg-zinc-950 text-sm font-medium text-white rounded-lg px-3 py-2.5 border border-white/10 appearance-none focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all"
+                    :disabled="props.storageLocked"
+                  >
+                    <option value="generic_s3">Generic S3-compatible</option>
+                    <option value="cloudflare_r2">Cloudflare R2</option>
+                  </select>
+                  <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-zinc-400">
+                    <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                  </div>
+                </div>
+              </div>
+
+              <div class="rounded-lg border border-white/5 bg-zinc-950/60 px-3 py-2 text-xs text-zinc-400">
+                {{ isCloudflareR2Selected ? 'Cloudflare R2 uses a single URL to derive endpoint, region, and bucket.' : 'Generic S3 keeps the previous endpoint, region, and bucket-based workflow.' }}
+              </div>
+
+              <div v-if="!isCloudflareR2Selected">
+                <p class="text-xs font-bold uppercase text-zinc-400 tracking-wider">Generic S3 help</p>
+                <p class="mt-1 text-xs text-zinc-500">
+                  Existing S3-compatible setups continue to work as before. Hetzner endpoint format like https://&lt;bucket-name&gt;.&lt;location&gt;.your-objectstorage.com is also supported.
+                </p>
+              </div>
+
+              <div v-else>
+                <p class="text-xs font-bold uppercase text-zinc-400 tracking-wider">Cloudflare R2 URL format</p>
+                <p class="mt-1 text-xs text-zinc-500">
+                  Enter a URL like https://[ACCOUNT_ID].eu.r2.cloudflarestorage.com/[BUCKET]. Region and bucket are parsed automatically.
+                </p>
+              </div>
+            </div>
+
+            <div v-show="isS3Selected" class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm grid gap-4 md:grid-cols-2">
+              <div v-if="isCloudflareR2Selected" class="md:col-span-2">
+                <label class="block text-xs font-bold text-zinc-400 uppercase mb-2 tracking-wider">Cloudflare R2 URL</label>
+                <input
+                  v-model="form.storage.providerUrl"
+                  type="text"
+                  class="w-full bg-zinc-950 text-white rounded-lg p-2.5 outline-none border border-white/10 focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50"
+                  :disabled="props.storageLocked"
+                  placeholder="https://accountid.eu.r2.cloudflarestorage.com/my-bucket"
+                />
+                <p class="mt-2 text-xs text-zinc-500">Use your account endpoint plus bucket path. Example: https://abc123.eu.r2.cloudflarestorage.com/media</p>
+              </div>
+
+              <div v-if="!isCloudflareR2Selected">
                 <label class="block text-xs font-bold text-zinc-400 uppercase mb-2 tracking-wider">Endpoint URL</label>
                 <input
                   v-model="form.storage.endpoint"
@@ -374,6 +422,28 @@ const onIconInputChange = (event: Event) => {
                   class="w-full bg-zinc-950 text-white rounded-lg p-2.5 outline-none border border-white/10 focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50"
                   :disabled="props.storageLocked"
                   placeholder="https://my-bucket.nbg1.your-objectstorage.com"
+                />
+              </div>
+
+              <div v-if="!isCloudflareR2Selected">
+                <label class="block text-xs font-bold text-zinc-400 uppercase mb-2 tracking-wider">Region</label>
+                <input
+                  v-model="form.storage.region"
+                  type="text"
+                  class="w-full bg-zinc-950 text-white rounded-lg p-2.5 outline-none border border-white/10 focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50"
+                  :disabled="props.storageLocked"
+                  placeholder="eu-central-1"
+                />
+              </div>
+
+              <div v-if="!isCloudflareR2Selected">
+                <label class="block text-xs font-bold text-zinc-400 uppercase mb-2 tracking-wider">Bucket</label>
+                <input
+                  v-model="form.storage.bucket"
+                  type="text"
+                  class="w-full bg-zinc-950 text-white rounded-lg p-2.5 outline-none border border-white/10 focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50"
+                  :disabled="props.storageLocked"
+                  placeholder="my-bucket"
                 />
               </div>
 
@@ -416,7 +486,7 @@ const onIconInputChange = (event: Event) => {
                   :disabled="s3TestState === 'testing' || props.storageLocked"
                   @click="emit('test-storage')"
                 >
-                  {{ s3TestState === 'testing' ? 'Testing...' : 'Test Connection' }}
+                  {{ s3TestState === 'testing' ? 'Testing...' : isCloudflareR2Selected ? 'Test R2 Connection' : 'Test S3 Connection' }}
                 </button>
                 <p
                   v-if="s3TestMessage"

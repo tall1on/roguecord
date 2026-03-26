@@ -137,6 +137,8 @@ export interface Server {
 }
 
 export interface ServerStorageS3Settings {
+  provider: 'generic_s3' | 'cloudflare_r2';
+  providerUrl: string;
   endpoint: string;
   region: string;
   bucket: string;
@@ -279,6 +281,8 @@ export const useChatStore = defineStore('chat', () => {
     storageType: 'data_dir',
     storageLastError: null,
     s3: {
+      provider: 'generic_s3',
+      providerUrl: '',
       endpoint: '',
       region: '',
       bucket: '',
@@ -345,6 +349,8 @@ export const useChatStore = defineStore('chat', () => {
     storageType: payload.storageType === 's3' ? 's3' : 'data_dir',
     storageLastError: typeof payload.storageLastError === 'string' ? payload.storageLastError : null,
     s3: {
+      provider: payload?.s3?.provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3',
+      providerUrl: payload?.s3?.providerUrl || '',
       endpoint: payload?.s3?.endpoint || '',
       region: payload?.s3?.region || '',
       bucket: payload?.s3?.bucket || '',
@@ -989,15 +995,17 @@ export const useChatStore = defineStore('chat', () => {
     onlineUserIds.value.clear();
     currentUser.value = null;
     server.value = null;
-    serverStorageSettings.value = {
-      storageType: 'data_dir',
-      storageLastError: null,
-      s3: {
-        endpoint: '',
-        region: '',
-        bucket: '',
-        accessKey: '',
-        secretKey: '',
+      serverStorageSettings.value = {
+        storageType: 'data_dir',
+        storageLastError: null,
+        s3: {
+          provider: 'generic_s3',
+          providerUrl: '',
+          endpoint: '',
+          region: '',
+          bucket: '',
+          accessKey: '',
+          secretKey: '',
         prefix: ''
       },
       migration: {
@@ -1626,13 +1634,17 @@ export const useChatStore = defineStore('chat', () => {
     rulesChannelId: string | null,
     welcomeChannelId: string | null,
     storage?: {
-      enabled: boolean;
-      endpoint: string;
-      region: string;
-      bucket: string;
-      accessKey: string;
-      secretKey: string;
-      prefix: string;
+      storageType: 'data_dir' | 's3';
+      s3?: {
+        provider: 'generic_s3' | 'cloudflare_r2';
+        providerUrl: string;
+        endpoint: string;
+        region: string;
+        bucket: string;
+        accessKey: string;
+        secretKey: string;
+        prefix: string;
+      };
     },
     icon?: {
       iconDataUrl?: string | null;
@@ -1657,23 +1669,36 @@ export const useChatStore = defineStore('chat', () => {
       removeIcon: icon?.removeIcon === true,
       storage: storage
         ? {
-          enabled: storage.enabled,
-          endpoint: storage.endpoint,
-          region: storage.region,
-          bucket: storage.bucket,
-          accessKey: storage.accessKey,
-          secretKey: storage.secretKey,
-          prefix: storage.prefix
+          storageType: storage.storageType,
+          s3: storage.s3
+            ? {
+              provider: storage.s3.provider,
+              providerUrl: storage.s3.providerUrl,
+              endpoint: storage.s3.endpoint,
+              region: storage.s3.region,
+              bucket: storage.s3.bucket,
+              accessKey: storage.s3.accessKey,
+              secretKey: storage.s3.secretKey,
+              prefix: storage.s3.prefix
+            }
+            : undefined
         }
         : undefined
     });
   };
 
   const testServerStorageSettings = async (storage: {
-    endpoint: string;
-    accessKey: string;
-    secretKey: string;
-    prefix: string;
+    storageType: 'data_dir' | 's3';
+    s3?: {
+      provider: 'generic_s3' | 'cloudflare_r2';
+      providerUrl: string;
+      endpoint: string;
+      region: string;
+      bucket: string;
+      accessKey: string;
+      secretKey: string;
+      prefix: string;
+    };
   }): Promise<ServerStorageTestResult> => {
     if (pendingStorageTestTimeout) {
       window.clearTimeout(pendingStorageTestTimeout);
@@ -1686,7 +1711,7 @@ export const useChatStore = defineStore('chat', () => {
         if (pendingStorageTestResolve) {
           pendingStorageTestResolve({
             ok: false,
-            message: 'S3 connection test timed out. Please try again.'
+            message: 'Storage connection test timed out. Please try again.'
           });
           pendingStorageTestResolve = null;
         }
@@ -1695,10 +1720,19 @@ export const useChatStore = defineStore('chat', () => {
 
       send('test_server_storage_s3', {
         storage: {
-          endpoint: storage.endpoint,
-          accessKey: storage.accessKey,
-          secretKey: storage.secretKey,
-          prefix: storage.prefix
+          storageType: storage.storageType,
+          s3: storage.s3
+            ? {
+              provider: storage.s3.provider,
+              providerUrl: storage.s3.providerUrl,
+              endpoint: storage.s3.endpoint,
+              region: storage.s3.region,
+              bucket: storage.s3.bucket,
+              accessKey: storage.s3.accessKey,
+              secretKey: storage.s3.secretKey,
+              prefix: storage.s3.prefix
+            }
+            : undefined
         }
       });
     });
