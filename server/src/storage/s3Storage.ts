@@ -99,7 +99,7 @@ const parseCloudflareR2Url = (providerUrl: string) => {
   return {
     providerUrl: sanitizedUrl,
     endpoint: `https://${accountId}.${region}.r2.cloudflarestorage.com`,
-    region,
+    region: 'auto',
     bucket
   };
 };
@@ -222,6 +222,7 @@ const resolveS3ClientConfig = (config: S3StorageConfig): ResolvedS3Config => {
     return {
       providerKey: 'cloudflare_r2',
       ...config,
+      region: 'auto',
       forcePathStyle: true,
       provider: 'cloudflare_r2'
     };
@@ -265,6 +266,18 @@ const buildSignerRegionFallbacks = (primaryRegion: string) => {
 const buildS3ValidationModes = (config: S3StorageConfig): S3ClientMode[] => {
   const sanitized = sanitizeConfig(config);
   const resolved = resolveS3ClientConfig(sanitized);
+
+   if (resolved.provider === 'cloudflare_r2') {
+    return [
+      {
+        endpoint: resolved.endpoint,
+        region: 'auto',
+        forcePathStyle: true,
+        label: 'path-style/cloudflare-r2'
+      }
+    ];
+  }
+
   const signerRegions = buildSignerRegionFallbacks(resolved.region);
 
   if (resolved.provider === 'hetzner') {
