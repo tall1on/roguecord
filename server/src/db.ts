@@ -19,6 +19,7 @@ export const channelsSchemaReady = new Promise<void>((resolve, reject) => {
 });
 
 let serversSchemaMigrated = false;
+let usersSchemaMigrated = false;
 let channelsSchemaMigrated = false;
 let folderFilesSchemaMigrated = false;
 let messageAttachmentsSchemaMigrated = false;
@@ -29,15 +30,16 @@ function failSchemaInitialization(error: Error) {
   rejectChannelsSchemaReady?.(error);
 }
 
-function markSchemaStepDone(step: 'servers' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions') {
+function markSchemaStepDone(step: 'servers' | 'users' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions') {
   if (step === 'servers') serversSchemaMigrated = true;
+  if (step === 'users') usersSchemaMigrated = true;
   if (step === 'channels') channelsSchemaMigrated = true;
   if (step === 'folder_files') folderFilesSchemaMigrated = true;
   if (step === 'message_attachments') messageAttachmentsSchemaMigrated = true;
   if (step === 'messages') messagesSchemaMigrated = true;
   if (step === 'message_reactions') messageReactionsSchemaMigrated = true;
 
-  if (serversSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated) {
+  if (serversSchemaMigrated && usersSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated) {
     resolveChannelsSchemaReady?.();
   }
 }
@@ -107,6 +109,7 @@ function initializeDatabase() {
         username TEXT NOT NULL,
         public_key TEXT UNIQUE NOT NULL,
         avatar_url TEXT,
+        avatar_mime_type TEXT,
         last_ip TEXT,
         role TEXT DEFAULT 'user',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -114,10 +117,24 @@ function initializeDatabase() {
     `, (err) => {
       if (err) {
         console.error('Error creating users table:', err.message);
+        failSchemaInitialization(err);
         return;
       }
 
-      db.run('ALTER TABLE users ADD COLUMN last_ip TEXT', () => {});
+      migrateUsersTableSchema((migrationErr) => {
+        if (migrationErr) {
+          console.error('Error migrating users table:', migrationErr.message);
+          failSchemaInitialization(migrationErr);
+          return;
+        }
+
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_users_public_key ON users(public_key)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_users_username ON users(username COLLATE NOCASE)');
+        });
+
+        markSchemaStepDone('users');
+      });
     });
 
     // Categories Table
@@ -599,6 +616,68 @@ function migrateChannelsTableSchema(done: (error?: Error) => void) {
         }
       );
     });
+  });
+}
+
+function migrateUsersTableSchema(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(users)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasAvatarUrl = columns.some((column) => column.name === 'avatar_url');
+    const hasAvatarMimeType = columns.some((column) => column.name === 'avatar_mime_type');
+    const hasLastIp = columns.some((column) => column.name === 'last_ip');
+    const hasRole = columns.some((column) => column.name === 'role');
+    const hasCreatedAt = columns.some((column) => column.name === 'created_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasAvatarUrl) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_url TEXT');
+    if (!hasAvatarMimeType) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_mime_type TEXT');
+    if (!hasLastIp) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN last_ip TEXT');
+    if (!hasRole) pendingAlterStatements.push("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'");
+    if (!hasCreatedAt) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP');
+
+    const finalizeMigration = () => {
+      db.run(
+        `
+          UPDATE users
+          SET
+            avatar_mime_type = CASE
+              WHEN LOWER(COALESCE(avatar_mime_type, '')) IN ('image/png', 'image/jpeg') THEN LOWER(avatar_mime_type)
+              ELSE CASE
+                WHEN LOWER(COALESCE(avatar_url, '')) LIKE 'data:image/png;%' THEN 'image/png'
+                WHEN LOWER(COALESCE(avatar_url, '')) LIKE 'data:image/jpeg;%' THEN 'image/jpeg'
+                WHEN LOWER(COALESCE(avatar_url, '')) LIKE 'data:image/jpg;%' THEN 'image/jpeg'
+                WHEN LOWER(COALESCE(avatar_url, '')) LIKE '%.png' THEN 'image/png'
+                WHEN LOWER(COALESCE(avatar_url, '')) LIKE '%.jpg' OR LOWER(COALESCE(avatar_url, '')) LIKE '%.jpeg' THEN 'image/jpeg'
+                ELSE NULL
+              END
+            END,
+            role = COALESCE(NULLIF(role, ''), 'user'),
+            created_at = COALESCE(created_at, CURRENT_TIMESTAMP)
+        `,
+        (updateErr) => done(updateErr || undefined)
+      );
+    };
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        finalizeMigration();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
   });
 }
 

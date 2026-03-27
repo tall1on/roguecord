@@ -274,6 +274,7 @@ const activeServer = computed(() => {
 
 const userPanelName = computed(() => chatStore.currentUser?.username || chatStore.localUsername || 'Not connected')
 const hasCurrentUser = computed(() => !!chatStore.currentUser)
+const userPanelAvatarUrl = computed(() => chatStore.currentUser?.avatar_url || chatStore.getLocalAvatar())
 
 const handleClickOutside = (event: MouseEvent) => {
   if (showVoiceStats.value && voiceStatsContainerRef.value && !voiceStatsContainerRef.value.contains(event.target as Node)) {
@@ -703,8 +704,9 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
 
     <div class="h-[52px] bg-zinc-900 border-t border-white/5 px-2 flex items-center shrink-0">
       <div class="flex items-center hover:bg-zinc-800/80 p-1.5 rounded-lg cursor-pointer flex-1 min-w-0 transition-colors">
-        <div class="w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 relative shrink-0 flex items-center justify-center font-bold text-sm" :class="chatStore.currentUser && isVoiceUserSpeaking(chatStore.currentUser.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-900' : ''">
-          {{ userPanelName.charAt(0).toUpperCase() }}
+        <div class="w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 relative shrink-0 flex items-center justify-center font-bold text-sm overflow-hidden" :class="chatStore.currentUser && isVoiceUserSpeaking(chatStore.currentUser.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-900' : ''">
+          <img v-if="userPanelAvatarUrl" :src="userPanelAvatarUrl" alt="Avatar" class="w-full h-full object-cover" />
+          <span v-else>{{ userPanelName.charAt(0).toUpperCase() }}</span>
           <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-900" :class="hasCurrentUser ? 'bg-green-500' : 'bg-zinc-600'"></div>
         </div>
         <div class="ml-2.5 flex-1 min-w-0">
