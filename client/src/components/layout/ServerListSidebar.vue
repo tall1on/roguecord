@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Plus } from 'lucide-vue-next'
+import { reactive } from 'vue'
 import { useChatStore } from '../../stores/chat'
 import RougeCordMark from '../branding/RougeCordMark.vue'
 
@@ -11,6 +12,29 @@ const emit = defineEmits<{
 
 const chatStore = useChatStore()
 let lastServerRefreshAt = 0
+const failedServerIcons = reactive<Record<string, boolean>>({})
+
+const getDisplayIconUrl = (connectionId: string, iconUrl?: string | null, cachedIconUrl?: string | null) => {
+  if (!iconUrl) {
+    return cachedIconUrl || null
+  }
+
+  if (failedServerIcons[connectionId]) {
+    return cachedIconUrl || null
+  }
+
+  return iconUrl
+}
+
+const handleServerIconError = (connectionId: string) => {
+  failedServerIcons[connectionId] = true
+}
+
+const handleServerIconLoad = (connectionId: string) => {
+  if (failedServerIcons[connectionId]) {
+    delete failedServerIcons[connectionId]
+  }
+}
 
 const handleServerListOpened = () => {
   const now = Date.now()
@@ -53,7 +77,14 @@ const handleServerListOpened = () => {
         class="w-12 h-12 flex items-center justify-center transition-all duration-300 font-bold text-lg overflow-hidden border"
         :class="chatStore.activeConnectionId === connection.id ? 'rounded-2xl bg-indigo-600 text-white border-indigo-500/50 shadow-lg shadow-indigo-600/20' : 'rounded-full hover:rounded-2xl bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border-white/5 hover:border-white/10 shadow-sm'"
       >
-        <img v-if="connection.iconUrl" :src="connection.iconUrl" alt="Server Icon" class="w-full h-full object-cover" />
+        <img
+          v-if="getDisplayIconUrl(connection.id, connection.iconUrl, connection.cachedIconUrl)"
+          :src="getDisplayIconUrl(connection.id, connection.iconUrl, connection.cachedIconUrl) || undefined"
+          alt="Server Icon"
+          class="w-full h-full object-cover"
+          @error="handleServerIconError(connection.id)"
+          @load="handleServerIconLoad(connection.id)"
+        />
         <span v-else>{{ connection.name.charAt(0).toUpperCase() }}</span>
       </div>
     </div>

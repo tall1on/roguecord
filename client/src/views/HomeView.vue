@@ -949,6 +949,8 @@ const resolveMessageAvatarUrl = (message: Message) => {
   return user.avatar_url
 }
 
+const getMessageInitial = (message: Message) => message.user?.username.charAt(0).toUpperCase() || '?'
+
 type RenderEntry =
   | { type: 'divider'; key: string; label: string }
   | { type: 'message'; key: string; message: Message }
@@ -1120,9 +1122,9 @@ watch(
             class="flex items-start gap-3 hover:bg-zinc-900/40 py-1 px-2 -mx-2 rounded-lg transition-colors duration-100 group"
             @contextmenu.stop.prevent="openMessageContextMenu($event, entry.message)"
           >
-            <div class="w-10 h-10 rounded-full bg-indigo-500 shrink-0 flex items-center justify-center text-white font-bold mt-0.5 overflow-hidden">
+            <div class="w-10 h-10 rounded-full bg-indigo-500/20 text-indigo-200 shrink-0 flex items-center justify-center font-bold mt-0.5 overflow-hidden">
               <img v-if="resolveMessageAvatarUrl(entry.message)" :src="resolveMessageAvatarUrl(entry.message) || ''" alt="Avatar" class="w-full h-full object-cover" />
-              <span v-else>{{ entry.message.user?.username.charAt(0).toUpperCase() || '?' }}</span>
+              <span v-else>{{ getMessageInitial(entry.message) }}</span>
             </div>
             <div class="flex-1 min-w-0">
               <div class="flex items-baseline gap-2 mb-[1px]">
