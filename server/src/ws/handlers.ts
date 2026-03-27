@@ -3,12 +3,15 @@ import {
   createUser,
   getUserByPublicKey,
   createCategory,
+  deleteCategory,
   createChannel,
   getNextChannelPosition,
   deleteChannel,
   getChannelById,
   getCategories,
   getChannels,
+  categoryHasChannels,
+  reorderCategories,
   reorderChannels,
   getChannelMessages,
   createMessage,
@@ -1313,6 +1316,12 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'reorder_channels':
         await handleReorderChannels(client, payload);
         break;
+      case 'reorder_categories':
+        await handleReorderCategories(client, payload);
+        break;
+      case 'delete_category':
+        await handleDeleteCategory(client, payload);
+        break;
       case 'delete_channel':
         await handleDeleteChannel(client, payload);
         break;
@@ -1823,6 +1832,100 @@ const handleReorderChannels = async (
   } catch (error) {
     console.error('[WS DEBUG] Failed to reorder channels:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to reorder channels' } }));
+  }
+};
+
+const handleReorderCategories = async (
+  client: ClientConnection,
+  payload: { categories?: Array<{ id?: string; position?: number }> }
+) => {
+  if (!client.userId) return;
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can reorder categories' } }));
+    return;
+  }
+
+  const requestedUpdates = Array.isArray(payload?.categories) ? payload.categories : [];
+  if (!requestedUpdates.length) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Category reorder payload is required' } }));
+    return;
+  }
+
+  const existingCategories = await getCategories();
+  const existingById = new Map(existingCategories.map((category) => [category.id, category]));
+  const normalizedUpdates: Array<{ id: string; position: number }> = [];
+  const seenIds = new Set<string>();
+
+  for (const entry of requestedUpdates) {
+    const id = typeof entry?.id === 'string' ? entry.id : '';
+    if (!id || seenIds.has(id) || !existingById.has(id)) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid category reorder payload' } }));
+      return;
+    }
+
+    const position = Number(entry?.position);
+    if (!Number.isInteger(position) || position < 0) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid category reorder position' } }));
+      return;
+    }
+
+    normalizedUpdates.push({ id, position });
+    seenIds.add(id);
+  }
+
+  try {
+    await reorderCategories(normalizedUpdates);
+    const categories = await getCategories();
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'categories_reordered',
+      payload: { categories }
+    });
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to reorder categories:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to reorder categories' } }));
+  }
+};
+
+const handleDeleteCategory = async (client: ClientConnection, payload: { category_id?: string }) => {
+  if (!client.userId) return;
+
+  const categoryId = typeof payload?.category_id === 'string' ? payload.category_id : '';
+  if (!categoryId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Category ID is required' } }));
+    return;
+  }
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can delete categories' } }));
+    return;
+  }
+
+  const categories = await getCategories();
+  if (!categories.some((category) => category.id === categoryId)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Category not found' } }));
+    return;
+  }
+
+  if (await categoryHasChannels(categoryId)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Category must be empty before deletion' } }));
+    return;
+  }
+
+  try {
+    await deleteCategory(categoryId);
+    const nextCategories = await getCategories();
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'category_deleted',
+      payload: { category_id: categoryId, categories: nextCategories }
+    });
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to delete category:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to delete category' } }));
   }
 };
 

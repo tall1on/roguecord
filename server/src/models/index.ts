@@ -354,6 +354,43 @@ export const getCategories = async (): Promise<Category[]> => {
   return dbAll<Category>('SELECT * FROM categories ORDER BY position ASC');
 };
 
+export const reorderCategories = async (
+  updates: Array<{ id: string; position: number }>
+): Promise<void> => {
+  if (!updates.length) {
+    return;
+  }
+
+  await dbRun('BEGIN TRANSACTION');
+
+  try {
+    for (const update of updates) {
+      await dbRun(
+        'UPDATE categories SET position = ? WHERE id = ?',
+        [update.position, update.id]
+      );
+    }
+
+    await dbRun('COMMIT');
+  } catch (error) {
+    try {
+      await dbRun('ROLLBACK');
+    } catch {
+      // no-op
+    }
+    throw error;
+  }
+};
+
+export const deleteCategory = async (id: string): Promise<void> => {
+  await dbRun('DELETE FROM categories WHERE id = ?', [id]);
+};
+
+export const categoryHasChannels = async (id: string): Promise<boolean> => {
+  const row = await dbGet<{ count: number }>('SELECT COUNT(*) as count FROM channels WHERE category_id = ?', [id]);
+  return Number(row?.count || 0) > 0;
+};
+
 // --- Channels ---
 export interface Channel {
   id: string;

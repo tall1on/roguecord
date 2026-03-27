@@ -1662,6 +1662,28 @@ export const useChatStore = defineStore('chat', () => {
     send('create_category', { name });
   };
 
+  const reorderCategories = (updatedCategories: Array<Pick<Category, 'id' | 'position'>>) => {
+    if (!updatedCategories.length) {
+      return;
+    }
+
+    send('reorder_categories', {
+      categories: updatedCategories.map((category) => ({
+        id: category.id,
+        position: category.position
+      }))
+    });
+  };
+
+  const deleteCategory = (category_id: string) => {
+    if (!category_id) {
+      lastError.value = 'Category ID is required';
+      return;
+    }
+
+    send('delete_category', { category_id });
+  };
+
   const deleteChannel = (channel_id: string) => {
     if (!channel_id) {
       lastError.value = 'Channel ID is required';
@@ -2090,7 +2112,9 @@ export const useChatStore = defineStore('chat', () => {
     disconnect,
     authenticate,
     createCategory,
+    reorderCategories,
     createChannel,
+    deleteCategory,
     deleteChannel,
     reorderChannels,
     updateServerSettings,
