@@ -1633,7 +1633,12 @@ const handleGetChannels = async (client: ClientConnection) => {
 
   client.ws.send(JSON.stringify({
     type: 'channels_list',
-    payload: { categories, channels, unreadStates }
+    payload: {
+      categories,
+      channels,
+      unreadStates,
+      uncategorized_category_deleted: !channels.some((channel) => channel.category_id == null)
+    }
   }));
 
   const voiceParticipants: Record<string, any[]> = {};
