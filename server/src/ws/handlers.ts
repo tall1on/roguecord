@@ -1322,6 +1322,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'delete_category':
         await handleDeleteCategory(client, payload);
         break;
+      case 'delete_uncategorized_category':
+        await handleDeleteUncategorizedCategory(client);
+        break;
       case 'delete_channel':
         await handleDeleteChannel(client, payload);
         break;
@@ -1927,6 +1930,27 @@ const handleDeleteCategory = async (client: ClientConnection, payload: { categor
     console.error('[WS DEBUG] Failed to delete category:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to delete category' } }));
   }
+};
+
+const handleDeleteUncategorizedCategory = async (client: ClientConnection) => {
+  if (!client.userId) return;
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can delete categories' } }));
+    return;
+  }
+
+  const channels = await getChannels();
+  if (channels.some((channel) => channel.category_id == null)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Category must be empty before deletion' } }));
+    return;
+  }
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'uncategorized_category_deleted',
+    payload: {}
+  });
 };
 
 const handleDeleteChannel = async (client: ClientConnection, payload: { channel_id: string }) => {
