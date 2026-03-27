@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useChatStore } from '../../../stores/chat'
 import { useWebRtcStore } from '../../../stores/webrtc'
 
-type SettingsSection = 'general' | 'audio' | 'connections' | 'server'
+type SettingsSection = 'general' | 'audio' | 'connections' | 'identity' | 'server'
 
 const props = defineProps<{
   visible: boolean
@@ -22,6 +22,23 @@ const webrtcStore = useWebRtcStore()
 
 const editedUsername = ref(chatStore.localUsername || '')
 const adminKeyInput = ref('')
+const identityStatus = ref<string | null>(null)
+const identityError = ref<string | null>(null)
+const identityImportInput = ref<HTMLInputElement | null>(null)
+
+const currentIdentityFingerprint = computed(() => {
+  const identity = chatStore.getStoredIdentityExport()
+  if (!identity) {
+    return null
+  }
+
+  const fingerprintSource = identity.publicKey.replace(/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\s+/g, '')
+  if (!fingerprintSource) {
+    return null
+  }
+
+  return fingerprintSource.slice(-16).match(/.{1,4}/g)?.join(':') ?? fingerprintSource.slice(-16)
+})
 
 const saveUsernamePreference = () => {
   if (editedUsername.value.trim()) {
@@ -33,6 +50,83 @@ const handleAdminKeySubmit = () => {
   if (adminKeyInput.value.trim()) {
     chatStore.submitAdminKey(adminKeyInput.value.trim())
     adminKeyInput.value = ''
+  }
+}
+
+const resetIdentityMessages = () => {
+  identityStatus.value = null
+  identityError.value = null
+}
+
+const downloadIdentity = () => {
+  resetIdentityMessages()
+  const identity = chatStore.getStoredIdentityExport()
+
+  if (!identity) {
+    identityError.value = 'No client identity is available to export yet.'
+    return
+  }
+
+  const blob = new Blob([JSON.stringify(identity, null, 2)], { type: 'application/json' })
+  const url = window.URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+  link.href = url
+  link.download = `roguecord-identity-${timestamp}.json`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  window.URL.revokeObjectURL(url)
+  identityStatus.value = 'Client identity exported successfully.'
+}
+
+const promptIdentityImport = () => {
+  resetIdentityMessages()
+  identityImportInput.value?.click()
+}
+
+const handleIdentityFileSelected = (event: Event) => {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0] ?? null
+
+  if (!file) {
+    return
+  }
+
+  const confirmed = window.confirm('Importing this identity will overwrite your current client identity. You may need to reconnect for all servers to recognize the new identity. Continue?')
+  if (!confirmed) {
+    target.value = ''
+    return
+  }
+
+  void applyIdentityImport(file, target)
+}
+
+const applyIdentityImport = async (file: File, input: HTMLInputElement) => {
+  resetIdentityMessages()
+
+  try {
+    const fileText = await file.text()
+    const parsed = JSON.parse(fileText) as {
+      version?: number
+      algorithm?: string
+      publicKey?: string
+      privateKeyJwk?: string
+    }
+
+    await chatStore.importStoredIdentity({
+      version: parsed.version as 1,
+      exportedAt: new Date().toISOString(),
+      algorithm: parsed.algorithm as 'ECDSA-P256-SHA256',
+      publicKey: parsed.publicKey ?? '',
+      privateKeyJwk: parsed.privateKeyJwk ?? ''
+    })
+
+    identityStatus.value = 'Client identity imported. Reconnect to active servers to start using it everywhere.'
+  } catch (error) {
+    identityError.value = error instanceof Error ? error.message : 'Failed to import identity file.'
+  } finally {
+    input.value = ''
   }
 }
 
@@ -114,6 +208,12 @@ watch(() => chatStore.localUsername, (value) => {
           class="w-full text-left px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200" 
           :class="activeSection === 'connections' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'"
         >Connections</button>
+
+        <button 
+          @click="emit('update:activeSection', 'identity')" 
+          class="w-full text-left px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200" 
+          :class="activeSection === 'identity' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'"
+        >Identity</button>
         
         <div class="my-2 border-t border-white/5"></div>
         
@@ -138,6 +238,7 @@ watch(() => chatStore.localUsername, (value) => {
               activeSection === 'general' ? 'General Settings'
               : activeSection === 'audio' ? 'Audio & Voice'
               : activeSection === 'connections' ? 'Connections'
+              : activeSection === 'identity' ? 'Client Identity'
               : 'Server Tools'
             }}
           </h2>
@@ -146,6 +247,7 @@ watch(() => chatStore.localUsername, (value) => {
               activeSection === 'general' ? 'Basic client behavior and profile defaults.'
               : activeSection === 'audio' ? 'Input/output devices, gain and voice cleanup.'
               : activeSection === 'connections' ? 'Manage your saved servers and quick connect.'
+              : activeSection === 'identity' ? 'Export or replace the cryptographic identity used to authenticate this client.'
               : 'Admin and maintenance actions for active servers.'
             }}
           </p>
@@ -310,6 +412,50 @@ watch(() => chatStore.localUsername, (value) => {
                 Remove
               </button>
             </div>
+          </div>
+        </div>
+
+        <div v-else-if="activeSection === 'identity'" class="space-y-6 max-w-2xl">
+          <div class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm space-y-4">
+            <div>
+              <h3 class="text-sm font-bold text-zinc-300 uppercase tracking-wider">Stored Identity</h3>
+              <p class="text-sm text-zinc-400 mt-2">This client uses a locally stored ECDSA keypair for authentication. Export it to back it up, or import a previously exported file to replace the current identity.</p>
+            </div>
+
+            <div class="rounded-lg border border-white/5 bg-zinc-950 p-4 space-y-2">
+              <div class="flex items-center justify-between gap-4">
+                <span class="text-xs font-semibold uppercase tracking-wider text-zinc-500">Status</span>
+                <span class="text-sm font-medium" :class="chatStore.hasStoredIdentity ? 'text-emerald-400' : 'text-zinc-400'">
+                  {{ chatStore.hasStoredIdentity ? 'Identity available' : 'Identity will be generated on first authentication' }}
+                </span>
+              </div>
+              <div v-if="currentIdentityFingerprint" class="flex items-center justify-between gap-4">
+                <span class="text-xs font-semibold uppercase tracking-wider text-zinc-500">Fingerprint</span>
+                <code class="text-xs text-zinc-300 font-mono">{{ currentIdentityFingerprint }}</code>
+              </div>
+            </div>
+
+            <div v-if="identityStatus" class="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">
+              {{ identityStatus }}
+            </div>
+
+            <div v-if="identityError" class="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+              {{ identityError }}
+            </div>
+
+            <div class="flex flex-wrap gap-3">
+              <button @click="downloadIdentity" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-lg font-medium transition-colors duration-200 shadow-sm">
+                Export Identity
+              </button>
+              <button @click="promptIdentityImport" class="bg-zinc-800 hover:bg-zinc-700 text-white px-5 py-2.5 rounded-lg font-medium transition-colors duration-200 border border-white/10">
+                Import Identity
+              </button>
+              <input ref="identityImportInput" type="file" accept="application/json,.json" class="hidden" @change="handleIdentityFileSelected" />
+            </div>
+
+            <p class="text-xs text-amber-300/80 bg-amber-500/10 border border-amber-500/20 rounded-lg px-4 py-3">
+              Importing overwrites the current identity immediately in local storage. Existing server sessions may continue using the old identity until you reconnect.
+            </p>
           </div>
         </div>
 
