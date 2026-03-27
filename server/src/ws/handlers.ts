@@ -1062,7 +1062,16 @@ const migrateManagedStorageRecord = async (input: {
     return null;
   }
   if (!record.storageKey) {
-    throw new Error(`Missing S3 storage key for ${record.kind} ${record.id}`);
+    console.warn('[STORAGE MIGRATION] Managed S3 record storage key missing; skipping record', {
+      kind: record.kind,
+      id: record.id,
+      target
+    });
+    await markManagedS3RecordAsOrphaned();
+    return {
+      record,
+      targetStorageKey: null
+    };
   }
   if (!sourceS3Config) {
     throw new Error(`Missing source S3 configuration for ${record.kind} ${record.id}`);
