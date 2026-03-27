@@ -379,8 +379,18 @@ export const createChannel = async (
   return (await dbGet<Channel>('SELECT * FROM channels WHERE id = ?', [id]))!;
 };
 
+export const getNextChannelPosition = async (categoryId: string | null): Promise<number> => {
+  const row = await dbGet<{ maxPosition: number | null }>(
+    'SELECT MAX(position) as maxPosition FROM channels WHERE ((category_id IS NULL AND ? IS NULL) OR category_id = ?)',
+    [categoryId, categoryId]
+  );
+
+  const maxPosition = Number(row?.maxPosition ?? -1);
+  return Number.isFinite(maxPosition) ? maxPosition + 1 : 0;
+};
+
 export const getChannels = async (): Promise<Channel[]> => {
-  return dbAll<Channel>('SELECT * FROM channels ORDER BY position ASC');
+  return dbAll<Channel>('SELECT * FROM channels ORDER BY COALESCE(category_id, id) ASC, position ASC, name COLLATE NOCASE ASC');
 };
 
 export const getChannelById = async (id: string): Promise<Channel | undefined> => {
@@ -398,6 +408,34 @@ export const deleteChannel = async (id: string): Promise<void> => {
   await dbRun('DELETE FROM rss_channel_items WHERE channel_id = ?', [id]);
   await dbRun('DELETE FROM folder_channel_files WHERE channel_id = ?', [id]);
   await dbRun('DELETE FROM channels WHERE id = ?', [id]);
+};
+
+export const reorderChannels = async (
+  updates: Array<{ id: string; category_id: string | null; position: number }>
+): Promise<void> => {
+  if (!updates.length) {
+    return;
+  }
+
+  await dbRun('BEGIN TRANSACTION');
+
+  try {
+    for (const update of updates) {
+      await dbRun(
+        'UPDATE channels SET category_id = ?, position = ? WHERE id = ?',
+        [update.category_id, update.position, update.id]
+      );
+    }
+
+    await dbRun('COMMIT');
+  } catch (error) {
+    try {
+      await dbRun('ROLLBACK');
+    } catch {
+      // no-op
+    }
+    throw error;
+  }
 };
 
 export interface FolderChannelFile {

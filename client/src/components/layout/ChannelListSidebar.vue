@@ -26,6 +26,123 @@ const contextMenuVisible = ref(false)
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 const contextMenuChannel = ref<Channel | null>(null)
+const draggedChannelId = ref<string | null>(null)
+const dragOverChannelId = ref<string | null>(null)
+
+const sortChannels = (channelList: Channel[]) => {
+  return [...channelList].sort((a, b) => {
+    if (a.position !== b.position) {
+      return a.position - b.position
+    }
+    return a.name.localeCompare(b.name)
+  })
+}
+
+const channelsByCategory = computed(() => {
+  const groups = new Map<string | null, Channel[]>()
+
+  for (const channel of chatStore.activeServerChannels) {
+    const key = channel.category_id ?? null
+    const existing = groups.get(key) || []
+    existing.push(channel)
+    groups.set(key, existing)
+  }
+
+  for (const [key, channelList] of groups.entries()) {
+    groups.set(key, sortChannels(channelList))
+  }
+
+  return groups
+})
+
+const uncategorizedChannels = computed(() => channelsByCategory.value.get(null) || [])
+
+const getCategoryChannels = (categoryId: string) => channelsByCategory.value.get(categoryId) || []
+
+const resetDragState = () => {
+  draggedChannelId.value = null
+  dragOverChannelId.value = null
+}
+
+const handleDragStart = (channel: Channel) => {
+  if (!props.isAdmin) return
+  draggedChannelId.value = channel.id
+  dragOverChannelId.value = channel.id
+}
+
+const handleDragOver = (event: DragEvent, channel: Channel) => {
+  if (!props.isAdmin || !draggedChannelId.value || draggedChannelId.value === channel.id) return
+  event.preventDefault()
+  dragOverChannelId.value = channel.id
+}
+
+const handleDrop = (targetChannel: Channel) => {
+  if (!props.isAdmin || !draggedChannelId.value || draggedChannelId.value === targetChannel.id) {
+    resetDragState()
+    return
+  }
+
+  const sourceChannel = chatStore.activeServerChannels.find((channel) => channel.id === draggedChannelId.value)
+  if (!sourceChannel) {
+    resetDragState()
+    return
+  }
+
+  const targetGroup = sortChannels(chatStore.activeServerChannels.filter((channel) => channel.category_id === targetChannel.category_id))
+  const sourceIndex = targetGroup.findIndex((channel) => channel.id === sourceChannel.id)
+  const targetIndex = targetGroup.findIndex((channel) => channel.id === targetChannel.id)
+
+  if (targetIndex === -1) {
+    resetDragState()
+    return
+  }
+
+  if (sourceChannel.category_id !== targetChannel.category_id) {
+    resetDragState()
+    return
+  }
+
+  const reorderedGroup = [...targetGroup]
+  if (sourceIndex !== -1) {
+    reorderedGroup.splice(sourceIndex, 1)
+  }
+  const insertionIndex = targetIndex
+  reorderedGroup.splice(insertionIndex, 0, { ...sourceChannel, category_id: targetChannel.category_id })
+
+  const updates = reorderedGroup.map((channel, index) => ({
+    id: channel.id,
+    category_id: targetChannel.category_id,
+    position: index
+  }))
+
+  chatStore.reorderChannels(updates)
+  resetDragState()
+}
+
+const handleDragEnd = () => {
+  resetDragState()
+}
+
+const isDragTarget = (channelId: string) => dragOverChannelId.value === channelId
+
+const channelRowClass = (channel: Channel) => {
+  const baseClass = isChannelActive(channel)
+    ? 'bg-zinc-800/80 text-white shadow-sm'
+    : isChannelUnread(channel)
+      ? 'text-white hover:bg-zinc-900/80'
+      : 'hover:bg-zinc-900/60 text-zinc-400 hover:text-zinc-300'
+
+  return [
+    baseClass,
+    props.isAdmin ? 'admin-draggable-channel' : '',
+    draggedChannelId.value === channel.id ? 'opacity-60' : '',
+    isDragTarget(channel.id) ? 'ring-1 ring-indigo-400/70 bg-zinc-900/90' : ''
+  ]
+}
+
+watch(() => chatStore.activeConnectionId, () => {
+  resetDragState()
+})
 
 const formattedBandwidth = computed(() => {
   const bandwidthKbps = webrtcStore.bandwidth
@@ -187,11 +304,16 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
             </button>
           </div>
 
-          <div v-for="channel in chatStore.activeServerChannels.filter(c => c.category_id === category.id)" :key="channel.id">
+          <div v-for="channel in getCategoryChannels(category.id)" :key="channel.id">
             <div
               class="relative flex items-center px-2 py-1.5 rounded-lg cursor-pointer group mb-[2px] transition-colors"
-              :class="isChannelActive(channel) ? 'bg-zinc-800/80 text-white shadow-sm' : isChannelUnread(channel) ? 'text-white hover:bg-zinc-900/80' : 'hover:bg-zinc-900/60 text-zinc-400 hover:text-zinc-300'"
+              :class="channelRowClass(channel)"
+              :draggable="isAdmin"
               @click="handleChannelClick(channel)"
+              @dragstart="handleDragStart(channel)"
+              @dragover="handleDragOver($event, channel)"
+              @drop.prevent="handleDrop(channel)"
+              @dragend="handleDragEnd"
               @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
             >
               <div v-if="isChannelUnread(channel)" class="absolute -left-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white"></div>
@@ -222,7 +344,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           </div>
         </div>
 
-        <div v-if="chatStore.activeServerChannels.filter(c => !c.category_id).length > 0" class="mb-4">
+        <div v-if="uncategorizedChannels.length > 0" class="mb-4">
           <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer">
             <div class="text-xs font-bold text-zinc-500 group-hover:text-zinc-300 uppercase tracking-widest transition-colors">Channels</div>
             <button v-if="isAdmin" class="text-zinc-500 hover:text-zinc-300 opacity-0 group-hover:opacity-100 transition-all font-bold" @click.stop="emit('open-create-channel', { categoryId: null })">
@@ -230,11 +352,16 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
             </button>
           </div>
 
-          <div v-for="channel in chatStore.activeServerChannels.filter(c => !c.category_id)" :key="channel.id">
+          <div v-for="channel in uncategorizedChannels" :key="channel.id">
             <div
               class="relative flex items-center px-2 py-1.5 rounded-lg cursor-pointer group mb-[2px] transition-colors"
-              :class="isChannelActive(channel) ? 'bg-zinc-800/80 text-white shadow-sm' : isChannelUnread(channel) ? 'text-white hover:bg-zinc-900/80' : 'hover:bg-zinc-900/60 text-zinc-400 hover:text-zinc-300'"
+              :class="channelRowClass(channel)"
+              :draggable="isAdmin"
               @click="handleChannelClick(channel)"
+              @dragstart="handleDragStart(channel)"
+              @dragover="handleDragOver($event, channel)"
+              @drop.prevent="handleDrop(channel)"
+              @dragend="handleDragEnd"
               @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
             >
               <div v-if="isChannelUnread(channel)" class="absolute -left-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white"></div>

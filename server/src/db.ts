@@ -531,6 +531,10 @@ function migrateChannelsTableSchema(done: (error?: Error) => void) {
       const supportsFolderType = tableSql.includes("'folder'");
 
       if (hasFeedUrl && supportsFolderType) {
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_channels_category_position ON channels(category_id, position)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_channels_position ON channels(position)');
+        });
         done();
         return;
       }
@@ -582,7 +586,11 @@ function migrateChannelsTableSchema(done: (error?: Error) => void) {
                     done(renameErr);
                     return;
                   }
-                  console.log('Migrated channels table schema to support rss feed_url and folder channels.');
+                  db.serialize(() => {
+                    db.run('CREATE INDEX IF NOT EXISTS idx_channels_category_position ON channels(category_id, position)');
+                    db.run('CREATE INDEX IF NOT EXISTS idx_channels_position ON channels(position)');
+                  });
+                  console.log('Migrated channels table schema to support rss feed_url, folder channels, and channel ordering indexes.');
                   done();
                 });
               });
