@@ -1464,6 +1464,9 @@ export const useChatStore = defineStore('chat', () => {
         break;
       }
 
+      case 'uncategorized_category_deleted':
+        break;
+
       case 'channel_deleted': {
         const deletedChannelId = payload.channel_id as string;
         if (!deletedChannelId) break;
@@ -1701,6 +1704,10 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     send('delete_category', { category_id });
+  };
+
+  const deleteUncategorizedCategory = () => {
+    send('delete_uncategorized_category');
   };
 
   const deleteChannel = (channel_id: string) => {
@@ -2134,6 +2141,7 @@ export const useChatStore = defineStore('chat', () => {
     reorderCategories,
     createChannel,
     deleteCategory,
+    deleteUncategorizedCategory,
     deleteChannel,
     reorderChannels,
     updateServerSettings,

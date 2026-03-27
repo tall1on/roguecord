@@ -29,6 +29,7 @@ const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 const contextMenuChannel = ref<Channel | null>(null)
 const contextMenuCategoryId = ref<string | null>(null)
+const contextMenuUncategorized = ref(false)
 const draggedCategoryId = ref<string | null>(null)
 const dragOverCategoryTargetId = ref<string | null>(null)
 const draggedChannelId = ref<string | null>(null)
@@ -365,7 +366,20 @@ const openCategoryContextMenu = (event: MouseEvent, categoryId: string) => {
   contextMenuX.value = event.clientX
   contextMenuY.value = event.clientY
   contextMenuChannel.value = null
+  contextMenuUncategorized.value = false
   contextMenuCategoryId.value = categoryId
+  contextMenuVisible.value = true
+}
+
+const openUncategorizedContextMenu = (event: MouseEvent) => {
+  if (!props.isAdmin) return
+
+  event.preventDefault()
+  contextMenuX.value = event.clientX
+  contextMenuY.value = event.clientY
+  contextMenuChannel.value = null
+  contextMenuCategoryId.value = null
+  contextMenuUncategorized.value = true
   contextMenuVisible.value = true
 }
 
@@ -380,30 +394,47 @@ const deleteChannelFromContextMenu = () => {
   contextMenuVisible.value = false
   contextMenuChannel.value = null
   contextMenuCategoryId.value = null
+  contextMenuUncategorized.value = false
   chatStore.deleteChannel(channelToDelete.id)
 }
 
 const deleteCategoryFromContextMenu = () => {
-  if (!props.isAdmin || !contextMenuCategoryId.value) return
+  if (!props.isAdmin) return
 
   const categoryId = contextMenuCategoryId.value
-  const category = chatStore.activeServerCategories.find((entry) => entry.id === categoryId)
-  if (!category) return
+  const isUncategorized = contextMenuUncategorized.value
+  const categoryName = isUncategorized
+    ? 'Channels'
+    : chatStore.activeServerCategories.find((entry) => entry.id === categoryId)?.name
 
-  if (getCategoryChannels(categoryId).length > 0) {
+  if (!isUncategorized && (!categoryId || !categoryName)) return
+
+  const categoryChannelCount = isUncategorized
+    ? uncategorizedChannels.value.length
+    : getCategoryChannels(categoryId as string).length
+
+  if (categoryChannelCount > 0) {
     contextMenuVisible.value = false
     contextMenuCategoryId.value = null
+    contextMenuUncategorized.value = false
     return
   }
 
-  if (!confirm(`Delete category ${category.name}? This cannot be undone.`)) {
+  if (!confirm(`Delete category ${categoryName}? This cannot be undone.`)) {
     return
   }
 
   contextMenuVisible.value = false
   contextMenuChannel.value = null
   contextMenuCategoryId.value = null
-  chatStore.deleteCategory(categoryId)
+  contextMenuUncategorized.value = false
+
+  if (isUncategorized) {
+    chatStore.deleteUncategorizedCategory()
+    return
+  }
+
+  chatStore.deleteCategory(categoryId as string)
 }
 
 const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss' | 'folder') => {
@@ -412,6 +443,7 @@ const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss' | 'fold
   contextMenuVisible.value = false
   contextMenuChannel.value = null
   contextMenuCategoryId.value = null
+  contextMenuUncategorized.value = false
   emit('open-create-channel', { categoryId: null, type })
 }
 
@@ -421,6 +453,7 @@ const openCreateCategoryFromContextMenu = () => {
   contextMenuVisible.value = false
   contextMenuChannel.value = null
   contextMenuCategoryId.value = null
+  contextMenuUncategorized.value = false
   emit('open-create-channel', { categoryId: null, createCategory: true })
 }
 
@@ -520,7 +553,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           @dragenter.prevent="handleCategoryDragOver($event, null)"
           @drop.prevent="handleCategoryDrop(null)"
         >
-          <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer">
+          <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer" @contextmenu.stop.prevent="openUncategorizedContextMenu">
             <div class="text-xs font-bold text-zinc-500 group-hover:text-zinc-300 uppercase tracking-widest transition-colors">Channels</div>
             <button v-if="isAdmin" class="text-zinc-500 hover:text-zinc-300 opacity-0 group-hover:opacity-100 transition-all font-bold" @click.stop="emit('open-create-channel', { categoryId: null })">
               <Plus class="w-3.5 h-3.5" />
@@ -573,11 +606,11 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           <Trash2 class="w-4 h-4" />
           Delete channel
         </button>
-        <button v-if="contextMenuCategoryId && getCategoryChannels(contextMenuCategoryId).length === 0" class="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="deleteCategoryFromContextMenu">
+        <button v-if="(contextMenuCategoryId && getCategoryChannels(contextMenuCategoryId).length === 0) || (contextMenuUncategorized && uncategorizedChannels.length === 0)" class="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="deleteCategoryFromContextMenu">
           <Trash2 class="w-4 h-4" />
           Delete category
         </button>
-        <div v-if="contextMenuChannel || contextMenuCategoryId" class="my-1 border-t border-white/5"></div>
+        <div v-if="contextMenuChannel || contextMenuCategoryId || contextMenuUncategorized" class="my-1 border-t border-white/5"></div>
         <button class="w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="openCreateChannelFromContextMenu('text')">
           <Hash class="w-4 h-4" />
           Create text channel
