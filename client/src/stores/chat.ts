@@ -8,6 +8,7 @@ export interface User {
   id: string;
   username: string;
   avatar_url: string | null;
+  avatar_mime_type?: string | null;
   role: string;
   created_at: string;
 }
@@ -211,6 +212,10 @@ const arrayBufferToHex = (buffer: ArrayBuffer) => {
     .map(b => b.toString(16).padStart(2, '0'))
     .join('');
 };
+
+const AVATAR_STORAGE_KEY = 'avatarUrl';
+
+const readStoredAvatar = () => localStorage.getItem(AVATAR_STORAGE_KEY);
 
 const generateKeyPair = async () => {
   return await window.crypto.subtle.generateKey(
@@ -529,6 +534,23 @@ export const useChatStore = defineStore('chat', () => {
     localUsername.value = username;
     localStorage.setItem('username', username);
   };
+
+  const saveLocalAvatar = (avatarUrl: string | null) => {
+    if (avatarUrl) {
+      localStorage.setItem(AVATAR_STORAGE_KEY, avatarUrl);
+    } else {
+      localStorage.removeItem(AVATAR_STORAGE_KEY);
+    }
+
+    if (currentUser.value) {
+      currentUser.value = {
+        ...currentUser.value,
+        avatar_url: avatarUrl
+      };
+    }
+  };
+
+  const getLocalAvatar = () => readStoredAvatar();
 
   const DEFAULT_SERVER_PORT = '1337';
   const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
@@ -1335,6 +1357,9 @@ export const useChatStore = defineStore('chat', () => {
       case 'authenticated':
         currentUser.value = payload.user;
         currentUserRole.value = payload.user.role || 'user';
+        if (payload.user && payload.user.avatar_url !== readStoredAvatar()) {
+          saveLocalAvatar(payload.user.avatar_url || null);
+        }
         if (payload.server) {
           applyServerState(payload.server);
         }
@@ -1698,7 +1723,7 @@ export const useChatStore = defineStore('chat', () => {
   const authenticate = async (username: string) => {
     try {
       const { publicKeyBase64 } = await getKeys();
-      send('auth:request', { username, publicKey: publicKeyBase64 });
+      send('auth:request', { username, publicKey: publicKeyBase64, avatarUrl: readStoredAvatar() });
     } catch (e) {
       console.error("Authentication request failed", e);
     }
@@ -2194,6 +2219,8 @@ export const useChatStore = defineStore('chat', () => {
     activeServerCategories,
     activeChannelMessages,
     saveLocalUsername,
+    saveLocalAvatar,
+    getLocalAvatar,
     getStoredIdentityExport,
     importStoredIdentity,
     addSavedConnection,

@@ -25,6 +25,10 @@ const adminKeyInput = ref('')
 const identityStatus = ref<string | null>(null)
 const identityError = ref<string | null>(null)
 const identityImportInput = ref<HTMLInputElement | null>(null)
+const avatarInput = ref<HTMLInputElement | null>(null)
+const avatarPreviewUrl = ref<string | null>(chatStore.getLocalAvatar())
+const avatarStatus = ref<string | null>(null)
+const avatarError = ref<string | null>(null)
 
 const currentIdentityFingerprint = computed(() => {
   const identity = chatStore.getStoredIdentityExport()
@@ -44,6 +48,80 @@ const saveUsernamePreference = () => {
   if (editedUsername.value.trim()) {
     chatStore.saveLocalUsername(editedUsername.value.trim())
   }
+}
+
+const resetAvatarMessages = () => {
+  avatarStatus.value = null
+  avatarError.value = null
+}
+
+const promptAvatarSelection = () => {
+  resetAvatarMessages()
+  avatarInput.value?.click()
+}
+
+const clearAvatar = () => {
+  chatStore.saveLocalAvatar(null)
+  avatarPreviewUrl.value = null
+  avatarStatus.value = 'Profile picture removed. It will be cleared on the next connection.'
+  avatarError.value = null
+  if (avatarInput.value) {
+    avatarInput.value.value = ''
+  }
+}
+
+const handleAvatarSelected = (event: Event) => {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0] ?? null
+
+  if (!file) {
+    return
+  }
+
+  const lowerType = (file.type || '').toLowerCase()
+  if (lowerType !== 'image/png' && lowerType !== 'image/jpeg') {
+    avatarError.value = 'Profile picture must be a PNG or JPG image.'
+    avatarStatus.value = null
+    target.value = ''
+    return
+  }
+
+  if (file.size > 2 * 1024 * 1024) {
+    avatarError.value = 'Profile picture must be 2MB or smaller.'
+    avatarStatus.value = null
+    target.value = ''
+    return
+  }
+
+  const reader = new FileReader()
+  reader.onload = () => {
+    const result = typeof reader.result === 'string' ? reader.result : null
+    if (!result) {
+      avatarError.value = 'Failed to read selected profile picture.'
+      avatarStatus.value = null
+      target.value = ''
+      return
+    }
+
+    if (!/^data:image\/(png|jpeg);base64,/i.test(result)) {
+      avatarError.value = 'Profile picture must be a PNG or JPG image.'
+      avatarStatus.value = null
+      target.value = ''
+      return
+    }
+
+    chatStore.saveLocalAvatar(result)
+    avatarPreviewUrl.value = result
+    avatarStatus.value = 'Profile picture saved locally. It will sync to the server on the next connection.'
+    avatarError.value = null
+    target.value = ''
+  }
+  reader.onerror = () => {
+    avatarError.value = 'Failed to read selected profile picture.'
+    avatarStatus.value = null
+    target.value = ''
+  }
+  reader.readAsDataURL(file)
 }
 
 const handleAdminKeySubmit = () => {
@@ -183,6 +261,10 @@ const handleAutoGainControlToggle = (event: Event) => {
 watch(() => chatStore.localUsername, (value) => {
   editedUsername.value = value || ''
 })
+
+watch(() => chatStore.currentUser?.avatar_url, (value) => {
+  avatarPreviewUrl.value = value ?? chatStore.getLocalAvatar()
+})
 </script>
 
 <template>
@@ -273,6 +355,38 @@ watch(() => chatStore.localUsername, (value) => {
                 <div class="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-500"></div>
               </div>
             </label>
+          </div>
+
+          <div class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm space-y-4">
+            <div>
+              <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">Profile Picture</label>
+              <p class="text-sm text-zinc-500">PNG and JPG images up to 2MB are synced to the server when you connect.</p>
+            </div>
+
+            <div class="flex items-center gap-4">
+              <div class="w-16 h-16 rounded-full overflow-hidden border border-white/10 bg-indigo-500/20 text-indigo-300 flex items-center justify-center text-xl font-bold">
+                <img v-if="avatarPreviewUrl" :src="avatarPreviewUrl" alt="Profile preview" class="w-full h-full object-cover" />
+                <span v-else>{{ (editedUsername || chatStore.currentUser?.username || '?').charAt(0).toUpperCase() }}</span>
+              </div>
+
+              <div class="flex flex-wrap gap-3">
+                <button @click="promptAvatarSelection" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-lg font-medium transition-colors duration-200 shadow-sm">
+                  Upload
+                </button>
+                <button @click="clearAvatar" :disabled="!avatarPreviewUrl" class="bg-zinc-800 hover:bg-zinc-700 text-white px-5 py-2.5 rounded-lg font-medium transition-colors duration-200 border border-white/10 disabled:opacity-50 disabled:cursor-not-allowed">
+                  Remove
+                </button>
+                <input ref="avatarInput" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" class="hidden" @change="handleAvatarSelected" />
+              </div>
+            </div>
+
+            <div v-if="avatarStatus" class="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">
+              {{ avatarStatus }}
+            </div>
+
+            <div v-if="avatarError" class="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+              {{ avatarError }}
+            </div>
           </div>
         </div>
 

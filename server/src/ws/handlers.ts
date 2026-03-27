@@ -18,6 +18,7 @@ import {
   getUserById,
   getOrCreateSystemUser,
   updateUserRole,
+  updateUserProfile,
   getUsers,
   getServer,
   createServer,
@@ -101,6 +102,7 @@ type StorageSettingsInput = {
 const filesRootDir = path.join(dataDir, 'files');
 const MAX_FOLDER_FILE_SIZE_BYTES = MAX_UPLOAD_FILE_SIZE_BYTES;
 const MAX_SERVER_ICON_SIZE_BYTES = 2 * 1024 * 1024;
+const MAX_USER_AVATAR_SIZE_BYTES = 2 * 1024 * 1024;
 const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
   'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx',
   'html', 'htm', 'php', 'phtml',
@@ -173,6 +175,32 @@ const buildServerIconStorageName = (extension: string) => {
     throw new Error('Invalid icon extension');
   }
   return `icon.${safeExtension}`;
+};
+
+const parseUserAvatarDataUrl = (value: unknown): { dataUrl: string; mimeType: 'image/png' | 'image/jpeg' } | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  const match = trimmed.match(/^data:(image\/(png|jpeg|jpg));base64,([a-z0-9+/=\r\n]+)$/i);
+  if (!match) return null;
+
+  const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : (match[1].toLowerCase() as 'image/png' | 'image/jpeg');
+  const buffer = Buffer.from(match[3] || '', 'base64');
+  if (!buffer.length) return null;
+  if (buffer.length > MAX_USER_AVATAR_SIZE_BYTES) {
+    throw new Error('Profile picture exceeds 2MB size limit.');
+  }
+
+  return {
+    dataUrl: `data:${mimeType};base64,${buffer.toString('base64')}`,
+    mimeType
+  };
+};
+
+const sanitizeUsernameForProfile = (value: unknown) => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  if (!normalized) return null;
+  return normalized.slice(0, 64);
 };
 
 const buildS3ServerIconPrefix = (prefix: string | null | undefined, serverId: string) => {
@@ -1439,9 +1467,30 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
   }
 };
 
-const handleAuthRequest = async (client: ClientConnection, payload: { username: string, publicKey: string }) => {
+const handleAuthRequest = async (client: ClientConnection, payload: { username: string, publicKey: string, avatarUrl?: string | null }) => {
   const { username, publicKey } = payload;
   if (!username || !publicKey) return;
+
+  let normalizedAvatar: { dataUrl: string; mimeType: 'image/png' | 'image/jpeg' } | null = null;
+  try {
+    normalizedAvatar = payload.avatarUrl == null || payload.avatarUrl === ''
+      ? null
+      : parseUserAvatarDataUrl(payload.avatarUrl);
+  } catch (error) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message: error instanceof Error ? error.message : 'Invalid profile picture.' }
+    }));
+    return;
+  }
+
+  if (payload.avatarUrl && !normalizedAvatar) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message: 'Profile picture must be a PNG or JPG image data URL.' }
+    }));
+    return;
+  }
 
   const normalizedIp = normalizeIp(client.ipAddress);
   const activeBan = await getMatchingActiveBan({
@@ -1465,8 +1514,26 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
   let user = await getUserByPublicKey(publicKey);
   let isNewUser = false;
   if (!user) {
-    user = await createUser(username, publicKey);
+    user = await createUser(username, publicKey, normalizedAvatar?.dataUrl ?? null, normalizedAvatar?.mimeType ?? null);
     isNewUser = true;
+  } else {
+    const nextUsername = sanitizeUsernameForProfile(username);
+    const nextAvatarUrl = normalizedAvatar?.dataUrl ?? null;
+    const nextAvatarMimeType = normalizedAvatar?.mimeType ?? null;
+    const shouldUpdateUsername = Boolean(nextUsername && nextUsername !== user.username);
+    const shouldUpdateAvatar = payload.avatarUrl !== undefined && (
+      (user.avatar_url || null) !== nextAvatarUrl ||
+      (user.avatar_mime_type || null) !== nextAvatarMimeType
+    );
+
+    if (shouldUpdateUsername || shouldUpdateAvatar) {
+      await updateUserProfile({
+        id: user.id,
+        ...(shouldUpdateUsername ? { username: nextUsername! } : {}),
+        ...(shouldUpdateAvatar ? { avatar_url: nextAvatarUrl, avatar_mime_type: nextAvatarMimeType } : {})
+      });
+      user = (await getUserById(user.id)) || user;
+    }
   }
 
   const challenge = crypto.randomBytes(32).toString('hex');

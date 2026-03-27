@@ -270,14 +270,23 @@ export interface User {
   username: string;
   public_key: string;
   avatar_url: string | null;
+  avatar_mime_type: string | null;
   last_ip: string | null;
   role: string;
   created_at: string;
 }
 
-export const createUser = async (username: string, public_key: string, avatar_url: string | null = null): Promise<User> => {
+export const createUser = async (
+  username: string,
+  public_key: string,
+  avatar_url: string | null = null,
+  avatar_mime_type: string | null = null
+): Promise<User> => {
   const id = crypto.randomUUID();
-  await dbRun('INSERT INTO users (id, username, public_key, avatar_url) VALUES (?, ?, ?, ?)', [id, username, public_key, avatar_url]);
+  await dbRun(
+    'INSERT INTO users (id, username, public_key, avatar_url, avatar_mime_type) VALUES (?, ?, ?, ?, ?)',
+    [id, username, public_key, avatar_url, avatar_mime_type]
+  );
   return (await dbGet<User>('SELECT * FROM users WHERE id = ?', [id]))!;
 };
 
@@ -335,6 +344,38 @@ export const updateUserRole = async (id: string, role: string): Promise<void> =>
 
 export const updateUserLastIp = async (id: string, ipAddress: string | null): Promise<void> => {
   await dbRun('UPDATE users SET last_ip = ? WHERE id = ?', [ipAddress, id]);
+};
+
+export const updateUserProfile = async (input: {
+  id: string;
+  username?: string;
+  avatar_url?: string | null;
+  avatar_mime_type?: string | null;
+}): Promise<void> => {
+  const assignments: string[] = [];
+  const params: any[] = [];
+
+  if (typeof input.username === 'string') {
+    assignments.push('username = ?');
+    params.push(input.username);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'avatar_url')) {
+    assignments.push('avatar_url = ?');
+    params.push(input.avatar_url ?? null);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'avatar_mime_type')) {
+    assignments.push('avatar_mime_type = ?');
+    params.push(input.avatar_mime_type ?? null);
+  }
+
+  if (assignments.length === 0) {
+    return;
+  }
+
+  params.push(input.id);
+  await dbRun(`UPDATE users SET ${assignments.join(', ')} WHERE id = ?`, params);
 };
 
 // --- Categories ---
