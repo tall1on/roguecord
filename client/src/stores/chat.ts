@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { useWebRtcStore } from './webrtc';
+import { cacheServerIcon, getCachedServerIcon, removeCachedServerIcon } from '../utils/serverIconCache';
 
 const NEW_NOTIFICATION_SOUND_DEBOUNCE_MS = 1000;
 
@@ -136,6 +137,7 @@ export interface SavedConnection {
   name: string;
   address: string;
   iconUrl?: string | null;
+  cachedIconUrl?: string | null;
 }
 
 export interface Server {
@@ -331,7 +333,8 @@ export const useChatStore = defineStore('chat', () => {
   const savedConnections = ref<SavedConnection[]>(
     JSON.parse(localStorage.getItem('savedConnections') || '[]').map((c: SavedConnection) => ({
       ...c,
-      address: c.address.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`)
+      address: c.address.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`),
+      cachedIconUrl: c.cachedIconUrl || getCachedServerIcon(c.id)?.dataUrl || null
     }))
   );
   const activeConnectionId = ref<string | null>(null);
@@ -764,7 +767,8 @@ export const useChatStore = defineStore('chat', () => {
     const newConnection: SavedConnection = {
       id: crypto.randomUUID(),
       name: (name || getConnectionNameFromAddress(address)).trim() || 'Server',
-      address
+      address,
+      cachedIconUrl: null
     };
     savedConnections.value.push(newConnection);
     localStorage.setItem('savedConnections', JSON.stringify(savedConnections.value));
@@ -1120,6 +1124,7 @@ export const useChatStore = defineStore('chat', () => {
       if (currentConnection) {
         const nextTitle = (nextServer.title || '').trim();
         const resolvedIconUrl = resolveServerIconUrl(nextServer.iconPath || null, currentConnection.address, nextServer.updatedAt || null);
+        const cachedEntry = getCachedServerIcon(currentConnection.id);
         let hasChanges = false;
 
         if (nextTitle && currentConnection.name !== nextTitle) {
@@ -1129,6 +1134,34 @@ export const useChatStore = defineStore('chat', () => {
 
         if ((currentConnection.iconUrl || null) !== resolvedIconUrl) {
           currentConnection.iconUrl = resolvedIconUrl;
+          hasChanges = true;
+        }
+
+        const nextCachedIconUrl = cachedEntry?.dataUrl || currentConnection.cachedIconUrl || null;
+        if ((currentConnection.cachedIconUrl || null) !== nextCachedIconUrl) {
+          currentConnection.cachedIconUrl = nextCachedIconUrl;
+          hasChanges = true;
+        }
+
+        if (resolvedIconUrl) {
+          void cacheServerIcon(currentConnection.id, resolvedIconUrl).then((entry) => {
+            if (!entry) {
+              return;
+            }
+
+            const refreshedConnection = savedConnections.value.find((c) => c.id === currentConnection.id);
+            if (!refreshedConnection) {
+              return;
+            }
+
+            if (refreshedConnection.cachedIconUrl !== entry.dataUrl) {
+              refreshedConnection.cachedIconUrl = entry.dataUrl;
+              localStorage.setItem('savedConnections', JSON.stringify(savedConnections.value));
+            }
+          });
+        } else if (currentConnection.cachedIconUrl || cachedEntry) {
+          currentConnection.cachedIconUrl = null;
+          removeCachedServerIcon(currentConnection.id);
           hasChanges = true;
         }
 
@@ -1151,6 +1184,7 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     const currentConnection = savedConnections.value.find((c) => c.id === removedConnectionId);
+    removeCachedServerIcon(removedConnectionId);
     savedConnections.value = savedConnections.value.filter((c) => c.id !== removedConnectionId);
     localStorage.setItem('savedConnections', JSON.stringify(savedConnections.value));
 
