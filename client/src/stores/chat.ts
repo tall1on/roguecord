@@ -262,6 +262,14 @@ const signChallenge = async (privateKey: CryptoKey, challenge: string) => {
   return arrayBufferToHex(signature);
 };
 
+export interface ClientIdentityExport {
+  version: 1;
+  exportedAt: string;
+  algorithm: 'ECDSA-P256-SHA256';
+  publicKey: string;
+  privateKeyJwk: string;
+}
+
 const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
   'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx',
   'html', 'htm', 'php', 'phtml',
@@ -809,6 +817,52 @@ export const useChatStore = defineStore('chat', () => {
       disconnect();
       localStorage.removeItem('lastUsedServer');
     }
+  };
+
+  const hasStoredIdentity = computed(() => {
+    const storedPriv = localStorage.getItem('privateKey');
+    const storedPub = localStorage.getItem('publicKey');
+    return Boolean(storedPriv && storedPub);
+  });
+
+  const getStoredIdentityExport = (): ClientIdentityExport | null => {
+    const storedPriv = localStorage.getItem('privateKey');
+    const storedPub = localStorage.getItem('publicKey');
+
+    if (!storedPriv || !storedPub) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      algorithm: 'ECDSA-P256-SHA256',
+      publicKey: storedPub,
+      privateKeyJwk: storedPriv
+    };
+  };
+
+  const importStoredIdentity = async (identity: ClientIdentityExport) => {
+    if (identity.version !== 1) {
+      throw new Error('Unsupported identity export version.');
+    }
+
+    if (identity.algorithm !== 'ECDSA-P256-SHA256') {
+      throw new Error('Unsupported identity algorithm.');
+    }
+
+    if (typeof identity.publicKey !== 'string' || !identity.publicKey.includes('-----BEGIN PUBLIC KEY-----')) {
+      throw new Error('Identity file is missing a valid public key.');
+    }
+
+    if (typeof identity.privateKeyJwk !== 'string' || !identity.privateKeyJwk.trim()) {
+      throw new Error('Identity file is missing a valid private key.');
+    }
+
+    await importPrivateKey(identity.privateKeyJwk);
+
+    localStorage.setItem('privateKey', identity.privateKeyJwk);
+    localStorage.setItem('publicKey', identity.publicKey);
   };
 
   const getKeys = async () => {
@@ -2123,6 +2177,7 @@ export const useChatStore = defineStore('chat', () => {
     lastError,
     savedConnections,
     activeConnectionId,
+    hasStoredIdentity,
     localUsername,
     users,
     onlineUserIds,
@@ -2139,6 +2194,8 @@ export const useChatStore = defineStore('chat', () => {
     activeServerCategories,
     activeChannelMessages,
     saveLocalUsername,
+    getStoredIdentityExport,
+    importStoredIdentity,
     addSavedConnection,
     addServerConnection,
     removeSavedConnection,
