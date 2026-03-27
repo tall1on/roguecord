@@ -43,6 +43,7 @@ const newChannelType = ref<'text' | 'voice' | 'rss' | 'folder'>('text')
 const newChannelFeedUrl = ref('')
 const selectedCategoryId = ref<string | null>(null)
 const createChannelError = ref<string | null>(null)
+const creatingCategory = ref(false)
 
 const showInviteModal = ref(false)
 const showServerSettingsModal = ref(false)
@@ -96,6 +97,10 @@ const serverSettingsNavGroups = ref<ServerSettingsNavGroup[]>([
 
 const isAdmin = computed(() => chatStore.currentUserRole === 'admin')
 const shouldShowMemberList = computed(() => chatStore.activeMainPanel.type !== 'voice')
+const createChannelModalTitle = computed(() => creatingCategory.value ? 'Create Category' : 'Create Channel')
+const createChannelNameLabel = computed(() => creatingCategory.value ? 'Category Name' : 'Channel Name')
+const createChannelNamePlaceholder = computed(() => creatingCategory.value ? 'new-category' : 'new-channel')
+const createChannelSubmitLabel = computed(() => creatingCategory.value ? 'Create Category' : 'Create Channel')
 
 const activeServer = computed(() => {
   if (chatStore.server?.title) {
@@ -273,14 +278,19 @@ const handleCreateServer = async () => {
   }
 }
 
-const openCreateChannelModal = (payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' | 'folder' }) => {
+const openCreateChannelModal = (payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' | 'folder'; createCategory?: boolean }) => {
   if (!isAdmin.value) return
 
   createChannelError.value = null
   chatStore.clearError()
+  creatingCategory.value = Boolean(payload.createCategory)
   selectedCategoryId.value = payload.categoryId
+  newChannelName.value = ''
+  newChannelFeedUrl.value = ''
   if (payload.type) {
     newChannelType.value = payload.type
+  } else if (!creatingCategory.value) {
+    newChannelType.value = 'text'
   }
   showCreateChannelModal.value = true
 }
@@ -291,7 +301,15 @@ const handleCreateChannel = () => {
   const trimmedName = newChannelName.value.trim()
   const trimmedFeedUrl = newChannelFeedUrl.value.trim()
   if (!trimmedName) {
-    createChannelError.value = 'Channel name is required'
+    createChannelError.value = creatingCategory.value ? 'Category name is required' : 'Channel name is required'
+    return
+  }
+
+  if (creatingCategory.value) {
+    createChannelError.value = null
+    chatStore.clearError()
+    chatStore.createCategory(trimmedName)
+    showCreateChannelModal.value = false
     return
   }
 
@@ -303,6 +321,7 @@ const handleCreateChannel = () => {
   createChannelError.value = null
   chatStore.clearError()
   chatStore.createChannel(selectedCategoryId.value, trimmedName, newChannelType.value, trimmedFeedUrl)
+  showCreateChannelModal.value = false
 }
 
 const handleTestStorageConnection = async () => {
@@ -701,6 +720,11 @@ onUnmounted(() => {
       v-model:channel-name="newChannelName"
       v-model:channel-type="newChannelType"
       v-model:channel-feed-url="newChannelFeedUrl"
+      :title="createChannelModalTitle"
+      :name-label="createChannelNameLabel"
+      :name-placeholder="createChannelNamePlaceholder"
+      :create-label="createChannelSubmitLabel"
+      :show-type-selector="!creatingCategory"
       :error-message="createChannelError || chatStore.lastError"
       @create="handleCreateChannel"
     />

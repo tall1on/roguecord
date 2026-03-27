@@ -1307,6 +1307,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'create_channel':
         await handleCreateChannel(client, payload);
         break;
+      case 'create_category':
+        await handleCreateCategory(client, payload);
+        break;
       case 'reorder_channels':
         await handleReorderChannels(client, payload);
         break;
@@ -1721,6 +1724,38 @@ const handleCreateChannel = async (
   } catch (error) {
     console.error('[WS DEBUG] Failed to create channel:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to create channel' } }));
+  }
+};
+
+const handleCreateCategory = async (
+  client: ClientConnection,
+  payload: { name?: string }
+) => {
+  if (!client.userId) return;
+
+  const normalizedName = typeof payload?.name === 'string' ? payload.name.trim() : '';
+  if (!normalizedName) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Category name is required' } }));
+    return;
+  }
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can create categories' } }));
+    return;
+  }
+
+  try {
+    const categories = await getCategories();
+    const category = await createCategory(normalizedName, categories.length);
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'category_created',
+      payload: { category }
+    });
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to create category:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to create category' } }));
   }
 };
 
