@@ -163,6 +163,39 @@ const handleCategoryDragOver = (event: DragEvent, categoryId: string | null) => 
   dragOverUncategorized.value = categoryId === null
 }
 
+const handleCategoryHeaderDrop = (event: DragEvent, categoryId: string) => {
+  if (draggedChannelId.value) {
+    event.preventDefault()
+    event.stopPropagation()
+    handleCategoryDrop(categoryId)
+    return
+  }
+
+  if (!props.isAdmin || !draggedCategoryId.value || draggedCategoryId.value === categoryId) {
+    resetDragState()
+    return
+  }
+
+  const sortedCategories = sortCategories()
+  const sourceIndex = sortedCategories.findIndex((category) => category.id === draggedCategoryId.value)
+  const targetIndex = sortedCategories.findIndex((category) => category.id === categoryId)
+
+  if (sourceIndex === -1 || targetIndex === -1) {
+    resetDragState()
+    return
+  }
+
+  const [movedCategory] = sortedCategories.splice(sourceIndex, 1)
+  sortedCategories.splice(targetIndex, 0, movedCategory)
+
+  chatStore.reorderCategories(sortedCategories.map((category, index) => ({
+    id: category.id,
+    position: index
+  })))
+
+  resetDragState()
+}
+
 const handleCategoryDrop = (categoryId: string | null) => {
   if (!props.isAdmin || !draggedChannelId.value) {
     resetDragState()
@@ -194,32 +227,6 @@ const handleCategoryHeaderDragOver = (event: DragEvent, categoryId: string) => {
   event.preventDefault()
   event.stopPropagation()
   dragOverCategoryTargetId.value = categoryId
-}
-
-const handleCategoryHeaderDrop = (targetCategoryId: string) => {
-  if (!props.isAdmin || !draggedCategoryId.value || draggedCategoryId.value === targetCategoryId) {
-    resetDragState()
-    return
-  }
-
-  const sortedCategories = sortCategories()
-  const sourceIndex = sortedCategories.findIndex((category) => category.id === draggedCategoryId.value)
-  const targetIndex = sortedCategories.findIndex((category) => category.id === targetCategoryId)
-
-  if (sourceIndex === -1 || targetIndex === -1) {
-    resetDragState()
-    return
-  }
-
-  const [movedCategory] = sortedCategories.splice(sourceIndex, 1)
-  sortedCategories.splice(targetIndex, 0, movedCategory)
-
-  chatStore.reorderCategories(sortedCategories.map((category, index) => ({
-    id: category.id,
-    position: index
-  })))
-
-  resetDragState()
 }
 
 const isDragTarget = (channelId: string) => dragOverChannelId.value === channelId
@@ -452,8 +459,9 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer"
             :draggable="isAdmin"
             @dragstart="handleCategoryHeaderDragStart(category.id)"
-            @dragover="handleCategoryHeaderDragOver($event, category.id)"
-            @drop.prevent.stop="handleCategoryHeaderDrop(category.id)"
+            @dragover="draggedChannelId ? handleCategoryDragOver($event, category.id) : handleCategoryHeaderDragOver($event, category.id)"
+            @dragenter.prevent="draggedChannelId ? handleCategoryDragOver($event, category.id) : handleCategoryHeaderDragOver($event, category.id)"
+            @drop="handleCategoryHeaderDrop($event, category.id)"
             @dragend="handleDragEnd"
             @contextmenu.stop.prevent="openCategoryContextMenu($event, category.id)">
             <div class="flex items-center text-xs font-bold text-zinc-500 group-hover:text-zinc-300 uppercase tracking-widest transition-colors">
