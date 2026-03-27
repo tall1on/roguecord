@@ -289,6 +289,7 @@ export const useChatStore = defineStore('chat', () => {
   const currentUser = ref<User | null>(null);
   const currentUserRole = ref<string>('user');
   const server = ref<Server | null>(null);
+  const uncategorizedCategoryDeleted = ref(false);
   const serverStorageSettings = ref<ServerStorageSettings>({
     storageType: 'data_dir',
     storageLastError: null,
@@ -996,6 +997,7 @@ export const useChatStore = defineStore('chat', () => {
     activeConnectionId.value = null;
     categories.value = [];
     channels.value = [];
+    uncategorizedCategoryDeleted.value = false;
     activeChannelId.value = null;
     activeMainPanel.value = { type: 'text', channelId: null };
     messages.value = {};
@@ -1404,6 +1406,7 @@ export const useChatStore = defineStore('chat', () => {
       case 'channels_list':
         categories.value = payload.categories;
         channels.value = Array.isArray(payload.channels) ? [...payload.channels].sort(compareChannels) : [];
+        uncategorizedCategoryDeleted.value = payload.uncategorized_category_deleted === true;
         applyUnreadStatesFromServer(payload.unreadStates as ChannelUnreadState[] | undefined);
         pruneUnreadChannels(payload.channels || []);
         
@@ -1422,6 +1425,9 @@ export const useChatStore = defineStore('chat', () => {
         
       case 'channel_created':
         channels.value.push(payload.channel);
+        if (payload.channel?.category_id == null) {
+          uncategorizedCategoryDeleted.value = false;
+        }
         channels.value.sort((a, b) => {
           const aCategory = a.category_id || '';
           const bCategory = b.category_id || '';
@@ -1465,6 +1471,7 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       case 'uncategorized_category_deleted':
+        uncategorizedCategoryDeleted.value = true;
         break;
 
       case 'channel_deleted': {
@@ -2111,6 +2118,7 @@ export const useChatStore = defineStore('chat', () => {
     currentUser,
     currentUserRole,
     server,
+    uncategorizedCategoryDeleted,
     serverStorageSettings,
     lastError,
     savedConnections,

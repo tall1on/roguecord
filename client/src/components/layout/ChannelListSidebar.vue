@@ -383,6 +383,24 @@ const openUncategorizedContextMenu = (event: MouseEvent) => {
   contextMenuVisible.value = true
 }
 
+const canDeleteCategoryFromContextMenu = computed(() => {
+  if (contextMenuChannel.value) {
+    return false
+  }
+
+  if (contextMenuCategoryId.value) {
+    return getCategoryChannels(contextMenuCategoryId.value).length === 0
+  }
+
+  if (contextMenuUncategorized.value) {
+    return uncategorizedChannels.value.length === 0
+  }
+
+  return false
+})
+
+const shouldShowContextMenuDivider = computed(() => !!contextMenuChannel.value || canDeleteCategoryFromContextMenu.value)
+
 const deleteChannelFromContextMenu = () => {
   if (!props.isAdmin || !contextMenuChannel.value) return
 
@@ -547,6 +565,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
         </div>
 
         <div
+          v-if="!chatStore.uncategorizedCategoryDeleted || uncategorizedChannels.length > 0"
           class="mb-4 rounded-lg transition-colors"
           :class="dragOverUncategorized ? 'bg-zinc-900/50 ring-1 ring-indigo-400/60' : ''"
           @dragover="handleCategoryDragOver($event, null)"
@@ -606,11 +625,11 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           <Trash2 class="w-4 h-4" />
           Delete channel
         </button>
-        <button v-if="(contextMenuCategoryId && getCategoryChannels(contextMenuCategoryId).length === 0) || (contextMenuUncategorized && uncategorizedChannels.length === 0)" class="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="deleteCategoryFromContextMenu">
+        <button v-if="canDeleteCategoryFromContextMenu" class="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="deleteCategoryFromContextMenu">
           <Trash2 class="w-4 h-4" />
           Delete category
         </button>
-        <div v-if="contextMenuChannel || contextMenuCategoryId || contextMenuUncategorized" class="my-1 border-t border-white/5"></div>
+        <div v-if="shouldShowContextMenuDivider" class="my-1 border-t border-white/5"></div>
         <button class="w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="openCreateChannelFromContextMenu('text')">
           <Hash class="w-4 h-4" />
           Create text channel
