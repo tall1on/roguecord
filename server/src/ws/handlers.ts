@@ -4,10 +4,12 @@ import {
   getUserByPublicKey,
   createCategory,
   createChannel,
+  getNextChannelPosition,
   deleteChannel,
   getChannelById,
   getCategories,
   getChannels,
+  reorderChannels,
   getChannelMessages,
   createMessage,
   getUserById,
@@ -1305,6 +1307,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'create_channel':
         await handleCreateChannel(client, payload);
         break;
+      case 'reorder_channels':
+        await handleReorderChannels(client, payload);
+        break;
       case 'delete_channel':
         await handleDeleteChannel(client, payload);
         break;
@@ -1705,7 +1710,8 @@ const handleCreateChannel = async (
   }
 
   try {
-    const channel = await createChannel(category_id, normalizedName, type, 0, type === 'rss' ? normalizedFeedUrl : null);
+    const nextPosition = await getNextChannelPosition(category_id);
+    const channel = await createChannel(category_id, normalizedName, type, nextPosition, type === 'rss' ? normalizedFeedUrl : null);
 
     // Broadcast to all authenticated users
     connectionManager.broadcastToAuthenticated({
@@ -1715,6 +1721,73 @@ const handleCreateChannel = async (
   } catch (error) {
     console.error('[WS DEBUG] Failed to create channel:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to create channel' } }));
+  }
+};
+
+const handleReorderChannels = async (
+  client: ClientConnection,
+  payload: { channels?: Array<{ id?: string; category_id?: string | null; position?: number }> }
+) => {
+  if (!client.userId) return;
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can reorder channels' } }));
+    return;
+  }
+
+  const requestedUpdates = Array.isArray(payload?.channels) ? payload.channels : [];
+  if (!requestedUpdates.length) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Channel reorder payload is required' } }));
+    return;
+  }
+
+  const existingChannels = await getChannels();
+  const existingById = new Map(existingChannels.map((channel) => [channel.id, channel]));
+
+  const normalizedUpdates: Array<{ id: string; category_id: string | null; position: number }> = [];
+  const seenIds = new Set<string>();
+
+  for (const entry of requestedUpdates) {
+    const id = typeof entry?.id === 'string' ? entry.id : '';
+    if (!id || seenIds.has(id)) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid channel reorder payload' } }));
+      return;
+    }
+
+    const existing = existingById.get(id);
+    if (!existing) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Channel not found for reorder' } }));
+      return;
+    }
+
+    const position = Number(entry?.position);
+    if (!Number.isInteger(position) || position < 0) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid channel reorder position' } }));
+      return;
+    }
+
+    const categoryId = typeof entry?.category_id === 'string'
+      ? entry.category_id
+      : entry?.category_id === null
+        ? null
+        : existing.category_id;
+
+    normalizedUpdates.push({ id, category_id: categoryId, position });
+    seenIds.add(id);
+  }
+
+  try {
+    await reorderChannels(normalizedUpdates);
+    const channels = await getChannels();
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'channels_reordered',
+      payload: { channels }
+    });
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to reorder channels:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to reorder channels' } }));
   }
 };
 

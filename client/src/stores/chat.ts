@@ -27,6 +27,18 @@ export interface Channel {
   feed_url?: string | null;
 }
 
+const compareChannels = (a: Channel, b: Channel) => {
+  const aCategory = a.category_id || '';
+  const bCategory = b.category_id || '';
+  if (aCategory !== bCategory) {
+    return aCategory.localeCompare(bCategory);
+  }
+  if (a.position !== b.position) {
+    return a.position - b.position;
+  }
+  return a.name.localeCompare(b.name);
+};
+
 export interface FolderChannelFile {
   id: string;
   channel_id: string;
@@ -1391,7 +1403,7 @@ export const useChatStore = defineStore('chat', () => {
         
       case 'channels_list':
         categories.value = payload.categories;
-        channels.value = payload.channels;
+        channels.value = Array.isArray(payload.channels) ? [...payload.channels].sort(compareChannels) : [];
         applyUnreadStatesFromServer(payload.unreadStates as ChannelUnreadState[] | undefined);
         pruneUnreadChannels(payload.channels || []);
         
@@ -1410,6 +1422,22 @@ export const useChatStore = defineStore('chat', () => {
         
       case 'channel_created':
         channels.value.push(payload.channel);
+        channels.value.sort((a, b) => {
+          const aCategory = a.category_id || '';
+          const bCategory = b.category_id || '';
+          if (aCategory !== bCategory) {
+            return aCategory.localeCompare(bCategory);
+          }
+          if (a.position !== b.position) {
+            return a.position - b.position;
+          }
+          return a.name.localeCompare(b.name);
+        });
+        break;
+
+      case 'channels_reordered':
+        channels.value = Array.isArray(payload.channels) ? [...payload.channels].sort(compareChannels) : [];
+        pruneUnreadChannels(channels.value);
         break;
 
       case 'channel_deleted': {
@@ -1626,6 +1654,20 @@ export const useChatStore = defineStore('chat', () => {
       return;
     }
     send('delete_channel', { channel_id });
+  };
+
+  const reorderChannels = (updatedChannels: Array<Pick<Channel, 'id' | 'category_id' | 'position'>>) => {
+    if (!updatedChannels.length) {
+      return;
+    }
+
+    send('reorder_channels', {
+      channels: updatedChannels.map((channel) => ({
+        id: channel.id,
+        category_id: channel.category_id,
+        position: channel.position
+      }))
+    });
   };
 
   const updateServerSettings = (
@@ -2035,6 +2077,7 @@ export const useChatStore = defineStore('chat', () => {
     authenticate,
     createChannel,
     deleteChannel,
+    reorderChannels,
     updateServerSettings,
     testServerStorageSettings,
     requestServerStorageSettings,
