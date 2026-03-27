@@ -8,12 +8,14 @@ const props = defineProps<{
   isAdmin: boolean
 }>()
 
+type ChannelCreateType = 'text' | 'voice' | 'rss' | 'folder'
+
 const emit = defineEmits<{
   (e: 'open-server-settings'): void
   (e: 'open-invite'): void
   (e: 'remove-server'): void
   (e: 'open-admin'): void
-  (e: 'open-create-channel', payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' | 'folder' }): void
+  (e: 'open-create-channel', payload: { categoryId: string | null; type?: ChannelCreateType; createCategory?: boolean }): void
 }>()
 
 const chatStore = useChatStore()
@@ -28,6 +30,8 @@ const contextMenuY = ref(0)
 const contextMenuChannel = ref<Channel | null>(null)
 const draggedChannelId = ref<string | null>(null)
 const dragOverChannelId = ref<string | null>(null)
+const dragOverCategoryId = ref<string | null>(null)
+const dragOverUncategorized = ref(false)
 
 const sortChannels = (channelList: Channel[]) => {
   return [...channelList].sort((a, b) => {
@@ -62,18 +66,53 @@ const getCategoryChannels = (categoryId: string) => channelsByCategory.value.get
 const resetDragState = () => {
   draggedChannelId.value = null
   dragOverChannelId.value = null
+  dragOverCategoryId.value = null
+  dragOverUncategorized.value = false
 }
 
 const handleDragStart = (channel: Channel) => {
   if (!props.isAdmin) return
   draggedChannelId.value = channel.id
   dragOverChannelId.value = channel.id
+  dragOverCategoryId.value = channel.category_id ?? null
+  dragOverUncategorized.value = channel.category_id == null
 }
 
 const handleDragOver = (event: DragEvent, channel: Channel) => {
   if (!props.isAdmin || !draggedChannelId.value || draggedChannelId.value === channel.id) return
   event.preventDefault()
+  event.stopPropagation()
+  dragOverCategoryId.value = null
+  dragOverUncategorized.value = false
   dragOverChannelId.value = channel.id
+}
+
+const buildReorderPayload = (sourceChannel: Channel, targetCategoryId: string | null, targetIndex?: number) => {
+  const sourceCategoryId = sourceChannel.category_id ?? null
+  const sourceGroup = sortChannels(chatStore.activeServerChannels.filter((channel) => (channel.category_id ?? null) === sourceCategoryId))
+  const targetGroupBase = sourceCategoryId === targetCategoryId
+    ? sourceGroup
+    : sortChannels(chatStore.activeServerChannels.filter((channel) => (channel.category_id ?? null) === targetCategoryId))
+
+  const nextSourceGroup = sourceGroup.filter((channel) => channel.id !== sourceChannel.id)
+  const nextTargetGroup = targetGroupBase.filter((channel) => channel.id !== sourceChannel.id)
+  const insertAt = typeof targetIndex === 'number'
+    ? Math.max(0, Math.min(targetIndex, nextTargetGroup.length))
+    : nextTargetGroup.length
+
+  nextTargetGroup.splice(insertAt, 0, { ...sourceChannel, category_id: targetCategoryId })
+
+  const updates: Array<{ id: string; category_id: string | null; position: number }> = []
+
+  nextSourceGroup.forEach((channel, index) => {
+    updates.push({ id: channel.id, category_id: sourceCategoryId, position: index })
+  })
+
+  nextTargetGroup.forEach((channel, index) => {
+    updates.push({ id: channel.id, category_id: targetCategoryId, position: index })
+  })
+
+  return Array.from(new Map(updates.map((update) => [update.id, update])).values())
 }
 
 const handleDrop = (targetChannel: Channel) => {
@@ -89,7 +128,6 @@ const handleDrop = (targetChannel: Channel) => {
   }
 
   const targetGroup = sortChannels(chatStore.activeServerChannels.filter((channel) => channel.category_id === targetChannel.category_id))
-  const sourceIndex = targetGroup.findIndex((channel) => channel.id === sourceChannel.id)
   const targetIndex = targetGroup.findIndex((channel) => channel.id === targetChannel.id)
 
   if (targetIndex === -1) {
@@ -97,25 +135,33 @@ const handleDrop = (targetChannel: Channel) => {
     return
   }
 
-  if (sourceChannel.category_id !== targetChannel.category_id) {
+  const updates = buildReorderPayload(sourceChannel, targetChannel.category_id ?? null, targetIndex)
+  chatStore.reorderChannels(updates)
+  resetDragState()
+}
+
+const handleCategoryDragOver = (event: DragEvent, categoryId: string | null) => {
+  if (!props.isAdmin || !draggedChannelId.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  dragOverChannelId.value = null
+  dragOverCategoryId.value = categoryId
+  dragOverUncategorized.value = categoryId === null
+}
+
+const handleCategoryDrop = (categoryId: string | null) => {
+  if (!props.isAdmin || !draggedChannelId.value) {
     resetDragState()
     return
   }
 
-  const reorderedGroup = [...targetGroup]
-  if (sourceIndex !== -1) {
-    reorderedGroup.splice(sourceIndex, 1)
+  const sourceChannel = chatStore.activeServerChannels.find((channel) => channel.id === draggedChannelId.value)
+  if (!sourceChannel) {
+    resetDragState()
+    return
   }
-  const insertionIndex = targetIndex
-  reorderedGroup.splice(insertionIndex, 0, { ...sourceChannel, category_id: targetChannel.category_id })
 
-  const updates = reorderedGroup.map((channel, index) => ({
-    id: channel.id,
-    category_id: targetChannel.category_id,
-    position: index
-  }))
-
-  chatStore.reorderChannels(updates)
+  chatStore.reorderChannels(buildReorderPayload(sourceChannel, categoryId))
   resetDragState()
 }
 
@@ -270,6 +316,14 @@ const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss' | 'fold
   emit('open-create-channel', { categoryId: null, type })
 }
 
+const openCreateCategoryFromContextMenu = () => {
+  if (!props.isAdmin) return
+
+  contextMenuVisible.value = false
+  contextMenuChannel.value = null
+  emit('open-create-channel', { categoryId: null, createCategory: true })
+}
+
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
 const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.has(userId)
 </script>
@@ -293,7 +347,15 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
       </header>
 
       <div class="flex-1 overflow-y-auto p-3 space-y-1 custom-scrollbar" @contextmenu.prevent="openChannelListContextMenu">
-        <div v-for="category in chatStore.activeServerCategories" :key="category.id" class="mb-4">
+        <div
+          v-for="category in chatStore.activeServerCategories"
+          :key="category.id"
+          class="mb-4 rounded-lg transition-colors"
+          :class="dragOverCategoryId === category.id ? 'bg-zinc-900/50 ring-1 ring-indigo-400/60' : ''"
+          @dragover="handleCategoryDragOver($event, category.id)"
+          @dragenter.prevent="handleCategoryDragOver($event, category.id)"
+          @drop.prevent="handleCategoryDrop(category.id)"
+        >
           <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer">
             <div class="flex items-center text-xs font-bold text-zinc-500 group-hover:text-zinc-300 uppercase tracking-widest transition-colors">
               <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
@@ -344,7 +406,13 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           </div>
         </div>
 
-        <div v-if="uncategorizedChannels.length > 0" class="mb-4">
+        <div
+          class="mb-4 rounded-lg transition-colors"
+          :class="dragOverUncategorized ? 'bg-zinc-900/50 ring-1 ring-indigo-400/60' : ''"
+          @dragover="handleCategoryDragOver($event, null)"
+          @dragenter.prevent="handleCategoryDragOver($event, null)"
+          @drop.prevent="handleCategoryDrop(null)"
+        >
           <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer">
             <div class="text-xs font-bold text-zinc-500 group-hover:text-zinc-300 uppercase tracking-widest transition-colors">Channels</div>
             <button v-if="isAdmin" class="text-zinc-500 hover:text-zinc-300 opacity-0 group-hover:opacity-100 transition-all font-bold" @click.stop="emit('open-create-channel', { categoryId: null })">
@@ -414,6 +482,10 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
         <button class="w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="openCreateChannelFromContextMenu('folder')">
           <Folder class="w-4 h-4" />
           Create folder channel
+        </button>
+        <button class="w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="openCreateCategoryFromContextMenu">
+          <Plus class="w-4 h-4" />
+          Create category
         </button>
       </div>
     </template>

@@ -1435,6 +1435,11 @@ export const useChatStore = defineStore('chat', () => {
         });
         break;
 
+      case 'category_created':
+        categories.value.push(payload.category);
+        categories.value.sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
+        break;
+
       case 'channels_reordered':
         channels.value = Array.isArray(payload.channels) ? [...payload.channels].sort(compareChannels) : [];
         pruneUnreadChannels(channels.value);
@@ -1646,6 +1651,15 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     send('create_channel', { category_id, name, type, feed_url: type === 'rss' ? normalizedFeedUrl : undefined });
+  };
+
+  const createCategory = (name: string) => {
+    if (!name.trim()) {
+      lastError.value = 'Category name is required';
+      return;
+    }
+
+    send('create_category', { name });
   };
 
   const deleteChannel = (channel_id: string) => {
@@ -2075,6 +2089,7 @@ export const useChatStore = defineStore('chat', () => {
     connect,
     disconnect,
     authenticate,
+    createCategory,
     createChannel,
     deleteChannel,
     reorderChannels,
