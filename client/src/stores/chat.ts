@@ -1445,6 +1445,25 @@ export const useChatStore = defineStore('chat', () => {
         pruneUnreadChannels(channels.value);
         break;
 
+      case 'categories_reordered':
+        categories.value = Array.isArray(payload.categories)
+          ? [...payload.categories].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
+          : [];
+        break;
+
+      case 'category_deleted': {
+        const nextCategories = Array.isArray(payload.categories) ? payload.categories : null;
+        const deletedCategoryId = payload.category_id as string | undefined;
+
+        if (nextCategories) {
+          categories.value = [...nextCategories].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
+        } else if (deletedCategoryId) {
+          categories.value = categories.value.filter((category) => category.id !== deletedCategoryId);
+        }
+
+        break;
+      }
+
       case 'channel_deleted': {
         const deletedChannelId = payload.channel_id as string;
         if (!deletedChannelId) break;
