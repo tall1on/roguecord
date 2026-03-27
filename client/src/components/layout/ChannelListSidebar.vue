@@ -8,12 +8,14 @@ const props = defineProps<{
   isAdmin: boolean
 }>()
 
+type ChannelCreateType = 'text' | 'voice' | 'rss' | 'folder'
+
 const emit = defineEmits<{
   (e: 'open-server-settings'): void
   (e: 'open-invite'): void
   (e: 'remove-server'): void
   (e: 'open-admin'): void
-  (e: 'open-create-channel', payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' | 'folder' }): void
+  (e: 'open-create-channel', payload: { categoryId: string | null; type?: ChannelCreateType; createCategory?: boolean }): void
 }>()
 
 const chatStore = useChatStore()
@@ -26,6 +28,228 @@ const contextMenuVisible = ref(false)
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 const contextMenuChannel = ref<Channel | null>(null)
+const contextMenuCategoryId = ref<string | null>(null)
+const contextMenuUncategorized = ref(false)
+const draggedCategoryId = ref<string | null>(null)
+const dragOverCategoryTargetId = ref<string | null>(null)
+const draggedChannelId = ref<string | null>(null)
+const dragOverChannelId = ref<string | null>(null)
+const dragOverCategoryId = ref<string | null>(null)
+const dragOverUncategorized = ref(false)
+
+const sortChannels = (channelList: Channel[]) => {
+  return [...channelList].sort((a, b) => {
+    if (a.position !== b.position) {
+      return a.position - b.position
+    }
+    return a.name.localeCompare(b.name)
+  })
+}
+
+const channelsByCategory = computed(() => {
+  const groups = new Map<string | null, Channel[]>()
+
+  for (const channel of chatStore.activeServerChannels) {
+    const key = channel.category_id ?? null
+    const existing = groups.get(key) || []
+    existing.push(channel)
+    groups.set(key, existing)
+  }
+
+  for (const [key, channelList] of groups.entries()) {
+    groups.set(key, sortChannels(channelList))
+  }
+
+  return groups
+})
+
+const uncategorizedChannels = computed(() => channelsByCategory.value.get(null) || [])
+
+const getCategoryChannels = (categoryId: string) => channelsByCategory.value.get(categoryId) || []
+
+const resetDragState = () => {
+  draggedChannelId.value = null
+  dragOverChannelId.value = null
+  dragOverCategoryId.value = null
+  dragOverUncategorized.value = false
+  draggedCategoryId.value = null
+  dragOverCategoryTargetId.value = null
+}
+
+const sortCategories = () => {
+  return [...chatStore.activeServerCategories].sort((a, b) => {
+    if (a.position !== b.position) {
+      return a.position - b.position
+    }
+    return a.name.localeCompare(b.name)
+  })
+}
+
+const handleDragStart = (channel: Channel) => {
+  if (!props.isAdmin) return
+  draggedChannelId.value = channel.id
+  dragOverChannelId.value = channel.id
+  dragOverCategoryId.value = channel.category_id ?? null
+  dragOverUncategorized.value = channel.category_id == null
+}
+
+const handleDragOver = (event: DragEvent, channel: Channel) => {
+  if (!props.isAdmin || !draggedChannelId.value || draggedChannelId.value === channel.id) return
+  event.preventDefault()
+  event.stopPropagation()
+  dragOverCategoryId.value = null
+  dragOverUncategorized.value = false
+  dragOverChannelId.value = channel.id
+}
+
+const buildReorderPayload = (sourceChannel: Channel, targetCategoryId: string | null, targetIndex?: number) => {
+  const sourceCategoryId = sourceChannel.category_id ?? null
+  const sourceGroup = sortChannels(chatStore.activeServerChannels.filter((channel) => (channel.category_id ?? null) === sourceCategoryId))
+  const targetGroupBase = sourceCategoryId === targetCategoryId
+    ? sourceGroup
+    : sortChannels(chatStore.activeServerChannels.filter((channel) => (channel.category_id ?? null) === targetCategoryId))
+
+  const nextSourceGroup = sourceGroup.filter((channel) => channel.id !== sourceChannel.id)
+  const nextTargetGroup = targetGroupBase.filter((channel) => channel.id !== sourceChannel.id)
+  const insertAt = typeof targetIndex === 'number'
+    ? Math.max(0, Math.min(targetIndex, nextTargetGroup.length))
+    : nextTargetGroup.length
+
+  nextTargetGroup.splice(insertAt, 0, { ...sourceChannel, category_id: targetCategoryId })
+
+  const updates: Array<{ id: string; category_id: string | null; position: number }> = []
+
+  nextSourceGroup.forEach((channel, index) => {
+    updates.push({ id: channel.id, category_id: sourceCategoryId, position: index })
+  })
+
+  nextTargetGroup.forEach((channel, index) => {
+    updates.push({ id: channel.id, category_id: targetCategoryId, position: index })
+  })
+
+  return Array.from(new Map(updates.map((update) => [update.id, update])).values())
+}
+
+const handleDrop = (targetChannel: Channel) => {
+  if (!props.isAdmin || !draggedChannelId.value || draggedChannelId.value === targetChannel.id) {
+    resetDragState()
+    return
+  }
+
+  const sourceChannel = chatStore.activeServerChannels.find((channel) => channel.id === draggedChannelId.value)
+  if (!sourceChannel) {
+    resetDragState()
+    return
+  }
+
+  const targetGroup = sortChannels(chatStore.activeServerChannels.filter((channel) => channel.category_id === targetChannel.category_id))
+  const targetIndex = targetGroup.findIndex((channel) => channel.id === targetChannel.id)
+
+  if (targetIndex === -1) {
+    resetDragState()
+    return
+  }
+
+  const updates = buildReorderPayload(sourceChannel, targetChannel.category_id ?? null, targetIndex)
+  chatStore.reorderChannels(updates)
+  resetDragState()
+}
+
+const handleCategoryDragOver = (event: DragEvent, categoryId: string | null) => {
+  if (!props.isAdmin || !draggedChannelId.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  dragOverChannelId.value = null
+  dragOverCategoryId.value = categoryId
+  dragOverUncategorized.value = categoryId === null
+}
+
+const handleCategoryHeaderDrop = (event: DragEvent, categoryId: string) => {
+  if (draggedChannelId.value) {
+    event.preventDefault()
+    event.stopPropagation()
+    handleCategoryDrop(categoryId)
+    return
+  }
+
+  if (!props.isAdmin || !draggedCategoryId.value || draggedCategoryId.value === categoryId) {
+    resetDragState()
+    return
+  }
+
+  const sortedCategories = sortCategories()
+  const sourceIndex = sortedCategories.findIndex((category) => category.id === draggedCategoryId.value)
+  const targetIndex = sortedCategories.findIndex((category) => category.id === categoryId)
+
+  if (sourceIndex === -1 || targetIndex === -1) {
+    resetDragState()
+    return
+  }
+
+  const [movedCategory] = sortedCategories.splice(sourceIndex, 1)
+  sortedCategories.splice(targetIndex, 0, movedCategory)
+
+  chatStore.reorderCategories(sortedCategories.map((category, index) => ({
+    id: category.id,
+    position: index
+  })))
+
+  resetDragState()
+}
+
+const handleCategoryDrop = (categoryId: string | null) => {
+  if (!props.isAdmin || !draggedChannelId.value) {
+    resetDragState()
+    return
+  }
+
+  const sourceChannel = chatStore.activeServerChannels.find((channel) => channel.id === draggedChannelId.value)
+  if (!sourceChannel) {
+    resetDragState()
+    return
+  }
+
+  chatStore.reorderChannels(buildReorderPayload(sourceChannel, categoryId))
+  resetDragState()
+}
+
+const handleDragEnd = () => {
+  resetDragState()
+}
+
+const handleCategoryHeaderDragStart = (categoryId: string) => {
+  if (!props.isAdmin) return
+  draggedCategoryId.value = categoryId
+  dragOverCategoryTargetId.value = categoryId
+}
+
+const handleCategoryHeaderDragOver = (event: DragEvent, categoryId: string) => {
+  if (!props.isAdmin || !draggedCategoryId.value || draggedCategoryId.value === categoryId) return
+  event.preventDefault()
+  event.stopPropagation()
+  dragOverCategoryTargetId.value = categoryId
+}
+
+const isDragTarget = (channelId: string) => dragOverChannelId.value === channelId
+
+const channelRowClass = (channel: Channel) => {
+  const baseClass = isChannelActive(channel)
+    ? 'bg-zinc-800/80 text-white shadow-sm'
+    : isChannelUnread(channel)
+      ? 'text-white hover:bg-zinc-900/80'
+      : 'hover:bg-zinc-900/60 text-zinc-400 hover:text-zinc-300'
+
+  return [
+    baseClass,
+    props.isAdmin ? 'admin-draggable-channel' : '',
+    draggedChannelId.value === channel.id ? 'opacity-60' : '',
+    isDragTarget(channel.id) ? 'ring-1 ring-indigo-400/70 bg-zinc-900/90' : ''
+  ]
+}
+
+watch(() => chatStore.activeConnectionId, () => {
+  resetDragState()
+})
 
 const formattedBandwidth = computed(() => {
   const bandwidthKbps = webrtcStore.bandwidth
@@ -50,6 +274,7 @@ const activeServer = computed(() => {
 
 const userPanelName = computed(() => chatStore.currentUser?.username || chatStore.localUsername || 'Not connected')
 const hasCurrentUser = computed(() => !!chatStore.currentUser)
+const userPanelAvatarUrl = computed(() => chatStore.currentUser?.avatar_url || chatStore.getLocalAvatar())
 
 const handleClickOutside = (event: MouseEvent) => {
   if (showVoiceStats.value && voiceStatsContainerRef.value && !voiceStatsContainerRef.value.contains(event.target as Node)) {
@@ -61,6 +286,7 @@ const handleClickOutside = (event: MouseEvent) => {
     if (!target?.closest('.channel-context-menu')) {
       contextMenuVisible.value = false
       contextMenuChannel.value = null
+      contextMenuCategoryId.value = null
     }
   }
 }
@@ -119,6 +345,7 @@ const openChannelListContextMenu = (event: MouseEvent) => {
   contextMenuX.value = event.clientX
   contextMenuY.value = event.clientY
   contextMenuChannel.value = null
+  contextMenuCategoryId.value = null
   contextMenuVisible.value = true
 }
 
@@ -129,8 +356,51 @@ const openChannelContextMenu = (event: MouseEvent, channel: Channel) => {
   contextMenuX.value = event.clientX
   contextMenuY.value = event.clientY
   contextMenuChannel.value = channel
+  contextMenuCategoryId.value = null
   contextMenuVisible.value = true
 }
+
+const openCategoryContextMenu = (event: MouseEvent, categoryId: string) => {
+  if (!props.isAdmin) return
+
+  event.preventDefault()
+  contextMenuX.value = event.clientX
+  contextMenuY.value = event.clientY
+  contextMenuChannel.value = null
+  contextMenuUncategorized.value = false
+  contextMenuCategoryId.value = categoryId
+  contextMenuVisible.value = true
+}
+
+const openUncategorizedContextMenu = (event: MouseEvent) => {
+  if (!props.isAdmin) return
+
+  event.preventDefault()
+  contextMenuX.value = event.clientX
+  contextMenuY.value = event.clientY
+  contextMenuChannel.value = null
+  contextMenuCategoryId.value = null
+  contextMenuUncategorized.value = true
+  contextMenuVisible.value = true
+}
+
+const canDeleteCategoryFromContextMenu = computed(() => {
+  if (contextMenuChannel.value) {
+    return false
+  }
+
+  if (contextMenuCategoryId.value) {
+    return getCategoryChannels(contextMenuCategoryId.value).length === 0
+  }
+
+  if (contextMenuUncategorized.value) {
+    return uncategorizedChannels.value.length === 0
+  }
+
+  return false
+})
+
+const shouldShowContextMenuDivider = computed(() => !!contextMenuChannel.value || canDeleteCategoryFromContextMenu.value)
 
 const deleteChannelFromContextMenu = () => {
   if (!props.isAdmin || !contextMenuChannel.value) return
@@ -142,7 +412,48 @@ const deleteChannelFromContextMenu = () => {
 
   contextMenuVisible.value = false
   contextMenuChannel.value = null
+  contextMenuCategoryId.value = null
+  contextMenuUncategorized.value = false
   chatStore.deleteChannel(channelToDelete.id)
+}
+
+const deleteCategoryFromContextMenu = () => {
+  if (!props.isAdmin) return
+
+  const categoryId = contextMenuCategoryId.value
+  const isUncategorized = contextMenuUncategorized.value
+  const categoryName = isUncategorized
+    ? 'Channels'
+    : chatStore.activeServerCategories.find((entry) => entry.id === categoryId)?.name
+
+  if (!isUncategorized && (!categoryId || !categoryName)) return
+
+  const categoryChannelCount = isUncategorized
+    ? uncategorizedChannels.value.length
+    : getCategoryChannels(categoryId as string).length
+
+  if (categoryChannelCount > 0) {
+    contextMenuVisible.value = false
+    contextMenuCategoryId.value = null
+    contextMenuUncategorized.value = false
+    return
+  }
+
+  if (!confirm(`Delete category ${categoryName}? This cannot be undone.`)) {
+    return
+  }
+
+  contextMenuVisible.value = false
+  contextMenuChannel.value = null
+  contextMenuCategoryId.value = null
+  contextMenuUncategorized.value = false
+
+  if (isUncategorized) {
+    chatStore.deleteUncategorizedCategory()
+    return
+  }
+
+  chatStore.deleteCategory(categoryId as string)
 }
 
 const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss' | 'folder') => {
@@ -150,7 +461,19 @@ const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss' | 'fold
 
   contextMenuVisible.value = false
   contextMenuChannel.value = null
+  contextMenuCategoryId.value = null
+  contextMenuUncategorized.value = false
   emit('open-create-channel', { categoryId: null, type })
+}
+
+const openCreateCategoryFromContextMenu = () => {
+  if (!props.isAdmin) return
+
+  contextMenuVisible.value = false
+  contextMenuChannel.value = null
+  contextMenuCategoryId.value = null
+  contextMenuUncategorized.value = false
+  emit('open-create-channel', { categoryId: null, createCategory: true })
 }
 
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
@@ -176,8 +499,23 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
       </header>
 
       <div class="flex-1 overflow-y-auto p-3 space-y-1 custom-scrollbar" @contextmenu.prevent="openChannelListContextMenu">
-        <div v-for="category in chatStore.activeServerCategories" :key="category.id" class="mb-4">
-          <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer">
+        <div
+          v-for="category in chatStore.activeServerCategories"
+          :key="category.id"
+          class="mb-4 rounded-lg transition-colors"
+          :class="[(dragOverCategoryId === category.id ? 'bg-zinc-900/50 ring-1 ring-indigo-400/60' : ''), (dragOverCategoryTargetId === category.id ? 'ring-1 ring-amber-400/70' : '')]"
+          @dragover="handleCategoryDragOver($event, category.id)"
+          @dragenter.prevent="handleCategoryDragOver($event, category.id)"
+          @drop.prevent="handleCategoryDrop(category.id)"
+        >
+          <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer"
+            :draggable="isAdmin"
+            @dragstart="handleCategoryHeaderDragStart(category.id)"
+            @dragover="draggedChannelId ? handleCategoryDragOver($event, category.id) : handleCategoryHeaderDragOver($event, category.id)"
+            @dragenter.prevent="draggedChannelId ? handleCategoryDragOver($event, category.id) : handleCategoryHeaderDragOver($event, category.id)"
+            @drop="handleCategoryHeaderDrop($event, category.id)"
+            @dragend="handleDragEnd"
+            @contextmenu.stop.prevent="openCategoryContextMenu($event, category.id)">
             <div class="flex items-center text-xs font-bold text-zinc-500 group-hover:text-zinc-300 uppercase tracking-widest transition-colors">
               <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
               {{ category.name }}
@@ -187,11 +525,16 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
             </button>
           </div>
 
-          <div v-for="channel in chatStore.activeServerChannels.filter(c => c.category_id === category.id)" :key="channel.id">
+          <div v-for="channel in getCategoryChannels(category.id)" :key="channel.id">
             <div
               class="relative flex items-center px-2 py-1.5 rounded-lg cursor-pointer group mb-[2px] transition-colors"
-              :class="isChannelActive(channel) ? 'bg-zinc-800/80 text-white shadow-sm' : isChannelUnread(channel) ? 'text-white hover:bg-zinc-900/80' : 'hover:bg-zinc-900/60 text-zinc-400 hover:text-zinc-300'"
+              :class="channelRowClass(channel)"
+              :draggable="isAdmin"
               @click="handleChannelClick(channel)"
+              @dragstart="handleDragStart(channel)"
+              @dragover="handleDragOver($event, channel)"
+              @drop.prevent="handleDrop(channel)"
+              @dragend="handleDragEnd"
               @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
             >
               <div v-if="isChannelUnread(channel)" class="absolute -left-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white"></div>
@@ -222,19 +565,31 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           </div>
         </div>
 
-        <div v-if="chatStore.activeServerChannels.filter(c => !c.category_id).length > 0" class="mb-4">
-          <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer">
+        <div
+          v-if="!chatStore.uncategorizedCategoryDeleted || uncategorizedChannels.length > 0"
+          class="mb-4 rounded-lg transition-colors"
+          :class="dragOverUncategorized ? 'bg-zinc-900/50 ring-1 ring-indigo-400/60' : ''"
+          @dragover="handleCategoryDragOver($event, null)"
+          @dragenter.prevent="handleCategoryDragOver($event, null)"
+          @drop.prevent="handleCategoryDrop(null)"
+        >
+          <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer" @contextmenu.stop.prevent="openUncategorizedContextMenu">
             <div class="text-xs font-bold text-zinc-500 group-hover:text-zinc-300 uppercase tracking-widest transition-colors">Channels</div>
             <button v-if="isAdmin" class="text-zinc-500 hover:text-zinc-300 opacity-0 group-hover:opacity-100 transition-all font-bold" @click.stop="emit('open-create-channel', { categoryId: null })">
               <Plus class="w-3.5 h-3.5" />
             </button>
           </div>
 
-          <div v-for="channel in chatStore.activeServerChannels.filter(c => !c.category_id)" :key="channel.id">
+          <div v-for="channel in uncategorizedChannels" :key="channel.id">
             <div
               class="relative flex items-center px-2 py-1.5 rounded-lg cursor-pointer group mb-[2px] transition-colors"
-              :class="isChannelActive(channel) ? 'bg-zinc-800/80 text-white shadow-sm' : isChannelUnread(channel) ? 'text-white hover:bg-zinc-900/80' : 'hover:bg-zinc-900/60 text-zinc-400 hover:text-zinc-300'"
+              :class="channelRowClass(channel)"
+              :draggable="isAdmin"
               @click="handleChannelClick(channel)"
+              @dragstart="handleDragStart(channel)"
+              @dragover="handleDragOver($event, channel)"
+              @drop.prevent="handleDrop(channel)"
+              @dragend="handleDragEnd"
               @contextmenu.stop.prevent="openChannelContextMenu($event, channel)"
             >
               <div v-if="isChannelUnread(channel)" class="absolute -left-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white"></div>
@@ -271,7 +626,11 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           <Trash2 class="w-4 h-4" />
           Delete channel
         </button>
-        <div v-if="contextMenuChannel" class="my-1 border-t border-white/5"></div>
+        <button v-if="canDeleteCategoryFromContextMenu" class="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="deleteCategoryFromContextMenu">
+          <Trash2 class="w-4 h-4" />
+          Delete category
+        </button>
+        <div v-if="shouldShowContextMenuDivider" class="my-1 border-t border-white/5"></div>
         <button class="w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="openCreateChannelFromContextMenu('text')">
           <Hash class="w-4 h-4" />
           Create text channel
@@ -287,6 +646,10 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
         <button class="w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="openCreateChannelFromContextMenu('folder')">
           <Folder class="w-4 h-4" />
           Create folder channel
+        </button>
+        <button class="w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="openCreateCategoryFromContextMenu">
+          <Plus class="w-4 h-4" />
+          Create category
         </button>
       </div>
     </template>
@@ -341,8 +704,9 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
 
     <div class="h-[52px] bg-zinc-900 border-t border-white/5 px-2 flex items-center shrink-0">
       <div class="flex items-center hover:bg-zinc-800/80 p-1.5 rounded-lg cursor-pointer flex-1 min-w-0 transition-colors">
-        <div class="w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 relative shrink-0 flex items-center justify-center font-bold text-sm" :class="chatStore.currentUser && isVoiceUserSpeaking(chatStore.currentUser.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-900' : ''">
-          {{ userPanelName.charAt(0).toUpperCase() }}
+        <div class="w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 relative shrink-0 flex items-center justify-center font-bold text-sm overflow-hidden" :class="chatStore.currentUser && isVoiceUserSpeaking(chatStore.currentUser.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-900' : ''">
+          <img v-if="userPanelAvatarUrl" :src="userPanelAvatarUrl" alt="Avatar" class="w-full h-full object-cover" />
+          <span v-else>{{ userPanelName.charAt(0).toUpperCase() }}</span>
           <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-900" :class="hasCurrentUser ? 'bg-green-500' : 'bg-zinc-600'"></div>
         </div>
         <div class="ml-2.5 flex-1 min-w-0">

@@ -6,9 +6,20 @@ const channelName = defineModel<string>('channelName', { required: true })
 const channelType = defineModel<'text' | 'voice' | 'rss' | 'folder'>('channelType', { required: true })
 const channelFeedUrl = defineModel<string>('channelFeedUrl', { required: true })
 
-defineProps<{
+withDefaults(defineProps<{
   errorMessage: string | null
-}>()
+  createLabel?: string
+  title?: string
+  nameLabel?: string
+  namePlaceholder?: string
+  showTypeSelector?: boolean
+}>(), {
+  createLabel: 'Create Channel',
+  title: 'Create Channel',
+  nameLabel: 'Channel Name',
+  namePlaceholder: 'new-channel',
+  showTypeSelector: true
+})
 
 const emit = defineEmits<{
   (e: 'create'): void
@@ -18,9 +29,9 @@ const emit = defineEmits<{
 <template>
   <div v-if="visible" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
     <div class="bg-zinc-950 border border-white/10 p-6 rounded-xl shadow-2xl w-[440px]">
-      <h2 class="text-xl font-bold text-white mb-6">Create Channel</h2>
+      <h2 class="text-xl font-bold text-white mb-6">{{ title }}</h2>
 
-      <div class="mb-6">
+      <div v-if="showTypeSelector" class="mb-6">
         <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">Channel Type</label>
         <div class="space-y-3">
           <label class="flex items-start p-4 bg-zinc-900 border border-white/5 rounded-xl cursor-pointer hover:bg-zinc-800/80 hover:border-white/10 transition-all" :class="channelType === 'text' ? 'ring-1 ring-indigo-500/50 bg-zinc-800/50' : ''">
@@ -59,7 +70,7 @@ const emit = defineEmits<{
       </div>
 
       <div class="mb-6">
-        <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Channel Name</label>
+        <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">{{ nameLabel }}</label>
         <div class="relative bg-zinc-900 border border-white/5 rounded-lg focus-within:ring-1 focus-within:ring-indigo-500 transition-all flex items-center">
           <div class="pl-3 pr-2 text-zinc-500">
             <Hash v-if="channelType === 'text'" class="w-4 h-4" />
@@ -71,11 +82,11 @@ const emit = defineEmits<{
             v-model="channelName"
             type="text"
             class="w-full bg-transparent text-white py-2.5 pr-3 focus:outline-none text-sm placeholder:text-zinc-600 font-medium"
-            placeholder="new-channel"
+            :placeholder="namePlaceholder"
             @keyup.enter="emit('create')"
           />
         </div>
-        <div v-if="channelType === 'rss'" class="mt-4">
+        <div v-if="showTypeSelector && channelType === 'rss'" class="mt-4">
           <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Feed URL</label>
           <div class="relative bg-zinc-900 border border-white/5 rounded-lg focus-within:ring-1 focus-within:ring-indigo-500 transition-all flex items-center">
             <input
@@ -94,7 +105,7 @@ const emit = defineEmits<{
 
       <div class="flex justify-end gap-3 pt-4 border-t border-white/5">
         <button class="text-zinc-400 hover:text-white text-sm font-medium px-4 py-2 transition-colors duration-200" @click="visible = false">Cancel</button>
-        <button class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors duration-200 shadow-sm" @click="emit('create')">Create Channel</button>
+        <button class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors duration-200 shadow-sm" @click="emit('create')">{{ createLabel }}</button>
       </div>
     </div>
   </div>

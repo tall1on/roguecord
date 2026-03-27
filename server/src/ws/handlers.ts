@@ -3,16 +3,22 @@ import {
   createUser,
   getUserByPublicKey,
   createCategory,
+  deleteCategory,
   createChannel,
+  getNextChannelPosition,
   deleteChannel,
   getChannelById,
   getCategories,
   getChannels,
+  categoryHasChannels,
+  reorderCategories,
+  reorderChannels,
   getChannelMessages,
   createMessage,
   getUserById,
   getOrCreateSystemUser,
   updateUserRole,
+  updateUserProfile,
   getUsers,
   getServer,
   createServer,
@@ -35,14 +41,17 @@ import {
   getServerStorageSettings,
   updateServerStorageSettings,
   updateServerStorageLastError,
+  updateServerStorageMigrationState,
   updateFolderChannelFileStorage,
   getAllFolderChannelFiles,
+  getAllMessageAttachments,
   getMessageAttachments,
   getMessageById,
   deleteMessageAttachmentById,
   deleteMessageById,
   toggleMessageReaction,
-  getMessageReactionSummary
+  getMessageReactionSummary,
+  updateMessageAttachmentStorage
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -51,9 +60,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { dataDir } from '../db';
 import {
+  buildS3ManagedFilesPrefix,
   buildS3StorageKey,
+  clearS3KeysByPrefix,
+  deleteS3Keys,
   deleteFileFromS3,
   downloadFileFromS3,
+  downloadFileFromS3ForMigration,
+  isMissingS3ObjectError,
   listS3KeysByPrefix,
   type S3StorageConfig,
   uploadFileToS3,
@@ -71,10 +85,24 @@ import {
   sanitizeUploadFileName
 } from '../uploads';
 
+type StorageSettingsProvider = 'generic_s3' | 'cloudflare_r2';
+
+type StorageSettingsInput = {
+  enabled?: boolean;
+  provider?: StorageSettingsProvider;
+  providerUrl?: string;
+  endpoint?: string;
+  region?: string;
+  bucket?: string;
+  accessKey?: string;
+  secretKey?: string;
+  prefix?: string;
+};
+
 const filesRootDir = path.join(dataDir, 'files');
-const serverIconsRootDir = path.join(dataDir, 'server-icons');
 const MAX_FOLDER_FILE_SIZE_BYTES = MAX_UPLOAD_FILE_SIZE_BYTES;
 const MAX_SERVER_ICON_SIZE_BYTES = 2 * 1024 * 1024;
+const MAX_USER_AVATAR_SIZE_BYTES = 2 * 1024 * 1024;
 const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
   'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx',
   'html', 'htm', 'php', 'phtml',
@@ -93,22 +121,16 @@ const ensureFilesRootDir = () => {
   }
 };
 
-const ensureServerIconsRootDir = () => {
-  if (!fs.existsSync(serverIconsRootDir)) {
-    fs.mkdirSync(serverIconsRootDir, { recursive: true });
-  }
-};
-
 const sanitizeServerIdForPath = (serverId: string) => (serverId || '').replace(/[^a-zA-Z0-9-]/g, '');
 
 const getSafeServerIconPath = (serverId: string, storageName: string) => {
-  ensureServerIconsRootDir();
   const safeServerId = sanitizeServerIdForPath(serverId);
   const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
   if (!safeServerId || !safeStorageName) {
     throw new Error('Invalid server icon path');
   }
 
+  const serverIconsRootDir = path.resolve(dataDir, 'server-icons');
   const dir = path.resolve(serverIconsRootDir, safeServerId);
   const root = path.resolve(serverIconsRootDir);
   if (!dir.startsWith(root)) {
@@ -144,7 +166,7 @@ const parseServerIconDataUrl = (value: unknown): { buffer: Buffer; mimeType: str
 const buildServerIconPathForClient = (serverId: string, storageName: string) => {
   const safeServerId = sanitizeServerIdForPath(serverId);
   const safeStorageName = path.basename(storageName || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim();
-  return `/server-icons/${safeServerId}/${safeStorageName}`;
+  return `/files/server-icons/${safeServerId}/${safeStorageName}`;
 };
 
 const buildServerIconStorageName = (extension: string) => {
@@ -153,6 +175,32 @@ const buildServerIconStorageName = (extension: string) => {
     throw new Error('Invalid icon extension');
   }
   return `icon.${safeExtension}`;
+};
+
+const parseUserAvatarDataUrl = (value: unknown): { dataUrl: string; mimeType: 'image/png' | 'image/jpeg' } | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  const match = trimmed.match(/^data:(image\/(png|jpeg|jpg));base64,([a-z0-9+/=\r\n]+)$/i);
+  if (!match) return null;
+
+  const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : (match[1].toLowerCase() as 'image/png' | 'image/jpeg');
+  const buffer = Buffer.from(match[3] || '', 'base64');
+  if (!buffer.length) return null;
+  if (buffer.length > MAX_USER_AVATAR_SIZE_BYTES) {
+    throw new Error('Profile picture exceeds 2MB size limit.');
+  }
+
+  return {
+    dataUrl: `data:${mimeType};base64,${buffer.toString('base64')}`,
+    mimeType
+  };
+};
+
+const sanitizeUsernameForProfile = (value: unknown) => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  if (!normalized) return null;
+  return normalized.slice(0, 64);
 };
 
 const buildS3ServerIconPrefix = (prefix: string | null | undefined, serverId: string) => {
@@ -186,12 +234,17 @@ const parseSafeLocalServerIconStorageName = (serverId: string, iconPath: string)
   }
 
   const normalizedPath = (iconPath || '').trim();
-  const expectedPrefix = `/server-icons/${safeServerId}/`;
-  if (!normalizedPath.startsWith(expectedPrefix)) {
+  const supportedPrefixes = [
+    `/files/server-icons/${safeServerId}/`,
+    `/server-icons/${safeServerId}/`
+  ];
+
+  const matchingPrefix = supportedPrefixes.find((prefix) => normalizedPath.startsWith(prefix));
+  if (!matchingPrefix) {
     return null;
   }
 
-  const storageName = normalizedPath.slice(expectedPrefix.length).trim();
+  const storageName = normalizedPath.slice(matchingPrefix.length).trim();
   if (!storageName || storageName.includes('/') || storageName.includes('\\')) {
     return null;
   }
@@ -202,6 +255,25 @@ const parseSafeLocalServerIconStorageName = (serverId: string, iconPath: string)
   }
 
   return safeStorageName;
+};
+
+const normalizePersistedServerIconPath = (serverId: string, iconPath: string | null | undefined): string | null => {
+  const trimmed = (iconPath || '').trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed.startsWith('s3:')) {
+    const key = trimmed.slice('s3:'.length).trim();
+    return isSafeS3IconKeyForServer(serverId, key) ? `s3:${key}` : null;
+  }
+
+  const storageName = parseSafeLocalServerIconStorageName(serverId, trimmed);
+  if (!storageName) {
+    return null;
+  }
+
+  return buildServerIconPathForClient(serverId, storageName);
 };
 
 const cleanupServerIconReference = async (serverId: string, iconPath: string | null | undefined) => {
@@ -328,6 +400,42 @@ const storeServerIcon = async (serverId: string, iconDataUrl: string): Promise<s
   fs.writeFileSync(targetPath, parsed.buffer);
   cleanupStaleLocalServerIcons(serverId, storageName);
   return buildServerIconPathForClient(serverId, storageName);
+};
+
+const migrateServerIconToS3IfNeeded = async (input: {
+  serverId: string;
+  currentIconPath: string | null | undefined;
+  s3Config: S3StorageConfig;
+}): Promise<string | null> => {
+  const normalizedIconPath = normalizePersistedServerIconPath(input.serverId, input.currentIconPath);
+  if (!normalizedIconPath) {
+    return null;
+  }
+
+  if (normalizedIconPath.startsWith('s3:')) {
+    return normalizedIconPath;
+  }
+
+  const storageName = parseSafeLocalServerIconStorageName(input.serverId, normalizedIconPath);
+  if (!storageName) {
+    return normalizedIconPath;
+  }
+
+  const localPath = getSafeServerIconPath(input.serverId, storageName);
+  if (!fs.existsSync(localPath)) {
+    throw new Error('Missing local server icon source during S3 migration');
+  }
+
+  const key = buildS3StorageKey(input.s3Config.prefix, `server-icons/${input.serverId}`, storageName);
+  const buffer = fs.readFileSync(localPath);
+  await uploadFileToS3({
+    config: input.s3Config,
+    key,
+    buffer,
+    mimeType: null
+  });
+
+  return `s3:${key}`;
 };
 
 const sanitizeFileName = (name: string) => {
@@ -473,6 +581,8 @@ const parseHetznerEndpointHost = (endpoint: string): { bucket: string; region: s
 };
 
 const normalizeS3Config = (input: {
+  provider?: StorageSettingsProvider | null;
+  providerUrl?: string | null;
   endpoint?: string | null;
   region?: string | null;
   bucket?: string | null;
@@ -480,11 +590,31 @@ const normalizeS3Config = (input: {
   secretKey?: string | null;
   prefix?: string | null;
 }): S3StorageConfig => {
-  const endpoint = sanitizeS3Endpoint(input.endpoint || '');
+  const provider = input.provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3';
+  const providerUrl = (input.providerUrl || '').trim();
+  const rawEndpoint = (input.endpoint || '').trim();
+  const endpoint = rawEndpoint ? sanitizeS3Endpoint(rawEndpoint) : '';
   const requestedRegion = (input.region || '').trim();
   const requestedBucket = (input.bucket || '').trim();
   const accessKey = (input.accessKey || '').trim();
   const secretKey = (input.secretKey || '').trim();
+
+  if (provider === 'cloudflare_r2') {
+    if (!providerUrl) {
+      throw new Error('Cloudflare R2 URL is required');
+    }
+
+    return {
+      provider,
+      providerUrl,
+      endpoint,
+      region: requestedRegion,
+      bucket: requestedBucket,
+      accessKey,
+      secretKey,
+      prefix: sanitizeStoragePrefix(input.prefix)
+    };
+  }
 
   const parsedHetzner = parseHetznerEndpointHost(endpoint);
   const region = requestedRegion || parsedHetzner?.region || '';
@@ -517,6 +647,8 @@ const normalizeS3Config = (input: {
   }
 
   return {
+    provider,
+    providerUrl: null,
     endpoint,
     region,
     bucket,
@@ -559,8 +691,19 @@ const buildStorageSettingsPayloadForClient = (settings: Awaited<ReturnType<typeo
   return {
     storageType: settings?.storageType || 'data_dir',
     storageLastError: settings?.storageLastError || null,
+    migration: {
+      status: settings?.storageMigrationStatus || 'idle',
+      target: settings?.storageMigrationTarget || null,
+      total: settings?.storageMigrationTotal || 0,
+      done: settings?.storageMigrationDone || 0,
+      message: settings?.storageMigrationMessage || null,
+      startedAt: settings?.storageMigrationStartedAt || null,
+      updatedAt: settings?.storageMigrationUpdatedAt || null
+    },
     s3: settings?.s3
       ? {
+        provider: settings.s3.provider,
+        providerUrl: settings.s3.providerUrl || '',
         endpoint: settings.s3.endpoint,
         region: settings.s3.region,
         bucket: settings.s3.bucket,
@@ -569,6 +712,8 @@ const buildStorageSettingsPayloadForClient = (settings: Awaited<ReturnType<typeo
         prefix: settings.s3.prefix || ''
       }
       : {
+        provider: 'generic_s3',
+        providerUrl: '',
         endpoint: '',
         region: '',
         bucket: '',
@@ -579,57 +724,608 @@ const buildStorageSettingsPayloadForClient = (settings: Awaited<ReturnType<typeo
   };
 };
 
-const migrateDataDirFilesToS3 = async (serverId: string, s3Config: S3StorageConfig) => {
-  const allFiles = await getAllFolderChannelFiles();
+type StorageMigrationTarget = 'data_dir' | 's3';
 
-  for (const file of allFiles) {
-    if (file.storage_provider === 's3' && file.storage_key) {
-      continue;
-    }
+type StorageMigrationProgressState = {
+  total: number;
+  done: number;
+  startedAt: string;
+};
 
-    const legacyPath = resolveSafeStoredFilePath(file.channel_id, file.storage_name);
-    if (!fs.existsSync(legacyPath)) {
-      console.warn('[WS DEBUG] Skipping legacy file migration because source is missing', {
-        channelId: file.channel_id,
-        fileId: file.id
-      });
-      continue;
-    }
+type ManagedStorageRecord = {
+  kind: 'folder_file' | 'message_attachment';
+  id: string;
+  channelId: string;
+  storageName: string;
+  mimeType: string | null;
+  storageProvider: 'data_dir' | 's3';
+  storageKey: string | null;
+  migratedToS3At: string | null;
+};
 
-    const storageKey = buildS3StorageKey(s3Config.prefix, file.channel_id, file.storage_name);
-    try {
-      const buffer = fs.readFileSync(legacyPath);
-      await uploadFileToS3({
-        config: s3Config,
-        key: storageKey,
-        buffer,
-        mimeType: file.mime_type
-      });
+type ManagedStorageMigrationResult = {
+  progress: StorageMigrationProgressState;
+  migratedRecordIds: string[];
+};
 
-      await updateFolderChannelFileStorage({
-        fileId: file.id,
-        storageProvider: 's3',
-        storageKey,
-        migratedToS3At: new Date().toISOString()
-      });
+type ManagedStorageMigrationCheckpoint = {
+  record: ManagedStorageRecord;
+  targetStorageKey: string | null;
+};
 
-      try {
-        fs.unlinkSync(legacyPath);
-      } catch {
-        // keep source file when cleanup fails
+const areS3ConfigsEquivalent = (left: S3StorageConfig, right: S3StorageConfig) => {
+  return left.provider === right.provider
+    && (left.providerUrl || '') === (right.providerUrl || '')
+    && left.endpoint === right.endpoint
+    && left.region === right.region
+    && left.bucket === right.bucket
+    && left.accessKey === right.accessKey
+    && left.secretKey === right.secretKey
+    && (left.prefix || '') === (right.prefix || '');
+};
+
+const broadcastServerStorageSettings = async () => {
+  const settings = await getServerStorageSettings();
+  connectionManager.broadcastToAuthenticated({
+    type: 'server_storage_settings',
+    payload: buildStorageSettingsPayloadForClient(settings)
+  });
+};
+
+const broadcastServerStorageMigrationProgress = async () => {
+  const settings = await getServerStorageSettings();
+  connectionManager.broadcastToAuthenticated({
+    type: 'server_storage_migration_progress',
+    payload: buildStorageSettingsPayloadForClient(settings)
+  });
+};
+
+const persistMigrationProgress = async (
+  serverId: string,
+  target: StorageMigrationTarget,
+  progress: StorageMigrationProgressState,
+  message: string | null,
+  status: 'running' | 'failed' | 'idle' = 'running'
+) => {
+  await updateServerStorageMigrationState({
+    serverId,
+    status,
+    target: status === 'idle' ? null : target,
+    total: progress.total,
+    done: progress.done,
+    message,
+    startedAt: status === 'idle' ? null : progress.startedAt
+  });
+  await broadcastServerStorageMigrationProgress();
+  await broadcastServerStorageSettings();
+};
+
+const incrementMigrationProgress = async (
+  serverId: string,
+  target: StorageMigrationTarget,
+  progress: StorageMigrationProgressState
+) => {
+  progress.done += 1;
+  await persistMigrationProgress(serverId, target, progress, null, 'running');
+};
+
+const mapFolderFileToManagedRecord = (file: Awaited<ReturnType<typeof getAllFolderChannelFiles>>[number]): ManagedStorageRecord => ({
+  kind: 'folder_file',
+  id: file.id,
+  channelId: file.channel_id,
+  storageName: file.storage_name,
+  mimeType: file.mime_type || null,
+  storageProvider: file.storage_provider,
+  storageKey: file.storage_key,
+  migratedToS3At: file.migrated_to_s3_at || null
+});
+
+const mapAttachmentToManagedRecord = (attachment: Awaited<ReturnType<typeof getAllMessageAttachments>>[number]): ManagedStorageRecord => ({
+  kind: 'message_attachment',
+  id: attachment.id,
+  channelId: attachment.channel_id,
+  storageName: attachment.storage_name,
+  mimeType: attachment.mime_type || null,
+  storageProvider: attachment.storage_provider,
+  storageKey: attachment.storage_key,
+  migratedToS3At: null
+});
+
+const updateManagedStorageRecord = async (record: ManagedStorageRecord) => {
+  if (record.kind === 'folder_file') {
+    await updateFolderChannelFileStorage({
+      fileId: record.id,
+      storageProvider: record.storageProvider,
+      storageKey: record.storageKey,
+      migratedToS3At: record.migratedToS3At
+    });
+    return;
+  }
+
+  await updateMessageAttachmentStorage({
+    attachmentId: record.id,
+    storageProvider: record.storageProvider,
+    storageKey: record.storageKey
+  });
+};
+
+const listManagedStorageRecords = async (): Promise<ManagedStorageRecord[]> => {
+  const folderFiles = await getAllFolderChannelFiles();
+  const attachments = await getAllMessageAttachments();
+  return [
+    ...folderFiles.map(mapFolderFileToManagedRecord),
+    ...attachments.map(mapAttachmentToManagedRecord)
+  ];
+};
+
+const clearManagedLocalFilesArea = () => {
+  ensureFilesRootDir();
+  if (!fs.existsSync(filesRootDir)) {
+    return;
+  }
+
+  for (const entry of fs.readdirSync(filesRootDir, { withFileTypes: true })) {
+    const fullPath = path.join(filesRootDir, entry.name);
+    fs.rmSync(fullPath, { recursive: true, force: true });
+  }
+};
+
+const clearManagedS3FilesArea = async (s3Config: S3StorageConfig) => {
+  return clearS3KeysByPrefix({
+    config: s3Config,
+    prefix: buildS3ManagedFilesPrefix(s3Config.prefix)
+  });
+};
+
+const rollbackManagedStorageMigration = async (input: {
+  target: StorageMigrationTarget;
+  s3Config: S3StorageConfig;
+  checkpoints: ManagedStorageMigrationCheckpoint[];
+  clearedTargetS3Keys: string[];
+}) => {
+  if (input.target === 'data_dir') {
+    clearManagedLocalFilesArea();
+  }
+
+  for (let index = input.checkpoints.length - 1; index >= 0; index -= 1) {
+    const checkpoint = input.checkpoints[index];
+    const previous = checkpoint.record;
+    const localPath = resolveSafeStoredFilePath(previous.channelId, previous.storageName);
+
+    if (input.target === 's3') {
+      if (checkpoint.targetStorageKey) {
+        try {
+          const buffer = await downloadFileFromS3({ config: input.s3Config, key: checkpoint.targetStorageKey });
+          ensureChannelFilesDir(previous.channelId);
+          fs.writeFileSync(localPath, buffer);
+        } finally {
+          await deleteS3Keys({ config: input.s3Config, keys: [checkpoint.targetStorageKey] });
+        }
       }
-    } catch (error) {
-      console.error('[WS DEBUG] Failed migrating legacy file to S3', {
-        fileId: file.id,
-        channelId: file.channel_id,
-        error
-      });
-      await updateServerStorageLastError({
-        serverId,
-        storageLastError: 'Some legacy files could not be migrated to S3. Check server logs.'
+      await updateManagedStorageRecord(previous);
+      continue;
+    }
+
+    if (!previous.storageKey) {
+      throw new Error(`Rollback missing original S3 key for ${previous.kind} ${previous.id}`);
+    }
+
+    if (!fs.existsSync(localPath)) {
+      throw new Error(`Rollback missing staged local file for ${previous.kind} ${previous.id}`);
+    }
+
+    const buffer = fs.readFileSync(localPath);
+    await uploadFileToS3({
+      config: input.s3Config,
+      key: previous.storageKey,
+      buffer,
+      mimeType: previous.mimeType
+    });
+    fs.unlinkSync(localPath);
+    await updateManagedStorageRecord(previous);
+  }
+
+  if (input.target === 's3' && input.clearedTargetS3Keys.length > 0) {
+    const recordsByKey = new Map<string, ManagedStorageRecord>();
+    for (const checkpoint of input.checkpoints) {
+      if (checkpoint.targetStorageKey) {
+        recordsByKey.set(checkpoint.targetStorageKey, checkpoint.record);
+      }
+    }
+
+    for (const key of input.clearedTargetS3Keys) {
+      const originalRecord = recordsByKey.get(key);
+      if (!originalRecord) {
+        continue;
+      }
+
+      const localPath = resolveSafeStoredFilePath(originalRecord.channelId, originalRecord.storageName);
+      if (!fs.existsSync(localPath)) {
+        continue;
+      }
+
+      const buffer = fs.readFileSync(localPath);
+      await uploadFileToS3({
+        config: input.s3Config,
+        key,
+        buffer,
+        mimeType: originalRecord.mimeType
       });
     }
   }
+};
+
+const migrateManagedStorageRecord = async (input: {
+  record: ManagedStorageRecord;
+  target: StorageMigrationTarget;
+  sourceS3Config: S3StorageConfig | null;
+  targetS3Config: S3StorageConfig | null;
+}): Promise<ManagedStorageMigrationCheckpoint | null> => {
+  const { record, target, sourceS3Config, targetS3Config } = input;
+  const markManagedS3RecordAsOrphaned = async () => {
+    console.warn('[STORAGE MIGRATION] Managed S3 record source object missing; marking record as migrated without file copy', {
+      kind: record.kind,
+      id: record.id,
+      key: record.storageKey,
+      target
+    });
+    await updateManagedStorageRecord({
+      ...record,
+      storageProvider: target === 's3' ? 's3' : 'data_dir',
+      storageKey: null,
+      migratedToS3At: target === 's3'
+        ? (record.kind === 'folder_file' ? new Date().toISOString() : record.migratedToS3At)
+        : (record.kind === 'folder_file' ? null : record.migratedToS3At)
+    });
+  };
+
+  if (target === 's3') {
+    if (!targetS3Config) {
+      throw new Error('Missing target S3 configuration for storage migration');
+    }
+
+    if (record.storageProvider === 's3' && record.storageKey) {
+      if (sourceS3Config && areS3ConfigsEquivalent(sourceS3Config, targetS3Config)) {
+        return null;
+      }
+
+      if (!sourceS3Config) {
+        throw new Error(`Missing source S3 configuration for ${record.kind} ${record.id}`);
+      }
+
+      let buffer: Buffer;
+      try {
+        ({ buffer } = await downloadFileFromS3ForMigration({ config: sourceS3Config, key: record.storageKey }));
+      } catch (error) {
+        if (!isMissingS3ObjectError(error)) {
+          throw error;
+        }
+        await markManagedS3RecordAsOrphaned();
+        return {
+          record,
+          targetStorageKey: null
+        };
+      }
+      const targetStorageKey = buildS3StorageKey(targetS3Config.prefix, record.channelId, record.storageName);
+      await uploadFileToS3({
+        config: targetS3Config,
+        key: targetStorageKey,
+        buffer,
+        mimeType: record.mimeType
+      });
+
+      await updateManagedStorageRecord({
+        ...record,
+        storageProvider: 's3',
+        storageKey: targetStorageKey,
+        migratedToS3At: record.kind === 'folder_file' ? new Date().toISOString() : record.migratedToS3At
+      });
+
+      return {
+        record,
+        targetStorageKey
+      };
+    }
+
+    const sourcePath = resolveSafeStoredFilePath(record.channelId, record.storageName);
+    if (!fs.existsSync(sourcePath)) {
+      await markManagedS3RecordAsOrphaned();
+      return {
+        record,
+        targetStorageKey: null
+      };
+    }
+
+    const buffer = fs.readFileSync(sourcePath);
+    const targetStorageKey = buildS3StorageKey(targetS3Config.prefix, record.channelId, record.storageName);
+    await uploadFileToS3({
+      config: targetS3Config,
+      key: targetStorageKey,
+      buffer,
+      mimeType: record.mimeType
+    });
+
+    await updateManagedStorageRecord({
+      ...record,
+      storageProvider: 's3',
+      storageKey: targetStorageKey,
+      migratedToS3At: record.kind === 'folder_file' ? new Date().toISOString() : record.migratedToS3At
+    });
+
+    return {
+      record,
+      targetStorageKey
+    };
+  }
+
+  if (record.storageProvider === 'data_dir') {
+    return null;
+  }
+  if (!record.storageKey) {
+    console.warn('[STORAGE MIGRATION] Managed S3 record storage key missing; skipping record', {
+      kind: record.kind,
+      id: record.id,
+      target
+    });
+    await markManagedS3RecordAsOrphaned();
+    return {
+      record,
+      targetStorageKey: null
+    };
+  }
+  if (!sourceS3Config) {
+    throw new Error(`Missing source S3 configuration for ${record.kind} ${record.id}`);
+  }
+
+  const targetPath = resolveSafeStoredFilePath(record.channelId, record.storageName);
+  ensureChannelFilesDir(record.channelId);
+  let buffer: Buffer;
+  try {
+    ({ buffer } = await downloadFileFromS3ForMigration({ config: sourceS3Config, key: record.storageKey }));
+  } catch (error) {
+    if (!isMissingS3ObjectError(error)) {
+      throw error;
+    }
+    await markManagedS3RecordAsOrphaned();
+    return {
+      record,
+      targetStorageKey: null
+    };
+  }
+  fs.writeFileSync(targetPath, buffer);
+  await updateManagedStorageRecord({
+    ...record,
+    storageProvider: 'data_dir',
+    storageKey: null,
+    migratedToS3At: record.kind === 'folder_file' ? null : record.migratedToS3At
+  });
+
+  return {
+    record,
+    targetStorageKey: null
+  };
+};
+
+const migrateFolderFileToS3 = async (file: Awaited<ReturnType<typeof getAllFolderChannelFiles>>[number], s3Config: S3StorageConfig) => {
+  if (file.storage_provider === 's3' && file.storage_key) {
+    return false;
+  }
+
+  const sourcePath = resolveSafeStoredFilePath(file.channel_id, file.storage_name);
+  if (!fs.existsSync(sourcePath)) {
+    console.warn('[STORAGE MIGRATION] Local folder file source missing; skipping record', {
+      fileId: file.id,
+      channelId: file.channel_id,
+      storageName: file.storage_name
+    });
+    return false;
+  }
+
+  const buffer = fs.readFileSync(sourcePath);
+  const storageKey = buildS3StorageKey(s3Config.prefix, file.channel_id, file.storage_name);
+  await uploadFileToS3({
+    config: s3Config,
+    key: storageKey,
+    buffer,
+    mimeType: file.mime_type
+  });
+  await updateFolderChannelFileStorage({
+    fileId: file.id,
+    storageProvider: 's3',
+    storageKey,
+    migratedToS3At: new Date().toISOString()
+  });
+  try {
+    fs.unlinkSync(sourcePath);
+  } catch {
+    // keep source file when cleanup fails
+  }
+  return true;
+};
+
+const migrateFolderFileToDataDir = async (file: Awaited<ReturnType<typeof getAllFolderChannelFiles>>[number], s3Config: S3StorageConfig) => {
+  if (file.storage_provider === 'data_dir') {
+    return false;
+  }
+  if (!file.storage_key) {
+    throw new Error(`Missing S3 storage key for folder file ${file.id}`);
+  }
+
+  const targetPath = resolveSafeStoredFilePath(file.channel_id, file.storage_name);
+  ensureChannelFilesDir(file.channel_id);
+  let buffer: Buffer;
+  try {
+    buffer = await downloadFileFromS3({ config: s3Config, key: file.storage_key });
+  } catch (error) {
+    if (!isMissingS3ObjectError(error)) {
+      throw error;
+    }
+    console.warn('[STORAGE MIGRATION] S3 folder file source missing; skipping record', {
+      fileId: file.id,
+      channelId: file.channel_id,
+      storageKey: file.storage_key
+    });
+    return false;
+  }
+  fs.writeFileSync(targetPath, buffer);
+  await updateFolderChannelFileStorage({
+    fileId: file.id,
+    storageProvider: 'data_dir',
+    storageKey: null,
+    migratedToS3At: null
+  });
+  try {
+    await deleteFileFromS3({ config: s3Config, key: file.storage_key });
+  } catch {
+    // keep source object when cleanup fails
+  }
+  return true;
+};
+
+const migrateMessageAttachmentToS3 = async (attachment: Awaited<ReturnType<typeof getAllMessageAttachments>>[number], s3Config: S3StorageConfig) => {
+  if (attachment.storage_provider === 's3' && attachment.storage_key) {
+    return false;
+  }
+
+  const sourcePath = resolveSafeStoredFilePath(attachment.channel_id, attachment.storage_name);
+  if (!fs.existsSync(sourcePath)) {
+    console.warn('[STORAGE MIGRATION] Local message attachment source missing; skipping record', {
+      attachmentId: attachment.id,
+      channelId: attachment.channel_id,
+      storageName: attachment.storage_name
+    });
+    return false;
+  }
+
+  const buffer = fs.readFileSync(sourcePath);
+  const storageKey = buildS3StorageKey(s3Config.prefix, attachment.channel_id, attachment.storage_name);
+  await uploadFileToS3({
+    config: s3Config,
+    key: storageKey,
+    buffer,
+    mimeType: attachment.mime_type
+  });
+  await updateMessageAttachmentStorage({
+    attachmentId: attachment.id,
+    storageProvider: 's3',
+    storageKey
+  });
+  try {
+    fs.unlinkSync(sourcePath);
+  } catch {
+    // keep source file when cleanup fails
+  }
+  return true;
+};
+
+const migrateMessageAttachmentToDataDir = async (attachment: Awaited<ReturnType<typeof getAllMessageAttachments>>[number], s3Config: S3StorageConfig) => {
+  if (attachment.storage_provider === 'data_dir') {
+    return false;
+  }
+  if (!attachment.storage_key) {
+    throw new Error(`Missing S3 storage key for message attachment ${attachment.id}`);
+  }
+
+  const targetPath = resolveSafeStoredFilePath(attachment.channel_id, attachment.storage_name);
+  ensureChannelFilesDir(attachment.channel_id);
+  let buffer: Buffer;
+  try {
+    buffer = await downloadFileFromS3({ config: s3Config, key: attachment.storage_key });
+  } catch (error) {
+    if (!isMissingS3ObjectError(error)) {
+      throw error;
+    }
+    console.warn('[STORAGE MIGRATION] S3 message attachment source missing; skipping record', {
+      attachmentId: attachment.id,
+      channelId: attachment.channel_id,
+      storageKey: attachment.storage_key
+    });
+    return false;
+  }
+  fs.writeFileSync(targetPath, buffer);
+  await updateMessageAttachmentStorage({
+    attachmentId: attachment.id,
+    storageProvider: 'data_dir',
+    storageKey: null
+  });
+  try {
+    await deleteFileFromS3({ config: s3Config, key: attachment.storage_key });
+  } catch {
+    // keep source object when cleanup fails
+  }
+  return true;
+};
+
+const runStorageMigration = async (input: {
+  serverId: string;
+  target: StorageMigrationTarget;
+  sourceS3Config: S3StorageConfig | null;
+  targetS3Config: S3StorageConfig | null;
+}): Promise<ManagedStorageMigrationResult> => {
+  const startedAt = new Date().toISOString();
+  const records = await listManagedStorageRecords();
+  const progress: StorageMigrationProgressState = {
+    total: records.length,
+    done: 0,
+    startedAt
+  };
+  const checkpoints: ManagedStorageMigrationCheckpoint[] = [];
+  let clearedTargetS3Keys: string[] = [];
+
+  await persistMigrationProgress(input.serverId, input.target, progress, null, 'running');
+
+  if (input.target === 's3') {
+    if (!input.targetS3Config) {
+      throw new Error('Missing target S3 configuration for storage migration');
+    }
+    if (!input.sourceS3Config) {
+      clearedTargetS3Keys = await clearManagedS3FilesArea(input.targetS3Config);
+    }
+  } else {
+    clearManagedLocalFilesArea();
+  }
+
+  try {
+    for (const record of records) {
+      const checkpoint = await migrateManagedStorageRecord({
+        record,
+        target: input.target,
+        sourceS3Config: input.sourceS3Config,
+        targetS3Config: input.targetS3Config
+      });
+      if (checkpoint) {
+        checkpoints.push(checkpoint);
+      }
+      await incrementMigrationProgress(input.serverId, input.target, progress);
+    }
+  } catch (error) {
+    await rollbackManagedStorageMigration({
+      target: input.target,
+      s3Config: input.target === 's3'
+        ? input.targetS3Config as S3StorageConfig
+        : input.sourceS3Config as S3StorageConfig,
+      checkpoints,
+      clearedTargetS3Keys
+    });
+    throw error;
+  }
+
+  if (input.target === 's3') {
+    clearManagedLocalFilesArea();
+  } else {
+    const migratedSourceKeys = checkpoints
+      .map((checkpoint) => checkpoint.record.storageKey)
+      .filter((key): key is string => Boolean(key));
+    await deleteS3Keys({
+      config: input.sourceS3Config as S3StorageConfig,
+      keys: migratedSourceKeys
+    });
+  }
+
+  return {
+    progress,
+    migratedRecordIds: checkpoints.map((checkpoint) => checkpoint.record.id)
+  };
 };
 
 export const handleMessage = async (client: ClientConnection, messageStr: string) => {
@@ -650,6 +1346,21 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'create_channel':
         await handleCreateChannel(client, payload);
+        break;
+      case 'create_category':
+        await handleCreateCategory(client, payload);
+        break;
+      case 'reorder_channels':
+        await handleReorderChannels(client, payload);
+        break;
+      case 'reorder_categories':
+        await handleReorderCategories(client, payload);
+        break;
+      case 'delete_category':
+        await handleDeleteCategory(client, payload);
+        break;
+      case 'delete_uncategorized_category':
+        await handleDeleteUncategorizedCategory(client);
         break;
       case 'delete_channel':
         await handleDeleteChannel(client, payload);
@@ -765,9 +1476,30 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
   }
 };
 
-const handleAuthRequest = async (client: ClientConnection, payload: { username: string, publicKey: string }) => {
+const handleAuthRequest = async (client: ClientConnection, payload: { username: string, publicKey: string, avatarUrl?: string | null }) => {
   const { username, publicKey } = payload;
   if (!username || !publicKey) return;
+
+  let normalizedAvatar: { dataUrl: string; mimeType: 'image/png' | 'image/jpeg' } | null = null;
+  try {
+    normalizedAvatar = payload.avatarUrl == null || payload.avatarUrl === ''
+      ? null
+      : parseUserAvatarDataUrl(payload.avatarUrl);
+  } catch (error) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message: error instanceof Error ? error.message : 'Invalid profile picture.' }
+    }));
+    return;
+  }
+
+  if (payload.avatarUrl && !normalizedAvatar) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message: 'Profile picture must be a PNG or JPG image data URL.' }
+    }));
+    return;
+  }
 
   const normalizedIp = normalizeIp(client.ipAddress);
   const activeBan = await getMatchingActiveBan({
@@ -791,8 +1523,26 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
   let user = await getUserByPublicKey(publicKey);
   let isNewUser = false;
   if (!user) {
-    user = await createUser(username, publicKey);
+    user = await createUser(username, publicKey, normalizedAvatar?.dataUrl ?? null, normalizedAvatar?.mimeType ?? null);
     isNewUser = true;
+  } else {
+    const nextUsername = sanitizeUsernameForProfile(username);
+    const nextAvatarUrl = normalizedAvatar?.dataUrl ?? null;
+    const nextAvatarMimeType = normalizedAvatar?.mimeType ?? null;
+    const shouldUpdateUsername = Boolean(nextUsername && nextUsername !== user.username);
+    const shouldUpdateAvatar = payload.avatarUrl !== undefined && (
+      (user.avatar_url || null) !== nextAvatarUrl ||
+      (user.avatar_mime_type || null) !== nextAvatarMimeType
+    );
+
+    if (shouldUpdateUsername || shouldUpdateAvatar) {
+      await updateUserProfile({
+        id: user.id,
+        ...(shouldUpdateUsername ? { username: nextUsername! } : {}),
+        ...(shouldUpdateAvatar ? { avatar_url: nextAvatarUrl, avatar_mime_type: nextAvatarMimeType } : {})
+      });
+      user = (await getUserById(user.id)) || user;
+    }
   }
 
   const challenge = crypto.randomBytes(32).toString('hex');
@@ -959,7 +1709,12 @@ const handleGetChannels = async (client: ClientConnection) => {
 
   client.ws.send(JSON.stringify({
     type: 'channels_list',
-    payload: { categories, channels, unreadStates }
+    payload: {
+      categories,
+      channels,
+      unreadStates,
+      uncategorized_category_deleted: !channels.some((channel) => channel.category_id == null)
+    }
   }));
 
   const voiceParticipants: Record<string, any[]> = {};
@@ -1051,7 +1806,8 @@ const handleCreateChannel = async (
   }
 
   try {
-    const channel = await createChannel(category_id, normalizedName, type, 0, type === 'rss' ? normalizedFeedUrl : null);
+    const nextPosition = await getNextChannelPosition(category_id);
+    const channel = await createChannel(category_id, normalizedName, type, nextPosition, type === 'rss' ? normalizedFeedUrl : null);
 
     // Broadcast to all authenticated users
     connectionManager.broadcastToAuthenticated({
@@ -1062,6 +1818,220 @@ const handleCreateChannel = async (
     console.error('[WS DEBUG] Failed to create channel:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to create channel' } }));
   }
+};
+
+const handleCreateCategory = async (
+  client: ClientConnection,
+  payload: { name?: string }
+) => {
+  if (!client.userId) return;
+
+  const normalizedName = typeof payload?.name === 'string' ? payload.name.trim() : '';
+  if (!normalizedName) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Category name is required' } }));
+    return;
+  }
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can create categories' } }));
+    return;
+  }
+
+  try {
+    const categories = await getCategories();
+    const category = await createCategory(normalizedName, categories.length);
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'category_created',
+      payload: { category }
+    });
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to create category:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to create category' } }));
+  }
+};
+
+const handleReorderChannels = async (
+  client: ClientConnection,
+  payload: { channels?: Array<{ id?: string; category_id?: string | null; position?: number }> }
+) => {
+  if (!client.userId) return;
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can reorder channels' } }));
+    return;
+  }
+
+  const requestedUpdates = Array.isArray(payload?.channels) ? payload.channels : [];
+  if (!requestedUpdates.length) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Channel reorder payload is required' } }));
+    return;
+  }
+
+  const existingChannels = await getChannels();
+  const existingById = new Map(existingChannels.map((channel) => [channel.id, channel]));
+
+  const normalizedUpdates: Array<{ id: string; category_id: string | null; position: number }> = [];
+  const seenIds = new Set<string>();
+
+  for (const entry of requestedUpdates) {
+    const id = typeof entry?.id === 'string' ? entry.id : '';
+    if (!id || seenIds.has(id)) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid channel reorder payload' } }));
+      return;
+    }
+
+    const existing = existingById.get(id);
+    if (!existing) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Channel not found for reorder' } }));
+      return;
+    }
+
+    const position = Number(entry?.position);
+    if (!Number.isInteger(position) || position < 0) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid channel reorder position' } }));
+      return;
+    }
+
+    const categoryId = typeof entry?.category_id === 'string'
+      ? entry.category_id
+      : entry?.category_id === null
+        ? null
+        : existing.category_id;
+
+    normalizedUpdates.push({ id, category_id: categoryId, position });
+    seenIds.add(id);
+  }
+
+  try {
+    await reorderChannels(normalizedUpdates);
+    const channels = await getChannels();
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'channels_reordered',
+      payload: { channels }
+    });
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to reorder channels:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to reorder channels' } }));
+  }
+};
+
+const handleReorderCategories = async (
+  client: ClientConnection,
+  payload: { categories?: Array<{ id?: string; position?: number }> }
+) => {
+  if (!client.userId) return;
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can reorder categories' } }));
+    return;
+  }
+
+  const requestedUpdates = Array.isArray(payload?.categories) ? payload.categories : [];
+  if (!requestedUpdates.length) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Category reorder payload is required' } }));
+    return;
+  }
+
+  const existingCategories = await getCategories();
+  const existingById = new Map(existingCategories.map((category) => [category.id, category]));
+  const normalizedUpdates: Array<{ id: string; position: number }> = [];
+  const seenIds = new Set<string>();
+
+  for (const entry of requestedUpdates) {
+    const id = typeof entry?.id === 'string' ? entry.id : '';
+    if (!id || seenIds.has(id) || !existingById.has(id)) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid category reorder payload' } }));
+      return;
+    }
+
+    const position = Number(entry?.position);
+    if (!Number.isInteger(position) || position < 0) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid category reorder position' } }));
+      return;
+    }
+
+    normalizedUpdates.push({ id, position });
+    seenIds.add(id);
+  }
+
+  try {
+    await reorderCategories(normalizedUpdates);
+    const categories = await getCategories();
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'categories_reordered',
+      payload: { categories }
+    });
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to reorder categories:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to reorder categories' } }));
+  }
+};
+
+const handleDeleteCategory = async (client: ClientConnection, payload: { category_id?: string }) => {
+  if (!client.userId) return;
+
+  const categoryId = typeof payload?.category_id === 'string' ? payload.category_id : '';
+  if (!categoryId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Category ID is required' } }));
+    return;
+  }
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can delete categories' } }));
+    return;
+  }
+
+  const categories = await getCategories();
+  if (!categories.some((category) => category.id === categoryId)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Category not found' } }));
+    return;
+  }
+
+  if (await categoryHasChannels(categoryId)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Category must be empty before deletion' } }));
+    return;
+  }
+
+  try {
+    await deleteCategory(categoryId);
+    const nextCategories = await getCategories();
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'category_deleted',
+      payload: { category_id: categoryId, categories: nextCategories }
+    });
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to delete category:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to delete category' } }));
+  }
+};
+
+const handleDeleteUncategorizedCategory = async (client: ClientConnection) => {
+  if (!client.userId) return;
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can delete categories' } }));
+    return;
+  }
+
+  const channels = await getChannels();
+  if (channels.some((channel) => channel.category_id == null)) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Category must be empty before deletion' } }));
+    return;
+  }
+
+  connectionManager.broadcastToAuthenticated({
+    type: 'uncategorized_category_deleted',
+    payload: {}
+  });
 };
 
 const handleDeleteChannel = async (client: ClientConnection, payload: { channel_id: string }) => {
@@ -2327,12 +3297,25 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
     removeIcon?: boolean;
     storage?: {
       enabled?: boolean;
+      provider?: StorageSettingsProvider;
+      providerUrl?: string;
       endpoint?: string;
       region?: string;
       bucket?: string;
       accessKey?: string;
       secretKey?: string;
       prefix?: string;
+      storageType?: 'data_dir' | 's3';
+      s3?: {
+        provider?: StorageSettingsProvider;
+        providerUrl?: string;
+        endpoint?: string;
+        region?: string;
+        bucket?: string;
+        accessKey?: string;
+        secretKey?: string;
+        prefix?: string;
+      };
     };
   };
 
@@ -2352,14 +3335,33 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
   try {
     const currentServer = await getServer();
     const previousIconPath = currentServer?.id === serverId ? currentServer.iconPath || null : null;
+    let currentStorageType: 'data_dir' | 's3' | null = null;
+    let normalizedCurrentS3Config: S3StorageConfig | null = null;
 
     if (typedPayload.storage) {
       const currentStorage = await getServerStorageSettings();
+      currentStorageType = currentStorage?.storageType ?? null;
       const currentS3 = currentStorage?.s3;
-      const storageInput = typedPayload.storage;
+      const rawStorageInput = typedPayload.storage;
+      const nestedS3Input = rawStorageInput?.s3;
+      const storageInput: StorageSettingsInput = {
+        enabled: typeof rawStorageInput?.enabled === 'boolean'
+          ? rawStorageInput.enabled
+          : rawStorageInput?.storageType === 's3',
+        provider: rawStorageInput?.provider ?? nestedS3Input?.provider,
+        providerUrl: rawStorageInput?.providerUrl ?? nestedS3Input?.providerUrl,
+        endpoint: rawStorageInput?.endpoint ?? nestedS3Input?.endpoint,
+        region: rawStorageInput?.region ?? nestedS3Input?.region,
+        bucket: rawStorageInput?.bucket ?? nestedS3Input?.bucket,
+        accessKey: rawStorageInput?.accessKey ?? nestedS3Input?.accessKey,
+        secretKey: rawStorageInput?.secretKey ?? nestedS3Input?.secretKey,
+        prefix: rawStorageInput?.prefix ?? nestedS3Input?.prefix
+      };
 
-      if (storageInput.enabled) {
-        const mergedS3Config = normalizeS3Config({
+        if (storageInput.enabled) {
+          const mergedS3Config = normalizeS3Config({
+          provider: storageInput.provider || currentS3?.provider || 'generic_s3',
+          providerUrl: storageInput.providerUrl || currentS3?.providerUrl || null,
           endpoint: storageInput.endpoint || currentS3?.endpoint || null,
           region: storageInput.region || currentS3?.region || null,
           bucket: storageInput.bucket || currentS3?.bucket || null,
@@ -2367,8 +3369,9 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
           secretKey: storageInput.secretKey || currentS3?.secretKey || null,
           prefix: storageInput.prefix ?? currentS3?.prefix ?? null
         });
+          normalizedCurrentS3Config = mergedS3Config;
 
-        const validation = await validateS3Configuration(mergedS3Config);
+          const validation = await validateS3Configuration(mergedS3Config);
         if (!validation.ok) {
           await updateServerStorageLastError({
             serverId,
@@ -2381,33 +3384,160 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
           return;
         }
 
-        await updateServerStorageSettings({
+        await updateServerStorageMigrationState({
           serverId,
-          storageType: 's3',
-          s3Endpoint: mergedS3Config.endpoint,
-          s3Region: mergedS3Config.region,
-          s3Bucket: mergedS3Config.bucket,
-          s3AccessKey: mergedS3Config.accessKey,
-          s3SecretKey: mergedS3Config.secretKey,
-          s3Prefix: mergedS3Config.prefix || null,
-          storageLastError: null
+          status: 'running',
+          target: 's3',
+          total: 0,
+          done: 0,
+          message: null,
+          startedAt: new Date().toISOString()
         });
+        await broadcastServerStorageMigrationProgress();
+        await broadcastServerStorageSettings();
 
-        migrateDataDirFilesToS3(serverId, mergedS3Config).catch((migrationError) => {
-          console.error('[WS DEBUG] Background migration to S3 failed:', migrationError);
-        });
+        try {
+          const migrationResult = await runStorageMigration({
+            serverId,
+            target: 's3',
+            sourceS3Config: currentStorageType === 's3' ? normalizeS3Config(currentS3 || {}) : null,
+            targetS3Config: mergedS3Config
+          });
+          await updateServerStorageSettings({
+            serverId,
+            storageType: 's3',
+            storageProvider: mergedS3Config.provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3',
+            storageProviderUrl: mergedS3Config.providerUrl || null,
+            s3Endpoint: mergedS3Config.endpoint,
+            s3Region: mergedS3Config.region,
+            s3Bucket: mergedS3Config.bucket,
+            s3AccessKey: mergedS3Config.accessKey,
+            s3SecretKey: mergedS3Config.secretKey,
+            s3Prefix: mergedS3Config.prefix || null,
+            storageLastError: null
+          });
+          await updateServerStorageMigrationState({
+            serverId,
+            status: 'idle',
+            target: null,
+            total: migrationResult.progress.total,
+            done: migrationResult.progress.done,
+            message: null,
+            startedAt: null
+          });
+          await broadcastServerStorageMigrationProgress();
+          await broadcastServerStorageSettings();
+        } catch (migrationError) {
+          const message = migrationError instanceof Error ? migrationError.message : 'Storage migration to S3 failed';
+          await updateServerStorageLastError({ serverId, storageLastError: message });
+          await updateServerStorageMigrationState({
+            serverId,
+            status: 'failed',
+            target: 's3',
+            total: 0,
+            done: 0,
+            message,
+            startedAt: new Date().toISOString()
+          });
+          await broadcastServerStorageMigrationProgress();
+          await broadcastServerStorageSettings();
+          throw migrationError;
+        }
       } else {
-        await updateServerStorageSettings({
-          serverId,
-          storageType: 'data_dir',
-          s3Endpoint: currentS3?.endpoint || null,
-          s3Region: currentS3?.region || null,
-          s3Bucket: currentS3?.bucket || null,
-          s3AccessKey: currentS3?.accessKey || null,
-          s3SecretKey: currentS3?.secretKey || null,
-          s3Prefix: currentS3?.prefix || null,
-          storageLastError: null
-        });
+        if (currentStorage?.storageType === 's3') {
+          if (!currentS3) {
+            client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Current S3 configuration is missing' } }));
+            return;
+          }
+
+          const currentS3Config = normalizeS3Config(currentS3);
+          normalizedCurrentS3Config = currentS3Config;
+          await updateServerStorageMigrationState({
+            serverId,
+            status: 'running',
+            target: 'data_dir',
+            total: 0,
+            done: 0,
+            message: null,
+            startedAt: new Date().toISOString()
+          });
+          await broadcastServerStorageMigrationProgress();
+          await broadcastServerStorageSettings();
+
+          try {
+            const migrationResult = await runStorageMigration({
+              serverId,
+              target: 'data_dir',
+              sourceS3Config: currentS3Config,
+              targetS3Config: null
+            });
+            await updateServerStorageSettings({
+              serverId,
+              storageType: 'data_dir',
+              storageProvider: currentS3?.provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3',
+              storageProviderUrl: currentS3?.providerUrl || null,
+              s3Endpoint: currentS3?.endpoint || null,
+              s3Region: currentS3?.region || null,
+              s3Bucket: currentS3?.bucket || null,
+              s3AccessKey: currentS3?.accessKey || null,
+              s3SecretKey: currentS3?.secretKey || null,
+              s3Prefix: currentS3?.prefix || null,
+              storageLastError: null
+            });
+            await updateServerStorageMigrationState({
+              serverId,
+              status: 'idle',
+              target: null,
+              total: migrationResult.progress.total,
+              done: migrationResult.progress.done,
+              message: null,
+              startedAt: null
+            });
+
+            const normalizedExistingIconPath = normalizePersistedServerIconPath(serverId, previousIconPath);
+            if (currentServer && normalizedExistingIconPath !== previousIconPath) {
+              await updateServerSettings(
+                serverId,
+                currentServer.title || currentServer.name,
+                currentServer.rulesChannelId || null,
+                currentServer.welcomeChannelId || null,
+                normalizedExistingIconPath
+              );
+            }
+
+            await broadcastServerStorageMigrationProgress();
+            await broadcastServerStorageSettings();
+          } catch (migrationError) {
+            const message = migrationError instanceof Error ? migrationError.message : 'Storage migration to data directory failed';
+            await updateServerStorageLastError({ serverId, storageLastError: message });
+            await updateServerStorageMigrationState({
+              serverId,
+              status: 'failed',
+              target: 'data_dir',
+              total: 0,
+              done: 0,
+              message,
+              startedAt: new Date().toISOString()
+            });
+            await broadcastServerStorageMigrationProgress();
+            await broadcastServerStorageSettings();
+            throw migrationError;
+          }
+        } else {
+          await updateServerStorageSettings({
+            serverId,
+            storageType: 'data_dir',
+            storageProvider: currentS3?.provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3',
+            storageProviderUrl: currentS3?.providerUrl || null,
+            s3Endpoint: currentS3?.endpoint || null,
+            s3Region: currentS3?.region || null,
+            s3Bucket: currentS3?.bucket || null,
+            s3AccessKey: currentS3?.accessKey || null,
+            s3SecretKey: currentS3?.secretKey || null,
+            s3Prefix: currentS3?.prefix || null,
+            storageLastError: null
+          });
+        }
       }
     }
 
@@ -2416,6 +3546,14 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
       nextIconPath = null;
     } else if (typeof typedPayload.iconDataUrl === 'string' && typedPayload.iconDataUrl.trim()) {
       nextIconPath = await storeServerIcon(serverId, typedPayload.iconDataUrl);
+    } else if (typedPayload.storage?.enabled === true && currentStorageType !== 's3' && normalizedCurrentS3Config) {
+      nextIconPath = await migrateServerIconToS3IfNeeded({
+        serverId,
+        currentIconPath: previousIconPath,
+        s3Config: normalizedCurrentS3Config
+      });
+    } else if (previousIconPath) {
+      nextIconPath = normalizePersistedServerIconPath(serverId, previousIconPath);
     }
 
     await updateServerSettings(serverId, normalizedTitle, rulesChannelId, welcomeChannelId, nextIconPath);
@@ -2469,12 +3607,26 @@ const handleTestServerStorageS3 = async (
   client: ClientConnection,
   payload: {
     storage?: {
+      enabled?: boolean;
+      provider?: StorageSettingsProvider;
+      providerUrl?: string;
       endpoint?: string;
       region?: string;
       bucket?: string;
       accessKey?: string;
       secretKey?: string;
       prefix?: string;
+      storageType?: 'data_dir' | 's3';
+      s3?: {
+        provider?: StorageSettingsProvider;
+        providerUrl?: string;
+        endpoint?: string;
+        region?: string;
+        bucket?: string;
+        accessKey?: string;
+        secretKey?: string;
+        prefix?: string;
+      };
     };
   }
 ) => {
@@ -2488,10 +3640,26 @@ const handleTestServerStorageS3 = async (
 
   const currentStorage = await getServerStorageSettings();
   const currentS3 = currentStorage?.s3;
-  const storageInput = payload?.storage || {};
+  const rawStorageInput = payload?.storage || {};
+  const nestedS3Input = rawStorageInput?.s3;
+  const storageInput: StorageSettingsInput = {
+    enabled: typeof rawStorageInput?.enabled === 'boolean'
+      ? rawStorageInput.enabled
+      : rawStorageInput?.storageType === 's3',
+    provider: rawStorageInput?.provider ?? nestedS3Input?.provider,
+    providerUrl: rawStorageInput?.providerUrl ?? nestedS3Input?.providerUrl,
+    endpoint: rawStorageInput?.endpoint ?? nestedS3Input?.endpoint,
+    region: rawStorageInput?.region ?? nestedS3Input?.region,
+    bucket: rawStorageInput?.bucket ?? nestedS3Input?.bucket,
+    accessKey: rawStorageInput?.accessKey ?? nestedS3Input?.accessKey,
+    secretKey: rawStorageInput?.secretKey ?? nestedS3Input?.secretKey,
+    prefix: rawStorageInput?.prefix ?? nestedS3Input?.prefix
+  };
 
   try {
     const mergedS3Config = normalizeS3Config({
+      provider: storageInput.provider || currentS3?.provider || 'generic_s3',
+      providerUrl: storageInput.providerUrl || currentS3?.providerUrl || null,
       endpoint: storageInput.endpoint || currentS3?.endpoint || null,
       region: storageInput.region || currentS3?.region || null,
       bucket: storageInput.bucket || currentS3?.bucket || null,

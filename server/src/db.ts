@@ -19,6 +19,7 @@ export const channelsSchemaReady = new Promise<void>((resolve, reject) => {
 });
 
 let serversSchemaMigrated = false;
+let usersSchemaMigrated = false;
 let channelsSchemaMigrated = false;
 let folderFilesSchemaMigrated = false;
 let messageAttachmentsSchemaMigrated = false;
@@ -29,15 +30,16 @@ function failSchemaInitialization(error: Error) {
   rejectChannelsSchemaReady?.(error);
 }
 
-function markSchemaStepDone(step: 'servers' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions') {
+function markSchemaStepDone(step: 'servers' | 'users' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions') {
   if (step === 'servers') serversSchemaMigrated = true;
+  if (step === 'users') usersSchemaMigrated = true;
   if (step === 'channels') channelsSchemaMigrated = true;
   if (step === 'folder_files') folderFilesSchemaMigrated = true;
   if (step === 'message_attachments') messageAttachmentsSchemaMigrated = true;
   if (step === 'messages') messagesSchemaMigrated = true;
   if (step === 'message_reactions') messageReactionsSchemaMigrated = true;
 
-  if (serversSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated) {
+  if (serversSchemaMigrated && usersSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated) {
     resolveChannelsSchemaReady?.();
   }
 }
@@ -64,6 +66,8 @@ function initializeDatabase() {
         rules_channel_id TEXT,
         welcome_channel_id TEXT,
         storage_type TEXT NOT NULL DEFAULT 'data_dir',
+        storage_provider TEXT NOT NULL DEFAULT 'generic_s3',
+        storage_provider_url TEXT,
         s3_endpoint TEXT,
         s3_region TEXT,
         s3_bucket TEXT,
@@ -71,7 +75,14 @@ function initializeDatabase() {
         s3_secret_key TEXT,
         s3_prefix TEXT,
         storage_last_error TEXT,
-        storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        storage_migration_status TEXT NOT NULL DEFAULT 'idle',
+        storage_migration_target TEXT,
+        storage_migration_total INTEGER NOT NULL DEFAULT 0,
+        storage_migration_done INTEGER NOT NULL DEFAULT 0,
+        storage_migration_message TEXT,
+        storage_migration_started_at DATETIME,
+        storage_migration_updated_at DATETIME
       )
     `, (err) => {
       if (err) {
@@ -98,6 +109,7 @@ function initializeDatabase() {
         username TEXT NOT NULL,
         public_key TEXT UNIQUE NOT NULL,
         avatar_url TEXT,
+        avatar_mime_type TEXT,
         last_ip TEXT,
         role TEXT DEFAULT 'user',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -105,10 +117,24 @@ function initializeDatabase() {
     `, (err) => {
       if (err) {
         console.error('Error creating users table:', err.message);
+        failSchemaInitialization(err);
         return;
       }
 
-      db.run('ALTER TABLE users ADD COLUMN last_ip TEXT', () => {});
+      migrateUsersTableSchema((migrationErr) => {
+        if (migrationErr) {
+          console.error('Error migrating users table:', migrationErr.message);
+          failSchemaInitialization(migrationErr);
+          return;
+        }
+
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_users_public_key ON users(public_key)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_users_username ON users(username COLLATE NOCASE)');
+        });
+
+        markSchemaStepDone('users');
+      });
     });
 
     // Categories Table
@@ -522,6 +548,10 @@ function migrateChannelsTableSchema(done: (error?: Error) => void) {
       const supportsFolderType = tableSql.includes("'folder'");
 
       if (hasFeedUrl && supportsFolderType) {
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_channels_category_position ON channels(category_id, position)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_channels_position ON channels(position)');
+        });
         done();
         return;
       }
@@ -573,7 +603,11 @@ function migrateChannelsTableSchema(done: (error?: Error) => void) {
                     done(renameErr);
                     return;
                   }
-                  console.log('Migrated channels table schema to support rss feed_url and folder channels.');
+                  db.serialize(() => {
+                    db.run('CREATE INDEX IF NOT EXISTS idx_channels_category_position ON channels(category_id, position)');
+                    db.run('CREATE INDEX IF NOT EXISTS idx_channels_position ON channels(position)');
+                  });
+                  console.log('Migrated channels table schema to support rss feed_url, folder channels, and channel ordering indexes.');
                   done();
                 });
               });
@@ -582,6 +616,68 @@ function migrateChannelsTableSchema(done: (error?: Error) => void) {
         }
       );
     });
+  });
+}
+
+function migrateUsersTableSchema(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(users)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasAvatarUrl = columns.some((column) => column.name === 'avatar_url');
+    const hasAvatarMimeType = columns.some((column) => column.name === 'avatar_mime_type');
+    const hasLastIp = columns.some((column) => column.name === 'last_ip');
+    const hasRole = columns.some((column) => column.name === 'role');
+    const hasCreatedAt = columns.some((column) => column.name === 'created_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasAvatarUrl) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_url TEXT');
+    if (!hasAvatarMimeType) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_mime_type TEXT');
+    if (!hasLastIp) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN last_ip TEXT');
+    if (!hasRole) pendingAlterStatements.push("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'");
+    if (!hasCreatedAt) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP');
+
+    const finalizeMigration = () => {
+      db.run(
+        `
+          UPDATE users
+          SET
+            avatar_mime_type = CASE
+              WHEN LOWER(COALESCE(avatar_mime_type, '')) IN ('image/png', 'image/jpeg') THEN LOWER(avatar_mime_type)
+              ELSE CASE
+                WHEN LOWER(COALESCE(avatar_url, '')) LIKE 'data:image/png;%' THEN 'image/png'
+                WHEN LOWER(COALESCE(avatar_url, '')) LIKE 'data:image/jpeg;%' THEN 'image/jpeg'
+                WHEN LOWER(COALESCE(avatar_url, '')) LIKE 'data:image/jpg;%' THEN 'image/jpeg'
+                WHEN LOWER(COALESCE(avatar_url, '')) LIKE '%.png' THEN 'image/png'
+                WHEN LOWER(COALESCE(avatar_url, '')) LIKE '%.jpg' OR LOWER(COALESCE(avatar_url, '')) LIKE '%.jpeg' THEN 'image/jpeg'
+                ELSE NULL
+              END
+            END,
+            role = COALESCE(NULLIF(role, ''), 'user'),
+            created_at = COALESCE(created_at, CURRENT_TIMESTAMP)
+        `,
+        (updateErr) => done(updateErr || undefined)
+      );
+    };
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        finalizeMigration();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
   });
 }
 
@@ -598,6 +694,8 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     const hasRulesChannelId = columns.some((column) => column.name === 'rules_channel_id');
     const hasWelcomeChannelId = columns.some((column) => column.name === 'welcome_channel_id');
     const hasStorageType = columns.some((column) => column.name === 'storage_type');
+    const hasStorageProvider = columns.some((column) => column.name === 'storage_provider');
+    const hasStorageProviderUrl = columns.some((column) => column.name === 'storage_provider_url');
     const hasS3Endpoint = columns.some((column) => column.name === 's3_endpoint');
     const hasS3Region = columns.some((column) => column.name === 's3_region');
     const hasS3Bucket = columns.some((column) => column.name === 's3_bucket');
@@ -607,6 +705,13 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     const hasS3Prefix = columns.some((column) => column.name === 's3_prefix');
     const hasStorageLastError = columns.some((column) => column.name === 'storage_last_error');
     const hasStorageUpdatedAt = columns.some((column) => column.name === 'storage_updated_at');
+    const hasStorageMigrationStatus = columns.some((column) => column.name === 'storage_migration_status');
+    const hasStorageMigrationTarget = columns.some((column) => column.name === 'storage_migration_target');
+    const hasStorageMigrationTotal = columns.some((column) => column.name === 'storage_migration_total');
+    const hasStorageMigrationDone = columns.some((column) => column.name === 'storage_migration_done');
+    const hasStorageMigrationMessage = columns.some((column) => column.name === 'storage_migration_message');
+    const hasStorageMigrationStartedAt = columns.some((column) => column.name === 'storage_migration_started_at');
+    const hasStorageMigrationUpdatedAt = columns.some((column) => column.name === 'storage_migration_updated_at');
 
     const pendingAlterStatements: string[] = [];
     if (!hasTitle) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN title TEXT NOT NULL DEFAULT 'My Server'");
@@ -615,6 +720,8 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     if (!hasRulesChannelId) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN rules_channel_id TEXT');
     if (!hasWelcomeChannelId) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN welcome_channel_id TEXT');
     if (!hasStorageType) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN storage_type TEXT NOT NULL DEFAULT 'data_dir'");
+    if (!hasStorageProvider) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN storage_provider TEXT NOT NULL DEFAULT 'generic_s3'");
+    if (!hasStorageProviderUrl) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_provider_url TEXT');
     if (!hasS3Endpoint) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_endpoint TEXT');
     if (!hasS3Region) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_region TEXT');
     if (!hasS3Bucket) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_bucket TEXT');
@@ -623,6 +730,13 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     if (!hasS3Prefix) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN s3_prefix TEXT');
     if (!hasStorageLastError) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_last_error TEXT');
     if (!hasStorageUpdatedAt) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_updated_at DATETIME');
+    if (!hasStorageMigrationStatus) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN storage_migration_status TEXT NOT NULL DEFAULT 'idle'");
+    if (!hasStorageMigrationTarget) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_migration_target TEXT');
+    if (!hasStorageMigrationTotal) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN storage_migration_total INTEGER NOT NULL DEFAULT 0");
+    if (!hasStorageMigrationDone) pendingAlterStatements.push("ALTER TABLE servers ADD COLUMN storage_migration_done INTEGER NOT NULL DEFAULT 0");
+    if (!hasStorageMigrationMessage) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_migration_message TEXT');
+    if (!hasStorageMigrationStartedAt) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_migration_started_at DATETIME');
+    if (!hasStorageMigrationUpdatedAt) pendingAlterStatements.push('ALTER TABLE servers ADD COLUMN storage_migration_updated_at DATETIME');
 
     const finalizeMigration = () => {
       db.run(
@@ -631,7 +745,19 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
           SET
             title = COALESCE(NULLIF(title, ''), name, 'My Server'),
             updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP),
-            storage_updated_at = COALESCE(storage_updated_at, CURRENT_TIMESTAMP)
+            storage_provider = CASE
+              WHEN storage_provider IN ('generic_s3', 'cloudflare_r2') THEN storage_provider
+              WHEN storage_type = 's3' THEN 'generic_s3'
+              ELSE 'generic_s3'
+            END,
+            storage_updated_at = COALESCE(storage_updated_at, CURRENT_TIMESTAMP),
+            storage_migration_status = CASE
+              WHEN storage_migration_status IN ('idle', 'running', 'failed') THEN storage_migration_status
+              ELSE 'idle'
+            END,
+            storage_migration_total = COALESCE(storage_migration_total, 0),
+            storage_migration_done = COALESCE(storage_migration_done, 0),
+            storage_migration_updated_at = COALESCE(storage_migration_updated_at, storage_updated_at, CURRENT_TIMESTAMP)
         `,
         (updateErr) => {
           done(updateErr || undefined);
@@ -663,6 +789,8 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                 rules_channel_id TEXT,
                 welcome_channel_id TEXT,
                 storage_type TEXT NOT NULL DEFAULT 'data_dir',
+                storage_provider TEXT NOT NULL DEFAULT 'generic_s3',
+                storage_provider_url TEXT,
                 s3_endpoint TEXT,
                 s3_region TEXT,
                 s3_bucket TEXT,
@@ -670,7 +798,14 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                 s3_secret_key TEXT,
                 s3_prefix TEXT,
                 storage_last_error TEXT,
-                storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                storage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                storage_migration_status TEXT NOT NULL DEFAULT 'idle',
+                storage_migration_target TEXT,
+                storage_migration_total INTEGER NOT NULL DEFAULT 0,
+                storage_migration_done INTEGER NOT NULL DEFAULT 0,
+                storage_migration_message TEXT,
+                storage_migration_started_at DATETIME,
+                storage_migration_updated_at DATETIME
               )
             `,
             (createErr) => {
@@ -690,6 +825,8 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                     rules_channel_id,
                     welcome_channel_id,
                     storage_type,
+                    storage_provider,
+                    storage_provider_url,
                     s3_endpoint,
                     s3_region,
                     s3_bucket,
@@ -697,7 +834,14 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                     s3_secret_key,
                     s3_prefix,
                     storage_last_error,
-                    storage_updated_at
+                    storage_updated_at,
+                    storage_migration_status,
+                    storage_migration_target,
+                    storage_migration_total,
+                    storage_migration_done,
+                    storage_migration_message,
+                    storage_migration_started_at,
+                    storage_migration_updated_at
                   )
                   SELECT
                     id,
@@ -708,6 +852,12 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                     rules_channel_id,
                     welcome_channel_id,
                     storage_type,
+                    CASE
+                      WHEN storage_provider IN ('generic_s3', 'cloudflare_r2') THEN storage_provider
+                      WHEN storage_type = 's3' THEN 'generic_s3'
+                      ELSE 'generic_s3'
+                    END,
+                    storage_provider_url,
                     s3_endpoint,
                     s3_region,
                     s3_bucket,
@@ -715,7 +865,17 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
                     s3_secret_key,
                     s3_prefix,
                     storage_last_error,
-                    storage_updated_at
+                    storage_updated_at,
+                    CASE
+                      WHEN storage_migration_status IN ('idle', 'running', 'failed') THEN storage_migration_status
+                      ELSE 'idle'
+                    END,
+                    storage_migration_target,
+                    COALESCE(storage_migration_total, 0),
+                    COALESCE(storage_migration_done, 0),
+                    storage_migration_message,
+                    storage_migration_started_at,
+                    storage_migration_updated_at
                   FROM servers
                 `,
                 (copyErr) => {

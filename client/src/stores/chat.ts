@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { useWebRtcStore } from './webrtc';
+import { cacheServerIcon, getCachedServerIcon, removeCachedServerIcon } from '../utils/serverIconCache';
 
 const NEW_NOTIFICATION_SOUND_DEBOUNCE_MS = 1000;
 
@@ -8,6 +9,7 @@ export interface User {
   id: string;
   username: string;
   avatar_url: string | null;
+  avatar_mime_type?: string | null;
   role: string;
   created_at: string;
 }
@@ -26,6 +28,18 @@ export interface Channel {
   position: number;
   feed_url?: string | null;
 }
+
+const compareChannels = (a: Channel, b: Channel) => {
+  const aCategory = a.category_id || '';
+  const bCategory = b.category_id || '';
+  if (aCategory !== bCategory) {
+    return aCategory.localeCompare(bCategory);
+  }
+  if (a.position !== b.position) {
+    return a.position - b.position;
+  }
+  return a.name.localeCompare(b.name);
+};
 
 export interface FolderChannelFile {
   id: string;
@@ -123,6 +137,7 @@ export interface SavedConnection {
   name: string;
   address: string;
   iconUrl?: string | null;
+  cachedIconUrl?: string | null;
 }
 
 export interface Server {
@@ -137,6 +152,8 @@ export interface Server {
 }
 
 export interface ServerStorageS3Settings {
+  provider: 'generic_s3' | 'cloudflare_r2';
+  providerUrl: string;
   endpoint: string;
   region: string;
   bucket: string;
@@ -150,10 +167,23 @@ export interface ServerStorageTestResult {
   message: string;
 }
 
+export type ServerStorageMigrationStatus = 'idle' | 'running' | 'failed';
+
+export interface ServerStorageMigrationState {
+  status: ServerStorageMigrationStatus;
+  target: 'data_dir' | 's3' | null;
+  total: number;
+  done: number;
+  message: string | null;
+  startedAt: string | null;
+  updatedAt: string | null;
+}
+
 export interface ServerStorageSettings {
   storageType: 'data_dir' | 's3';
   storageLastError: string | null;
   s3: ServerStorageS3Settings;
+  migration: ServerStorageMigrationState;
 }
 
 export interface ActiveMainPanel {
@@ -184,6 +214,10 @@ const arrayBufferToHex = (buffer: ArrayBuffer) => {
     .map(b => b.toString(16).padStart(2, '0'))
     .join('');
 };
+
+const AVATAR_STORAGE_KEY = 'avatarUrl';
+
+const readStoredAvatar = () => localStorage.getItem(AVATAR_STORAGE_KEY);
 
 const generateKeyPair = async () => {
   return await window.crypto.subtle.generateKey(
@@ -235,6 +269,14 @@ const signChallenge = async (privateKey: CryptoKey, challenge: string) => {
   return arrayBufferToHex(signature);
 };
 
+export interface ClientIdentityExport {
+  version: 1;
+  exportedAt: string;
+  algorithm: 'ECDSA-P256-SHA256';
+  publicKey: string;
+  privateKeyJwk: string;
+}
+
 const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
   'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx',
   'html', 'htm', 'php', 'phtml',
@@ -262,16 +304,28 @@ export const useChatStore = defineStore('chat', () => {
   const currentUser = ref<User | null>(null);
   const currentUserRole = ref<string>('user');
   const server = ref<Server | null>(null);
+  const uncategorizedCategoryDeleted = ref(false);
   const serverStorageSettings = ref<ServerStorageSettings>({
     storageType: 'data_dir',
     storageLastError: null,
     s3: {
+      provider: 'generic_s3',
+      providerUrl: '',
       endpoint: '',
       region: '',
       bucket: '',
       accessKey: '',
       secretKey: '',
       prefix: ''
+    },
+    migration: {
+      status: 'idle',
+      target: null,
+      total: 0,
+      done: 0,
+      message: null,
+      startedAt: null,
+      updatedAt: null
     }
   });
   const lastError = ref<string | null>(null);
@@ -279,7 +333,8 @@ export const useChatStore = defineStore('chat', () => {
   const savedConnections = ref<SavedConnection[]>(
     JSON.parse(localStorage.getItem('savedConnections') || '[]').map((c: SavedConnection) => ({
       ...c,
-      address: c.address.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`)
+      address: c.address.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`),
+      cachedIconUrl: c.cachedIconUrl || getCachedServerIcon(c.id)?.dataUrl || null
     }))
   );
   const activeConnectionId = ref<string | null>(null);
@@ -318,6 +373,40 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const uploadChunkSizeBytes = 8 * 1024 * 1024;
+
+  const normalizeServerStorageSettings = (payload: any): ServerStorageSettings => ({
+    storageType: payload.storageType === 's3' ? 's3' : 'data_dir',
+    storageLastError: typeof payload.storageLastError === 'string' ? payload.storageLastError : null,
+    s3: {
+      provider: payload?.s3?.provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3',
+      providerUrl: payload?.s3?.providerUrl || '',
+      endpoint: payload?.s3?.endpoint || '',
+      region: payload?.s3?.region || '',
+      bucket: payload?.s3?.bucket || '',
+      accessKey: payload?.s3?.accessKey || '',
+      secretKey: payload?.s3?.secretKey || '',
+      prefix: payload?.s3?.prefix || ''
+    },
+    migration: {
+      status: payload?.migration?.status === 'running' || payload?.migration?.status === 'failed'
+        ? payload.migration.status
+        : 'idle',
+      target: payload?.migration?.target === 's3' || payload?.migration?.target === 'data_dir'
+        ? payload.migration.target
+        : null,
+      total: Number.isFinite(Number(payload?.migration?.total)) ? Math.max(0, Number(payload.migration.total)) : 0,
+      done: Number.isFinite(Number(payload?.migration?.done)) ? Math.max(0, Number(payload.migration.done)) : 0,
+      message: typeof payload?.migration?.message === 'string' && payload.migration.message.trim()
+        ? payload.migration.message
+        : null,
+      startedAt: typeof payload?.migration?.startedAt === 'string' && payload.migration.startedAt.trim()
+        ? payload.migration.startedAt
+        : null,
+      updatedAt: typeof payload?.migration?.updatedAt === 'string' && payload.migration.updatedAt.trim()
+        ? payload.migration.updatedAt
+        : null
+    }
+  });
 
   const readBlobAsArrayBuffer = (blob: Blob) => {
     return new Promise<ArrayBuffer>((resolve, reject) => {
@@ -448,6 +537,23 @@ export const useChatStore = defineStore('chat', () => {
     localUsername.value = username;
     localStorage.setItem('username', username);
   };
+
+  const saveLocalAvatar = (avatarUrl: string | null) => {
+    if (avatarUrl) {
+      localStorage.setItem(AVATAR_STORAGE_KEY, avatarUrl);
+    } else {
+      localStorage.removeItem(AVATAR_STORAGE_KEY);
+    }
+
+    if (currentUser.value) {
+      currentUser.value = {
+        ...currentUser.value,
+        avatar_url: avatarUrl
+      };
+    }
+  };
+
+  const getLocalAvatar = () => readStoredAvatar();
 
   const DEFAULT_SERVER_PORT = '1337';
   const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
@@ -661,7 +767,8 @@ export const useChatStore = defineStore('chat', () => {
     const newConnection: SavedConnection = {
       id: crypto.randomUUID(),
       name: (name || getConnectionNameFromAddress(address)).trim() || 'Server',
-      address
+      address,
+      cachedIconUrl: null
     };
     savedConnections.value.push(newConnection);
     localStorage.setItem('savedConnections', JSON.stringify(savedConnections.value));
@@ -736,6 +843,52 @@ export const useChatStore = defineStore('chat', () => {
       disconnect();
       localStorage.removeItem('lastUsedServer');
     }
+  };
+
+  const hasStoredIdentity = computed(() => {
+    const storedPriv = localStorage.getItem('privateKey');
+    const storedPub = localStorage.getItem('publicKey');
+    return Boolean(storedPriv && storedPub);
+  });
+
+  const getStoredIdentityExport = (): ClientIdentityExport | null => {
+    const storedPriv = localStorage.getItem('privateKey');
+    const storedPub = localStorage.getItem('publicKey');
+
+    if (!storedPriv || !storedPub) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      algorithm: 'ECDSA-P256-SHA256',
+      publicKey: storedPub,
+      privateKeyJwk: storedPriv
+    };
+  };
+
+  const importStoredIdentity = async (identity: ClientIdentityExport) => {
+    if (identity.version !== 1) {
+      throw new Error('Unsupported identity export version.');
+    }
+
+    if (identity.algorithm !== 'ECDSA-P256-SHA256') {
+      throw new Error('Unsupported identity algorithm.');
+    }
+
+    if (typeof identity.publicKey !== 'string' || !identity.publicKey.includes('-----BEGIN PUBLIC KEY-----')) {
+      throw new Error('Identity file is missing a valid public key.');
+    }
+
+    if (typeof identity.privateKeyJwk !== 'string' || !identity.privateKeyJwk.trim()) {
+      throw new Error('Identity file is missing a valid private key.');
+    }
+
+    await importPrivateKey(identity.privateKeyJwk);
+
+    localStorage.setItem('privateKey', identity.privateKeyJwk);
+    localStorage.setItem('publicKey', identity.publicKey);
   };
 
   const getKeys = async () => {
@@ -924,6 +1077,7 @@ export const useChatStore = defineStore('chat', () => {
     activeConnectionId.value = null;
     categories.value = [];
     channels.value = [];
+    uncategorizedCategoryDeleted.value = false;
     activeChannelId.value = null;
     activeMainPanel.value = { type: 'text', channelId: null };
     messages.value = {};
@@ -935,16 +1089,27 @@ export const useChatStore = defineStore('chat', () => {
     onlineUserIds.value.clear();
     currentUser.value = null;
     server.value = null;
-    serverStorageSettings.value = {
-      storageType: 'data_dir',
-      storageLastError: null,
-      s3: {
-        endpoint: '',
-        region: '',
-        bucket: '',
-        accessKey: '',
-        secretKey: '',
+      serverStorageSettings.value = {
+        storageType: 'data_dir',
+        storageLastError: null,
+        s3: {
+          provider: 'generic_s3',
+          providerUrl: '',
+          endpoint: '',
+          region: '',
+          bucket: '',
+          accessKey: '',
+          secretKey: '',
         prefix: ''
+      },
+      migration: {
+        status: 'idle',
+        target: null,
+        total: 0,
+        done: 0,
+        message: null,
+        startedAt: null,
+        updatedAt: null
       }
     };
   };
@@ -959,6 +1124,7 @@ export const useChatStore = defineStore('chat', () => {
       if (currentConnection) {
         const nextTitle = (nextServer.title || '').trim();
         const resolvedIconUrl = resolveServerIconUrl(nextServer.iconPath || null, currentConnection.address, nextServer.updatedAt || null);
+        const cachedEntry = getCachedServerIcon(currentConnection.id);
         let hasChanges = false;
 
         if (nextTitle && currentConnection.name !== nextTitle) {
@@ -968,6 +1134,34 @@ export const useChatStore = defineStore('chat', () => {
 
         if ((currentConnection.iconUrl || null) !== resolvedIconUrl) {
           currentConnection.iconUrl = resolvedIconUrl;
+          hasChanges = true;
+        }
+
+        const nextCachedIconUrl = cachedEntry?.dataUrl || currentConnection.cachedIconUrl || null;
+        if ((currentConnection.cachedIconUrl || null) !== nextCachedIconUrl) {
+          currentConnection.cachedIconUrl = nextCachedIconUrl;
+          hasChanges = true;
+        }
+
+        if (resolvedIconUrl) {
+          void cacheServerIcon(currentConnection.id, resolvedIconUrl).then((entry) => {
+            if (!entry) {
+              return;
+            }
+
+            const refreshedConnection = savedConnections.value.find((c) => c.id === currentConnection.id);
+            if (!refreshedConnection) {
+              return;
+            }
+
+            if (refreshedConnection.cachedIconUrl !== entry.dataUrl) {
+              refreshedConnection.cachedIconUrl = entry.dataUrl;
+              localStorage.setItem('savedConnections', JSON.stringify(savedConnections.value));
+            }
+          });
+        } else if (currentConnection.cachedIconUrl || cachedEntry) {
+          currentConnection.cachedIconUrl = null;
+          removeCachedServerIcon(currentConnection.id);
           hasChanges = true;
         }
 
@@ -990,6 +1184,7 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     const currentConnection = savedConnections.value.find((c) => c.id === removedConnectionId);
+    removeCachedServerIcon(removedConnectionId);
     savedConnections.value = savedConnections.value.filter((c) => c.id !== removedConnectionId);
     localStorage.setItem('savedConnections', JSON.stringify(savedConnections.value));
 
@@ -1196,6 +1391,9 @@ export const useChatStore = defineStore('chat', () => {
       case 'authenticated':
         currentUser.value = payload.user;
         currentUserRole.value = payload.user.role || 'user';
+        if (payload.user && payload.user.avatar_url !== readStoredAvatar()) {
+          saveLocalAvatar(payload.user.avatar_url || null);
+        }
         if (payload.server) {
           applyServerState(payload.server);
         }
@@ -1221,18 +1419,11 @@ export const useChatStore = defineStore('chat', () => {
         break;
 
       case 'server_storage_settings':
-        serverStorageSettings.value = {
-          storageType: payload.storageType === 's3' ? 's3' : 'data_dir',
-          storageLastError: typeof payload.storageLastError === 'string' ? payload.storageLastError : null,
-          s3: {
-            endpoint: payload?.s3?.endpoint || '',
-            region: payload?.s3?.region || '',
-            bucket: payload?.s3?.bucket || '',
-            accessKey: payload?.s3?.accessKey || '',
-            secretKey: payload?.s3?.secretKey || '',
-            prefix: payload?.s3?.prefix || ''
-          }
-        };
+        serverStorageSettings.value = normalizeServerStorageSettings(payload);
+        break;
+
+      case 'server_storage_migration_progress':
+        serverStorageSettings.value = normalizeServerStorageSettings(payload);
         break;
 
       case 'server_storage_test_result': {
@@ -1327,7 +1518,8 @@ export const useChatStore = defineStore('chat', () => {
         
       case 'channels_list':
         categories.value = payload.categories;
-        channels.value = payload.channels;
+        channels.value = Array.isArray(payload.channels) ? [...payload.channels].sort(compareChannels) : [];
+        uncategorizedCategoryDeleted.value = payload.uncategorized_category_deleted === true;
         applyUnreadStatesFromServer(payload.unreadStates as ChannelUnreadState[] | undefined);
         pruneUnreadChannels(payload.channels || []);
         
@@ -1346,6 +1538,53 @@ export const useChatStore = defineStore('chat', () => {
         
       case 'channel_created':
         channels.value.push(payload.channel);
+        if (payload.channel?.category_id == null) {
+          uncategorizedCategoryDeleted.value = false;
+        }
+        channels.value.sort((a, b) => {
+          const aCategory = a.category_id || '';
+          const bCategory = b.category_id || '';
+          if (aCategory !== bCategory) {
+            return aCategory.localeCompare(bCategory);
+          }
+          if (a.position !== b.position) {
+            return a.position - b.position;
+          }
+          return a.name.localeCompare(b.name);
+        });
+        break;
+
+      case 'category_created':
+        categories.value.push(payload.category);
+        categories.value.sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
+        break;
+
+      case 'channels_reordered':
+        channels.value = Array.isArray(payload.channels) ? [...payload.channels].sort(compareChannels) : [];
+        pruneUnreadChannels(channels.value);
+        break;
+
+      case 'categories_reordered':
+        categories.value = Array.isArray(payload.categories)
+          ? [...payload.categories].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
+          : [];
+        break;
+
+      case 'category_deleted': {
+        const nextCategories = Array.isArray(payload.categories) ? payload.categories : null;
+        const deletedCategoryId = payload.category_id as string | undefined;
+
+        if (nextCategories) {
+          categories.value = [...nextCategories].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
+        } else if (deletedCategoryId) {
+          categories.value = categories.value.filter((category) => category.id !== deletedCategoryId);
+        }
+
+        break;
+      }
+
+      case 'uncategorized_category_deleted':
+        uncategorizedCategoryDeleted.value = true;
         break;
 
       case 'channel_deleted': {
@@ -1518,7 +1757,7 @@ export const useChatStore = defineStore('chat', () => {
   const authenticate = async (username: string) => {
     try {
       const { publicKeyBase64 } = await getKeys();
-      send('auth:request', { username, publicKey: publicKeyBase64 });
+      send('auth:request', { username, publicKey: publicKeyBase64, avatarUrl: readStoredAvatar() });
     } catch (e) {
       console.error("Authentication request failed", e);
     }
@@ -1556,6 +1795,41 @@ export const useChatStore = defineStore('chat', () => {
     send('create_channel', { category_id, name, type, feed_url: type === 'rss' ? normalizedFeedUrl : undefined });
   };
 
+  const createCategory = (name: string) => {
+    if (!name.trim()) {
+      lastError.value = 'Category name is required';
+      return;
+    }
+
+    send('create_category', { name });
+  };
+
+  const reorderCategories = (updatedCategories: Array<Pick<Category, 'id' | 'position'>>) => {
+    if (!updatedCategories.length) {
+      return;
+    }
+
+    send('reorder_categories', {
+      categories: updatedCategories.map((category) => ({
+        id: category.id,
+        position: category.position
+      }))
+    });
+  };
+
+  const deleteCategory = (category_id: string) => {
+    if (!category_id) {
+      lastError.value = 'Category ID is required';
+      return;
+    }
+
+    send('delete_category', { category_id });
+  };
+
+  const deleteUncategorizedCategory = () => {
+    send('delete_uncategorized_category');
+  };
+
   const deleteChannel = (channel_id: string) => {
     if (!channel_id) {
       lastError.value = 'Channel ID is required';
@@ -1564,19 +1838,37 @@ export const useChatStore = defineStore('chat', () => {
     send('delete_channel', { channel_id });
   };
 
+  const reorderChannels = (updatedChannels: Array<Pick<Channel, 'id' | 'category_id' | 'position'>>) => {
+    if (!updatedChannels.length) {
+      return;
+    }
+
+    send('reorder_channels', {
+      channels: updatedChannels.map((channel) => ({
+        id: channel.id,
+        category_id: channel.category_id,
+        position: channel.position
+      }))
+    });
+  };
+
   const updateServerSettings = (
     serverId: string,
     title: string,
     rulesChannelId: string | null,
     welcomeChannelId: string | null,
     storage?: {
-      enabled: boolean;
-      endpoint: string;
-      region: string;
-      bucket: string;
-      accessKey: string;
-      secretKey: string;
-      prefix: string;
+      storageType: 'data_dir' | 's3';
+      s3?: {
+        provider: 'generic_s3' | 'cloudflare_r2';
+        providerUrl: string;
+        endpoint: string;
+        region: string;
+        bucket: string;
+        accessKey: string;
+        secretKey: string;
+        prefix: string;
+      };
     },
     icon?: {
       iconDataUrl?: string | null;
@@ -1601,23 +1893,32 @@ export const useChatStore = defineStore('chat', () => {
       removeIcon: icon?.removeIcon === true,
       storage: storage
         ? {
-          enabled: storage.enabled,
-          endpoint: storage.endpoint,
-          region: storage.region,
-          bucket: storage.bucket,
-          accessKey: storage.accessKey,
-          secretKey: storage.secretKey,
-          prefix: storage.prefix
+          enabled: storage.storageType === 's3',
+          provider: storage.s3?.provider,
+          providerUrl: storage.s3?.providerUrl,
+          endpoint: storage.s3?.endpoint,
+          region: storage.s3?.region,
+          bucket: storage.s3?.bucket,
+          accessKey: storage.s3?.accessKey,
+          secretKey: storage.s3?.secretKey,
+          prefix: storage.s3?.prefix
         }
         : undefined
     });
   };
 
   const testServerStorageSettings = async (storage: {
-    endpoint: string;
-    accessKey: string;
-    secretKey: string;
-    prefix: string;
+    storageType: 'data_dir' | 's3';
+    s3?: {
+      provider: 'generic_s3' | 'cloudflare_r2';
+      providerUrl: string;
+      endpoint: string;
+      region: string;
+      bucket: string;
+      accessKey: string;
+      secretKey: string;
+      prefix: string;
+    };
   }): Promise<ServerStorageTestResult> => {
     if (pendingStorageTestTimeout) {
       window.clearTimeout(pendingStorageTestTimeout);
@@ -1630,7 +1931,7 @@ export const useChatStore = defineStore('chat', () => {
         if (pendingStorageTestResolve) {
           pendingStorageTestResolve({
             ok: false,
-            message: 'S3 connection test timed out. Please try again.'
+            message: 'Storage connection test timed out. Please try again.'
           });
           pendingStorageTestResolve = null;
         }
@@ -1639,10 +1940,15 @@ export const useChatStore = defineStore('chat', () => {
 
       send('test_server_storage_s3', {
         storage: {
-          endpoint: storage.endpoint,
-          accessKey: storage.accessKey,
-          secretKey: storage.secretKey,
-          prefix: storage.prefix
+          enabled: storage.storageType === 's3',
+          provider: storage.s3?.provider,
+          providerUrl: storage.s3?.providerUrl,
+          endpoint: storage.s3?.endpoint,
+          region: storage.s3?.region,
+          bucket: storage.s3?.bucket,
+          accessKey: storage.s3?.accessKey,
+          secretKey: storage.s3?.secretKey,
+          prefix: storage.s3?.prefix
         }
       });
     });
@@ -1925,10 +2231,12 @@ export const useChatStore = defineStore('chat', () => {
     currentUser,
     currentUserRole,
     server,
+    uncategorizedCategoryDeleted,
     serverStorageSettings,
     lastError,
     savedConnections,
     activeConnectionId,
+    hasStoredIdentity,
     localUsername,
     users,
     onlineUserIds,
@@ -1945,14 +2253,23 @@ export const useChatStore = defineStore('chat', () => {
     activeServerCategories,
     activeChannelMessages,
     saveLocalUsername,
+    saveLocalAvatar,
+    getLocalAvatar,
+    getStoredIdentityExport,
+    importStoredIdentity,
     addSavedConnection,
     addServerConnection,
     removeSavedConnection,
     connect,
     disconnect,
     authenticate,
+    createCategory,
+    reorderCategories,
     createChannel,
+    deleteCategory,
+    deleteUncategorizedCategory,
     deleteChannel,
+    reorderChannels,
     updateServerSettings,
     testServerStorageSettings,
     requestServerStorageSettings,

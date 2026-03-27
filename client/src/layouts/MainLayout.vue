@@ -43,6 +43,7 @@ const newChannelType = ref<'text' | 'voice' | 'rss' | 'folder'>('text')
 const newChannelFeedUrl = ref('')
 const selectedCategoryId = ref<string | null>(null)
 const createChannelError = ref<string | null>(null)
+const creatingCategory = ref(false)
 
 const showInviteModal = ref(false)
 const showServerSettingsModal = ref(false)
@@ -55,6 +56,8 @@ const s3ConnectionTestMessage = ref<string | null>(null)
 const s3LastSuccessfulFingerprint = ref<string | null>(null)
 const serverSettingsSaveMessage = ref<string | null>(null)
 const serverSettingsSaveError = ref<string | null>(null)
+const serverSettingsStorageSavePending = ref(false)
+const serverSettingsStorageMigrationLock = ref(false)
 const serverIconDataUrl = ref<string | null>(null)
 const removeServerIcon = ref(false)
 const serverIconPreviewUrl = ref<string | null>(null)
@@ -65,7 +68,9 @@ const serverSettingsForm = ref({
   rulesChannelId: '',
   welcomeChannelId: '',
   storage: {
-    enabled: false,
+    storageType: 'data_dir' as 'data_dir' | 's3',
+    provider: 'generic_s3' as 'generic_s3' | 'cloudflare_r2',
+    providerUrl: '',
     endpoint: '',
     region: '',
     bucket: '',
@@ -92,6 +97,10 @@ const serverSettingsNavGroups = ref<ServerSettingsNavGroup[]>([
 
 const isAdmin = computed(() => chatStore.currentUserRole === 'admin')
 const shouldShowMemberList = computed(() => chatStore.activeMainPanel.type !== 'voice')
+const createChannelModalTitle = computed(() => creatingCategory.value ? 'Create Category' : 'Create Channel')
+const createChannelNameLabel = computed(() => creatingCategory.value ? 'Category Name' : 'Channel Name')
+const createChannelNamePlaceholder = computed(() => creatingCategory.value ? 'new-category' : 'new-channel')
+const createChannelSubmitLabel = computed(() => creatingCategory.value ? 'Create Category' : 'Create Channel')
 
 const activeServer = computed(() => {
   if (chatStore.server?.title) {
@@ -106,11 +115,30 @@ const activeServer = computed(() => {
   return { name: 'RougeCord' }
 })
 
+const populateServerSettingsStorageForm = () => {
+  const storageSettings = chatStore.serverStorageSettings
+  serverSettingsForm.value.storage.storageType = storageSettings.storageType
+  serverSettingsForm.value.storage.provider = storageSettings.s3.provider
+  serverSettingsForm.value.storage.providerUrl = storageSettings.s3.providerUrl
+  serverSettingsForm.value.storage.endpoint = storageSettings.s3.endpoint
+  serverSettingsForm.value.storage.region = storageSettings.s3.region
+  serverSettingsForm.value.storage.bucket = storageSettings.s3.bucket
+  serverSettingsForm.value.storage.accessKey = storageSettings.s3.accessKey
+  serverSettingsForm.value.storage.secretKey = storageSettings.s3.secretKey
+  serverSettingsForm.value.storage.prefix = storageSettings.s3.prefix
+  serverSettingsForm.value.storage.status = storageSettings.storageType
+  serverSettingsForm.value.storage.lastError = storageSettings.storageLastError
+}
+
 const getCurrentStorageFingerprint = () => {
   const storage = serverSettingsForm.value.storage
   return JSON.stringify({
-    enabled: storage.enabled,
+    storageType: storage.storageType,
+    provider: storage.provider,
+    providerUrl: storage.providerUrl.trim(),
     endpoint: storage.endpoint.trim(),
+    region: storage.region.trim(),
+    bucket: storage.bucket.trim(),
     accessKey: storage.accessKey.trim(),
     secretKey: storage.secretKey.trim(),
     prefix: storage.prefix.trim()
@@ -122,16 +150,24 @@ const hasStorageSettingsChanges = computed(() => {
   const formStorage = serverSettingsForm.value.storage
 
   const currentFingerprint = JSON.stringify({
-    enabled: currentStorage.storageType === 's3',
+    storageType: currentStorage.storageType,
+    provider: currentStorage.s3.provider,
+    providerUrl: (currentStorage.s3.providerUrl || '').trim(),
     endpoint: (currentStorage.s3.endpoint || '').trim(),
+    region: (currentStorage.s3.region || '').trim(),
+    bucket: (currentStorage.s3.bucket || '').trim(),
     accessKey: (currentStorage.s3.accessKey || '').trim(),
     secretKey: (currentStorage.s3.secretKey || '').trim(),
     prefix: (currentStorage.s3.prefix || '').trim()
   })
 
   const nextFingerprint = JSON.stringify({
-    enabled: formStorage.enabled,
+    storageType: formStorage.storageType,
+    provider: formStorage.provider,
+    providerUrl: formStorage.providerUrl.trim(),
     endpoint: formStorage.endpoint.trim(),
+    region: formStorage.region.trim(),
+    bucket: formStorage.bucket.trim(),
     accessKey: formStorage.accessKey.trim(),
     secretKey: formStorage.secretKey.trim(),
     prefix: formStorage.prefix.trim()
@@ -167,17 +203,66 @@ const hasServerSettingsChanges = computed(() =>
   removeServerIcon.value
 )
 
+const isStorageModeSwitchPending = computed(() => {
+  const currentStorageType = chatStore.serverStorageSettings.storageType
+  const nextStorageType = serverSettingsForm.value.storage.storageType
+  return hasStorageSettingsChanges.value && currentStorageType !== nextStorageType
+})
+
+const isServerSettingsStorageLocked = computed(() =>
+  serverSettingsStorageSavePending.value ||
+  serverSettingsStorageMigrationLock.value ||
+  chatStore.serverStorageSettings.migration.status === 'running'
+)
+
+const serverSettingsSaveDisabled = computed(() => !canSaveServerSettings.value || isServerSettingsStorageLocked.value)
+
+const serverSettingsSaveButtonLabel = computed(() => {
+  if (serverSettingsStorageSavePending.value) {
+    return 'Saving storage changes...'
+  }
+
+  if (chatStore.serverStorageSettings.migration.status === 'running') {
+    return 'Storage migration running...'
+  }
+
+  if (serverSettingsStorageMigrationLock.value) {
+    return 'Waiting for migration status...'
+  }
+
+  return 'Save Changes'
+})
+
 const canSaveServerSettings = computed(() => {
   if (!hasStorageSettingsChanges.value) {
     return true
   }
 
-  if (!serverSettingsForm.value.storage.enabled) {
+  if (serverSettingsForm.value.storage.storageType !== 's3') {
     return true
   }
 
   return s3ConnectionTestState.value === 'success' && s3LastSuccessfulFingerprint.value === getCurrentStorageFingerprint()
 })
+
+watch(
+  () => serverSettingsForm.value.storage.provider,
+  (provider) => {
+    if (provider === 'cloudflare_r2') {
+      serverSettingsForm.value.storage.endpoint = ''
+      serverSettingsForm.value.storage.region = ''
+      serverSettingsForm.value.storage.bucket = ''
+      return
+    }
+
+    serverSettingsForm.value.storage.providerUrl = ''
+  }
+)
+
+const resetServerSettingsStorageLock = () => {
+  serverSettingsStorageSavePending.value = false
+  serverSettingsStorageMigrationLock.value = false
+}
 
 const login = () => {
   if (usernameInput.value.trim()) {
@@ -193,14 +278,19 @@ const handleCreateServer = async () => {
   }
 }
 
-const openCreateChannelModal = (payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' | 'folder' }) => {
+const openCreateChannelModal = (payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' | 'folder'; createCategory?: boolean }) => {
   if (!isAdmin.value) return
 
   createChannelError.value = null
   chatStore.clearError()
+  creatingCategory.value = Boolean(payload.createCategory)
   selectedCategoryId.value = payload.categoryId
+  newChannelName.value = ''
+  newChannelFeedUrl.value = ''
   if (payload.type) {
     newChannelType.value = payload.type
+  } else if (!creatingCategory.value) {
+    newChannelType.value = 'text'
   }
   showCreateChannelModal.value = true
 }
@@ -211,7 +301,15 @@ const handleCreateChannel = () => {
   const trimmedName = newChannelName.value.trim()
   const trimmedFeedUrl = newChannelFeedUrl.value.trim()
   if (!trimmedName) {
-    createChannelError.value = 'Channel name is required'
+    createChannelError.value = creatingCategory.value ? 'Category name is required' : 'Channel name is required'
+    return
+  }
+
+  if (creatingCategory.value) {
+    createChannelError.value = null
+    chatStore.clearError()
+    chatStore.createCategory(trimmedName)
+    showCreateChannelModal.value = false
     return
   }
 
@@ -223,19 +321,29 @@ const handleCreateChannel = () => {
   createChannelError.value = null
   chatStore.clearError()
   chatStore.createChannel(selectedCategoryId.value, trimmedName, newChannelType.value, trimmedFeedUrl)
+  showCreateChannelModal.value = false
 }
 
 const handleTestStorageConnection = async () => {
   serverSettingsSaveError.value = null
   serverSettingsSaveMessage.value = null
   s3ConnectionTestState.value = 'testing'
-  s3ConnectionTestMessage.value = 'Testing S3 connection...'
+  s3ConnectionTestMessage.value = 'Testing storage connection...'
 
   const result = await chatStore.testServerStorageSettings({
-    endpoint: serverSettingsForm.value.storage.endpoint,
-    accessKey: serverSettingsForm.value.storage.accessKey,
-    secretKey: serverSettingsForm.value.storage.secretKey,
-    prefix: serverSettingsForm.value.storage.prefix
+    storageType: serverSettingsForm.value.storage.storageType,
+    s3: serverSettingsForm.value.storage.storageType === 's3'
+      ? {
+          provider: serverSettingsForm.value.storage.provider,
+          providerUrl: serverSettingsForm.value.storage.providerUrl,
+          endpoint: serverSettingsForm.value.storage.endpoint,
+          region: serverSettingsForm.value.storage.region,
+          bucket: serverSettingsForm.value.storage.bucket,
+          accessKey: serverSettingsForm.value.storage.accessKey,
+          secretKey: serverSettingsForm.value.storage.secretKey,
+          prefix: serverSettingsForm.value.storage.prefix
+        }
+      : undefined
   })
 
   if (result.ok) {
@@ -255,24 +363,39 @@ const saveServerSettings = () => {
     return
   }
 
+  if (isServerSettingsStorageLocked.value) {
+    return
+  }
+
   serverSettingsSaveError.value = null
   serverSettingsSaveMessage.value = null
 
   const nextStoragePayload = hasStorageSettingsChanges.value
-    ? {
-        enabled: serverSettingsForm.value.storage.enabled,
-        endpoint: serverSettingsForm.value.storage.endpoint,
-        region: serverSettingsForm.value.storage.region,
-        bucket: serverSettingsForm.value.storage.bucket,
-        accessKey: serverSettingsForm.value.storage.accessKey,
-        secretKey: serverSettingsForm.value.storage.secretKey,
-        prefix: serverSettingsForm.value.storage.prefix
+      ? {
+        storageType: serverSettingsForm.value.storage.storageType,
+        s3: serverSettingsForm.value.storage.storageType === 's3'
+          ? {
+              provider: serverSettingsForm.value.storage.provider,
+              providerUrl: serverSettingsForm.value.storage.providerUrl,
+              endpoint: serverSettingsForm.value.storage.endpoint,
+              region: serverSettingsForm.value.storage.region,
+              bucket: serverSettingsForm.value.storage.bucket,
+              accessKey: serverSettingsForm.value.storage.accessKey,
+              secretKey: serverSettingsForm.value.storage.secretKey,
+              prefix: serverSettingsForm.value.storage.prefix
+            }
+          : undefined
       }
     : undefined
 
   if (nextStoragePayload && !canSaveServerSettings.value) {
-    serverSettingsSaveError.value = 'Run a successful S3 connection test before saving.'
+    serverSettingsSaveError.value = 'Run a successful storage connection test before saving.'
     return
+  }
+
+  if (isStorageModeSwitchPending.value) {
+    serverSettingsStorageSavePending.value = true
+    serverSettingsStorageMigrationLock.value = true
   }
 
   chatStore.updateServerSettings(
@@ -346,12 +469,21 @@ const handleChatStoreMessage = (message: any) => {
   if (message.type === 'server_settings_updated' || message.type === 'SERVER_UPDATED') {
     serverSettingsSaveMessage.value = 'Settings saved.'
     serverSettingsSaveError.value = null
+
+    if (serverSettingsStorageSavePending.value) {
+      serverSettingsStorageSavePending.value = false
+    }
+
     return
   }
 
   if (message.type === 'error') {
     serverSettingsSaveError.value = message.payload?.message || 'Failed to save settings'
     serverSettingsSaveMessage.value = null
+
+    if (serverSettingsStorageSavePending.value) {
+      resetServerSettingsStorageLock()
+    }
   }
 }
 
@@ -431,15 +563,7 @@ watch(showServerSettingsModal, (newVal) => {
     serverSettingsForm.value.title = chatStore.server.title || chatStore.server.name || ''
     serverSettingsForm.value.rulesChannelId = chatStore.server.rulesChannelId || ''
     serverSettingsForm.value.welcomeChannelId = chatStore.server.welcomeChannelId || ''
-    serverSettingsForm.value.storage.enabled = chatStore.serverStorageSettings.storageType === 's3'
-    serverSettingsForm.value.storage.endpoint = chatStore.serverStorageSettings.s3.endpoint
-    serverSettingsForm.value.storage.region = chatStore.serverStorageSettings.s3.region
-    serverSettingsForm.value.storage.bucket = chatStore.serverStorageSettings.s3.bucket
-    serverSettingsForm.value.storage.accessKey = chatStore.serverStorageSettings.s3.accessKey
-    serverSettingsForm.value.storage.secretKey = chatStore.serverStorageSettings.s3.secretKey
-    serverSettingsForm.value.storage.prefix = chatStore.serverStorageSettings.s3.prefix
-    serverSettingsForm.value.storage.status = chatStore.serverStorageSettings.storageType
-    serverSettingsForm.value.storage.lastError = chatStore.serverStorageSettings.storageLastError
+    populateServerSettingsStorageForm()
     serverIconDataUrl.value = null
     removeServerIcon.value = false
     serverIconError.value = null
@@ -449,6 +573,7 @@ watch(showServerSettingsModal, (newVal) => {
     s3LastSuccessfulFingerprint.value = null
     serverSettingsSaveMessage.value = null
     serverSettingsSaveError.value = null
+    resetServerSettingsStorageLock()
   }
 })
 
@@ -458,15 +583,17 @@ watch(
     if (!showServerSettingsModal.value) {
       return
     }
-    serverSettingsForm.value.storage.status = storageSettings.storageType
-    serverSettingsForm.value.storage.lastError = storageSettings.storageLastError
-    serverSettingsForm.value.storage.enabled = storageSettings.storageType === 's3'
-    serverSettingsForm.value.storage.endpoint = storageSettings.s3.endpoint
-    serverSettingsForm.value.storage.region = storageSettings.s3.region
-    serverSettingsForm.value.storage.bucket = storageSettings.s3.bucket
-    serverSettingsForm.value.storage.accessKey = storageSettings.s3.accessKey
-    serverSettingsForm.value.storage.secretKey = storageSettings.s3.secretKey
-    serverSettingsForm.value.storage.prefix = storageSettings.s3.prefix
+    populateServerSettingsStorageForm()
+
+    if (storageSettings.migration.status === 'running') {
+      serverSettingsStorageSavePending.value = false
+      serverSettingsStorageMigrationLock.value = true
+      return
+    }
+
+    if (serverSettingsStorageMigrationLock.value) {
+      serverSettingsStorageMigrationLock.value = false
+    }
   },
   { deep: true }
 )
@@ -474,8 +601,12 @@ watch(
 watch(
   () => [
     showServerSettingsModal.value,
-    serverSettingsForm.value.storage.enabled,
+    serverSettingsForm.value.storage.storageType,
+    serverSettingsForm.value.storage.provider,
+    serverSettingsForm.value.storage.providerUrl,
     serverSettingsForm.value.storage.endpoint,
+    serverSettingsForm.value.storage.region,
+    serverSettingsForm.value.storage.bucket,
     serverSettingsForm.value.storage.accessKey,
     serverSettingsForm.value.storage.secretKey,
     serverSettingsForm.value.storage.prefix
@@ -487,7 +618,7 @@ watch(
 
     if (s3LastSuccessfulFingerprint.value !== getCurrentStorageFingerprint()) {
       s3ConnectionTestState.value = 'idle'
-      s3ConnectionTestMessage.value = 'S3 inputs changed. Test connection again before saving.'
+      s3ConnectionTestMessage.value = 'Storage inputs changed. Test connection again before saving.'
     }
   }
 )
@@ -589,6 +720,11 @@ onUnmounted(() => {
       v-model:channel-name="newChannelName"
       v-model:channel-type="newChannelType"
       v-model:channel-feed-url="newChannelFeedUrl"
+      :title="createChannelModalTitle"
+      :name-label="createChannelNameLabel"
+      :name-placeholder="createChannelNamePlaceholder"
+      :create-label="createChannelSubmitLabel"
+      :show-type-selector="!creatingCategory"
       :error-message="createChannelError || chatStore.lastError"
       @create="handleCreateChannel"
     />
@@ -598,12 +734,15 @@ onUnmounted(() => {
       v-model:form="serverSettingsForm"
       :active-section="activeServerSettingsSection"
       :nav-groups="serverSettingsNavGroups"
-      :save-disabled="!canSaveServerSettings"
+      :save-disabled="serverSettingsSaveDisabled"
+      :save-label="serverSettingsSaveButtonLabel"
       :has-unsaved-changes="hasServerSettingsChanges"
       :s3-test-state="s3ConnectionTestState"
       :s3-test-message="s3ConnectionTestMessage"
       :save-message="serverSettingsSaveMessage"
       :save-error="serverSettingsSaveError"
+      :storage-settings="chatStore.serverStorageSettings"
+      :storage-locked="isServerSettingsStorageLocked"
       :icon-preview-url="serverIconPreviewUrl"
       :icon-error="serverIconError"
       :can-remove-icon="Boolean(serverIconPreviewUrl || chatStore.server?.iconPath)"

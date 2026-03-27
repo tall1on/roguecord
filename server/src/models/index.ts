@@ -68,6 +68,8 @@ export interface Server {
 }
 
 export interface ServerS3Config {
+  provider: 'generic_s3' | 'cloudflare_r2';
+  providerUrl: string | null;
   endpoint: string;
   region: string;
   bucket: string;
@@ -82,6 +84,13 @@ export interface ServerStorageSettings {
   s3: ServerS3Config | null;
   storageLastError: string | null;
   storageUpdatedAt: string | null;
+  storageMigrationStatus: 'idle' | 'running' | 'failed';
+  storageMigrationTarget: 'data_dir' | 's3' | null;
+  storageMigrationTotal: number;
+  storageMigrationDone: number;
+  storageMigrationMessage: string | null;
+  storageMigrationStartedAt: string | null;
+  storageMigrationUpdatedAt: string | null;
 }
 
 const mapServerRow = (row: any): Server => ({
@@ -102,6 +111,8 @@ const mapServerStorageSettings = (row: any): ServerStorageSettings => ({
   storageType: row.storage_type === 's3' ? 's3' : 'data_dir',
   s3: row.s3_endpoint && row.s3_region && row.s3_bucket && row.s3_access_key && row.s3_secret_key
     ? {
+      provider: row.storage_provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3',
+      providerUrl: row.storage_provider_url || null,
       endpoint: row.s3_endpoint,
       region: row.s3_region,
       bucket: row.s3_bucket,
@@ -111,7 +122,18 @@ const mapServerStorageSettings = (row: any): ServerStorageSettings => ({
     }
     : null,
   storageLastError: row.storage_last_error || null,
-  storageUpdatedAt: row.storage_updated_at || null
+  storageUpdatedAt: row.storage_updated_at || null,
+  storageMigrationStatus: row.storage_migration_status === 'running' || row.storage_migration_status === 'failed'
+    ? row.storage_migration_status
+    : 'idle',
+  storageMigrationTarget: row.storage_migration_target === 's3' || row.storage_migration_target === 'data_dir'
+    ? row.storage_migration_target
+    : null,
+  storageMigrationTotal: Number.isFinite(Number(row.storage_migration_total)) ? Number(row.storage_migration_total) : 0,
+  storageMigrationDone: Number.isFinite(Number(row.storage_migration_done)) ? Number(row.storage_migration_done) : 0,
+  storageMigrationMessage: row.storage_migration_message || null,
+  storageMigrationStartedAt: row.storage_migration_started_at || null,
+  storageMigrationUpdatedAt: row.storage_migration_updated_at || null
 });
 
 export const getServer = async (): Promise<Server | undefined> => {
@@ -154,6 +176,8 @@ export const getServerStorageSettings = async (): Promise<ServerStorageSettings 
 export const updateServerStorageSettings = async (input: {
   serverId: string;
   storageType: 'data_dir' | 's3';
+  storageProvider: 'generic_s3' | 'cloudflare_r2';
+  storageProviderUrl: string | null;
   s3Endpoint: string | null;
   s3Region: string | null;
   s3Bucket: string | null;
@@ -167,6 +191,8 @@ export const updateServerStorageSettings = async (input: {
       UPDATE servers
       SET
         storage_type = ?,
+        storage_provider = ?,
+        storage_provider_url = ?,
         s3_endpoint = ?,
         s3_region = ?,
         s3_bucket = ?,
@@ -179,6 +205,8 @@ export const updateServerStorageSettings = async (input: {
     `,
     [
       input.storageType,
+      input.storageProvider,
+      input.storageProviderUrl,
       input.s3Endpoint,
       input.s3Region,
       input.s3Bucket,
@@ -201,20 +229,64 @@ export const updateServerStorageLastError = async (input: {
   );
 };
 
+export const updateServerStorageMigrationState = async (input: {
+  serverId: string;
+  status: 'idle' | 'running' | 'failed';
+  target: 'data_dir' | 's3' | null;
+  total: number;
+  done: number;
+  message: string | null;
+  startedAt: string | null;
+}): Promise<void> => {
+  await dbRun(
+    `
+      UPDATE servers
+      SET
+        storage_migration_status = ?,
+        storage_migration_target = ?,
+        storage_migration_total = ?,
+        storage_migration_done = ?,
+        storage_migration_message = ?,
+        storage_migration_started_at = ?,
+        storage_migration_updated_at = CURRENT_TIMESTAMP,
+        storage_updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `,
+    [
+      input.status,
+      input.target,
+      Math.max(0, Math.floor(input.total)),
+      Math.max(0, Math.floor(input.done)),
+      input.message,
+      input.startedAt,
+      input.serverId
+    ]
+  );
+};
+
 // --- Users ---
 export interface User {
   id: string;
   username: string;
   public_key: string;
   avatar_url: string | null;
+  avatar_mime_type: string | null;
   last_ip: string | null;
   role: string;
   created_at: string;
 }
 
-export const createUser = async (username: string, public_key: string, avatar_url: string | null = null): Promise<User> => {
+export const createUser = async (
+  username: string,
+  public_key: string,
+  avatar_url: string | null = null,
+  avatar_mime_type: string | null = null
+): Promise<User> => {
   const id = crypto.randomUUID();
-  await dbRun('INSERT INTO users (id, username, public_key, avatar_url) VALUES (?, ?, ?, ?)', [id, username, public_key, avatar_url]);
+  await dbRun(
+    'INSERT INTO users (id, username, public_key, avatar_url, avatar_mime_type) VALUES (?, ?, ?, ?, ?)',
+    [id, username, public_key, avatar_url, avatar_mime_type]
+  );
   return (await dbGet<User>('SELECT * FROM users WHERE id = ?', [id]))!;
 };
 
@@ -274,6 +346,38 @@ export const updateUserLastIp = async (id: string, ipAddress: string | null): Pr
   await dbRun('UPDATE users SET last_ip = ? WHERE id = ?', [ipAddress, id]);
 };
 
+export const updateUserProfile = async (input: {
+  id: string;
+  username?: string;
+  avatar_url?: string | null;
+  avatar_mime_type?: string | null;
+}): Promise<void> => {
+  const assignments: string[] = [];
+  const params: any[] = [];
+
+  if (typeof input.username === 'string') {
+    assignments.push('username = ?');
+    params.push(input.username);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'avatar_url')) {
+    assignments.push('avatar_url = ?');
+    params.push(input.avatar_url ?? null);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'avatar_mime_type')) {
+    assignments.push('avatar_mime_type = ?');
+    params.push(input.avatar_mime_type ?? null);
+  }
+
+  if (assignments.length === 0) {
+    return;
+  }
+
+  params.push(input.id);
+  await dbRun(`UPDATE users SET ${assignments.join(', ')} WHERE id = ?`, params);
+};
+
 // --- Categories ---
 export interface Category {
   id: string;
@@ -289,6 +393,43 @@ export const createCategory = async (name: string, position: number = 0): Promis
 
 export const getCategories = async (): Promise<Category[]> => {
   return dbAll<Category>('SELECT * FROM categories ORDER BY position ASC');
+};
+
+export const reorderCategories = async (
+  updates: Array<{ id: string; position: number }>
+): Promise<void> => {
+  if (!updates.length) {
+    return;
+  }
+
+  await dbRun('BEGIN TRANSACTION');
+
+  try {
+    for (const update of updates) {
+      await dbRun(
+        'UPDATE categories SET position = ? WHERE id = ?',
+        [update.position, update.id]
+      );
+    }
+
+    await dbRun('COMMIT');
+  } catch (error) {
+    try {
+      await dbRun('ROLLBACK');
+    } catch {
+      // no-op
+    }
+    throw error;
+  }
+};
+
+export const deleteCategory = async (id: string): Promise<void> => {
+  await dbRun('DELETE FROM categories WHERE id = ?', [id]);
+};
+
+export const categoryHasChannels = async (id: string): Promise<boolean> => {
+  const row = await dbGet<{ count: number }>('SELECT COUNT(*) as count FROM channels WHERE category_id = ?', [id]);
+  return Number(row?.count || 0) > 0;
 };
 
 // --- Channels ---
@@ -316,8 +457,18 @@ export const createChannel = async (
   return (await dbGet<Channel>('SELECT * FROM channels WHERE id = ?', [id]))!;
 };
 
+export const getNextChannelPosition = async (categoryId: string | null): Promise<number> => {
+  const row = await dbGet<{ maxPosition: number | null }>(
+    'SELECT MAX(position) as maxPosition FROM channels WHERE ((category_id IS NULL AND ? IS NULL) OR category_id = ?)',
+    [categoryId, categoryId]
+  );
+
+  const maxPosition = Number(row?.maxPosition ?? -1);
+  return Number.isFinite(maxPosition) ? maxPosition + 1 : 0;
+};
+
 export const getChannels = async (): Promise<Channel[]> => {
-  return dbAll<Channel>('SELECT * FROM channels ORDER BY position ASC');
+  return dbAll<Channel>('SELECT * FROM channels ORDER BY COALESCE(category_id, id) ASC, position ASC, name COLLATE NOCASE ASC');
 };
 
 export const getChannelById = async (id: string): Promise<Channel | undefined> => {
@@ -335,6 +486,34 @@ export const deleteChannel = async (id: string): Promise<void> => {
   await dbRun('DELETE FROM rss_channel_items WHERE channel_id = ?', [id]);
   await dbRun('DELETE FROM folder_channel_files WHERE channel_id = ?', [id]);
   await dbRun('DELETE FROM channels WHERE id = ?', [id]);
+};
+
+export const reorderChannels = async (
+  updates: Array<{ id: string; category_id: string | null; position: number }>
+): Promise<void> => {
+  if (!updates.length) {
+    return;
+  }
+
+  await dbRun('BEGIN TRANSACTION');
+
+  try {
+    for (const update of updates) {
+      await dbRun(
+        'UPDATE channels SET category_id = ?, position = ? WHERE id = ?',
+        [update.category_id, update.position, update.id]
+      );
+    }
+
+    await dbRun('COMMIT');
+  } catch (error) {
+    try {
+      await dbRun('ROLLBACK');
+    } catch {
+      // no-op
+    }
+    throw error;
+  }
 };
 
 export interface FolderChannelFile {
@@ -573,6 +752,10 @@ export interface MessageAttachment {
   created_at: string;
 }
 
+export interface MessageAttachmentWithChannel extends MessageAttachment {
+  channel_id: string;
+}
+
 export interface MessageWithUser extends Message {
   user: User;
 }
@@ -780,6 +963,7 @@ export const getMessageReplyReferences = async (messageIds: string[]): Promise<R
         id: row.reply_user_join_id,
         username: row.reply_username,
         avatar_url: row.reply_avatar_url,
+        avatar_mime_type: row.reply_avatar_mime_type ?? null,
         public_key: row.reply_public_key,
         last_ip: row.reply_last_ip,
         role: row.reply_role,
@@ -901,6 +1085,42 @@ export const getMessageAttachments = async (messageIds: string[]): Promise<Recor
   }, {});
 };
 
+export const getAllMessageAttachments = async (): Promise<MessageAttachmentWithChannel[]> => {
+  try {
+    return await dbAll<MessageAttachmentWithChannel>(
+      `
+        SELECT a.*, m.channel_id
+        FROM message_attachments a
+        INNER JOIN messages m ON m.id = a.message_id
+        ORDER BY a.created_at ASC, a.id ASC
+      `
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key')) {
+      throw error;
+    }
+
+    return await dbAll<MessageAttachmentWithChannel>(
+      `
+        SELECT
+          a.id,
+          a.message_id,
+          a.original_name,
+          a.storage_name,
+          'data_dir' AS storage_provider,
+          NULL AS storage_key,
+          a.mime_type,
+          a.size_bytes,
+          a.created_at,
+          m.channel_id
+        FROM message_attachments a
+        INNER JOIN messages m ON m.id = a.message_id
+        ORDER BY a.created_at ASC, a.id ASC
+      `
+    );
+  }
+};
+
 export const getMessageById = async (id: string): Promise<Message | undefined> => {
   const message = await dbGet<Omit<Message, 'reactions'>>('SELECT * FROM messages WHERE id = ?', [id]);
   if (!message) return undefined;
@@ -910,6 +1130,28 @@ export const getMessageById = async (id: string): Promise<Message | undefined> =
 
 export const deleteMessageAttachmentById = async (id: string): Promise<void> => {
   await dbRun('DELETE FROM message_attachments WHERE id = ?', [id]);
+};
+
+export const updateMessageAttachmentStorage = async (input: {
+  attachmentId: string;
+  storageProvider: 'data_dir' | 's3';
+  storageKey: string | null;
+}): Promise<void> => {
+  try {
+    await dbRun(
+      `
+        UPDATE message_attachments
+        SET storage_provider = ?,
+            storage_key = ?
+        WHERE id = ?
+      `,
+      [input.storageProvider, input.storageKey, input.attachmentId]
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'storage_provider') && !isMissingColumnError(error, 'storage_key')) {
+      throw error;
+    }
+  }
 };
 
 export const deleteMessageById = async (id: string): Promise<void> => {
