@@ -651,14 +651,35 @@ watch(showServerSettingsModal, (newVal) => {
 
 watch(
   () => chatStore.serverRoles,
-  () => {
+  (nextRoles, previousRoles) => {
     if (!showServerSettingsModal.value) {
+      return
+    }
+
+    const previousSignature = JSON.stringify(
+      (previousRoles || []).map((role) => ({
+        id: role.id,
+        name: role.name,
+        color: role.color,
+        updatedAt: role.updatedAt
+      }))
+    )
+    const nextSignature = JSON.stringify(
+      (nextRoles || []).map((role) => ({
+        id: role.id,
+        name: role.name,
+        color: role.color,
+        updatedAt: role.updatedAt
+      }))
+    )
+
+    if (previousSignature === nextSignature) {
       return
     }
 
     populateServerRoleSettingsForm()
   },
-  { deep: true }
+  { deep: false }
 )
 
 watch(

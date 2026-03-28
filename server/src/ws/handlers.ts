@@ -3687,16 +3687,11 @@ const handleUpdateServerRole = async (
     return;
   }
 
-  const serverId = typeof payload?.serverId === 'string' ? payload.serverId.trim() : '';
+  const requestedServerId = typeof payload?.serverId === 'string' ? payload.serverId.trim() : '';
   const roleId = typeof payload?.roleId === 'string' ? payload.roleId.trim() : '';
   const normalizedName = normalizeRoleName(payload?.name);
   const colorProvided = Boolean(payload && Object.prototype.hasOwnProperty.call(payload, 'color'));
   const normalizedColor = colorProvided ? normalizeRoleColor(payload?.color) : null;
-
-  if (!serverId) {
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID is required' } }));
-    return;
-  }
 
   if (!roleId) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Role ID is required' } }));
@@ -3714,14 +3709,29 @@ const handleUpdateServerRole = async (
   }
 
   try {
-    const existingRole = await getServerRoleById(serverId, roleId);
-    if (!existingRole) {
+    const existingRole = requestedServerId
+      ? await getServerRoleById(requestedServerId, roleId)
+      : undefined;
+    const resolvedServerId = existingRole?.serverId || client.serverId || requestedServerId;
+
+    if (!resolvedServerId) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID is required' } }));
+      return;
+    }
+
+    if (existingRole && existingRole.serverId !== resolvedServerId) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Role does not belong to the active server' } }));
+      return;
+    }
+
+    const roleToUpdate = existingRole || await getServerRoleById(resolvedServerId, roleId);
+    if (!roleToUpdate) {
       client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Role not found' } }));
       return;
     }
 
     const updatedRole = await updateServerRole({
-      serverId,
+      serverId: resolvedServerId,
       roleId,
       name: normalizedName,
       color: normalizedColor
@@ -3729,10 +3739,10 @@ const handleUpdateServerRole = async (
 
     client.ws.send(JSON.stringify({
       type: 'server_role_updated',
-      payload: { serverId, role: updatedRole }
+      payload: { serverId: resolvedServerId, role: updatedRole }
     }));
 
-    await broadcastServerRoles(serverId);
+    await broadcastServerRoles(resolvedServerId);
   } catch (error) {
     console.error('[WS DEBUG] Failed to update server role:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to update server role' } }));
