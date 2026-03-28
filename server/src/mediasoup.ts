@@ -1,5 +1,12 @@
 import * as mediasoup from 'mediasoup';
-import { Worker, Router, Transport, WebRtcTransport, Producer, Consumer } from 'mediasoup/node/lib/types';
+import type {
+  Worker,
+  Router,
+  Transport,
+  WebRtcTransport,
+  Producer,
+  Consumer,
+} from 'mediasoup/types';
 
 let worker: Worker;
 

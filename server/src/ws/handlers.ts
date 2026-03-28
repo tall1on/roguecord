@@ -56,6 +56,7 @@ import {
   getServerRoles,
   getServerRoleById,
   updateServerRole,
+  getUserServerRoles,
   hydrateUserWithServerRoles,
   setUserServerRoles,
   userHasServerRoleKey
@@ -3810,6 +3811,57 @@ const handleAssignMemberRoles = async (
   }
 
   try {
+    const actingUser = await getUserById(client.userId);
+    const targetUser = await getUserById(userId);
+
+    if (!actingUser || !targetUser) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
+      return;
+    }
+
+    const [actingRoles, targetRoles, requestedRoles] = await Promise.all([
+      getUserServerRoles(serverId, actingUser.id, actingUser.role),
+      getUserServerRoles(serverId, targetUser.id, targetUser.role),
+      getServerRoles(serverId)
+    ]);
+
+    const requestedRoleIdSet = new Set(roleIds);
+    const requestedServerRoles = requestedRoles.filter((role) => requestedRoleIdSet.has(role.id));
+    const actingHasAdminRole = actingRoles.some((role) => role.key === 'admin');
+    const targetHasAdminRole = targetRoles.some((role) => role.key === 'admin');
+    const requestedHasAdminRole = requestedServerRoles.some((role) => role.key === 'admin');
+
+    if (!actingHasAdminRole) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can assign member roles' } }));
+      return;
+    }
+
+    if (userId === client.userId && !requestedHasAdminRole) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'You cannot remove your own admin role' } }));
+      return;
+    }
+
+    if (targetHasAdminRole && !requestedHasAdminRole) {
+      const otherAdmins = await getUsers();
+      let otherAdminExists = false;
+
+      for (const user of otherAdmins) {
+        if (user.id === targetUser.id) {
+          continue;
+        }
+
+        if (await userHasServerRoleKey(serverId, user, ['admin'])) {
+          otherAdminExists = true;
+          break;
+        }
+      }
+
+      if (!otherAdminExists) {
+        client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Cannot remove the last admin role from the server' } }));
+        return;
+      }
+    }
+
     await setUserServerRoles(serverId, userId, roleIds);
     const baseUser = await getUserById(userId);
     const hydratedUser = baseUser ? await hydrateUserWithServerRoles(serverId, baseUser) : null;
