@@ -210,11 +210,6 @@ export const ensureDefaultRolesForServer = async (serverId: string): Promise<voi
           WHEN key = 'admin' THEN 1
           ELSE position
         END,
-        name = CASE
-          WHEN key = 'all_users' THEN COALESCE(NULLIF(TRIM(name), ''), 'all users')
-          WHEN key = 'admin' THEN COALESCE(NULLIF(TRIM(name), ''), 'admin')
-          ELSE name
-        END,
         updated_at = CURRENT_TIMESTAMP
       WHERE server_id = ? AND key IN ('all_users', 'admin')
     `,
