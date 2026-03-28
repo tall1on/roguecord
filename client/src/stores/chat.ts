@@ -354,6 +354,20 @@ export const useChatStore = defineStore('chat', () => {
   
   const DEFAULT_NEW_USER_SERVER_ADDRESS = 'wss://rc1.exatek.de:1337';
 
+  const seedDefaultSavedConnections = (): SavedConnection[] => {
+    const defaultAddress = DEFAULT_NEW_USER_SERVER_ADDRESS.trim();
+    const normalizedDefaultAddress = defaultAddress.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0(?=[:/]|$)/i, (_match, protocol) => `${protocol || ''}localhost`);
+
+    return [
+      {
+        id: crypto.randomUUID(),
+        name: 'rc1.exatek.de',
+        address: normalizedDefaultAddress,
+        cachedIconUrl: null
+      }
+    ];
+  };
+
   const readSavedConnections = (): SavedConnection[] => {
     const rawStoredConnections = JSON.parse(localStorage.getItem('savedConnections') || '[]');
     const normalizedConnections = (Array.isArray(rawStoredConnections) ? rawStoredConnections : []).map((c: SavedConnection) => ({
@@ -366,7 +380,7 @@ export const useChatStore = defineStore('chat', () => {
       return normalizedConnections;
     }
 
-    const defaultConnections = buildDefaultSavedConnections();
+    const defaultConnections = seedDefaultSavedConnections();
     localStorage.setItem('savedConnections', JSON.stringify(defaultConnections));
     return defaultConnections;
   };
@@ -896,18 +910,6 @@ export const useChatStore = defineStore('chat', () => {
     } catch {
       return address;
     }
-  };
-
-  const buildDefaultSavedConnections = (): SavedConnection[] => {
-    const defaultAddress = normalizeServerAddress(DEFAULT_NEW_USER_SERVER_ADDRESS);
-    return [
-      {
-        id: crypto.randomUUID(),
-        name: getConnectionNameFromAddress(defaultAddress).trim() || 'Server',
-        address: defaultAddress,
-        cachedIconUrl: null
-      }
-    ];
   };
 
   const addSavedConnection = (address: string, name?: string) => {
