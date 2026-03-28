@@ -3712,7 +3712,7 @@ const handleUpdateServerRole = async (
     const existingRole = requestedServerId
       ? await getServerRoleById(requestedServerId, roleId)
       : undefined;
-    const resolvedServerId = existingRole?.serverId || client.serverId || requestedServerId;
+    const resolvedServerId = existingRole?.serverId || requestedServerId;
 
     if (!resolvedServerId) {
       client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID is required' } }));
