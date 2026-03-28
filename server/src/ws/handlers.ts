@@ -20,6 +20,7 @@ import {
   updateUserRole,
   updateUserProfile,
   getUsers,
+  hasAdminUser,
   getServer,
   createServer,
   updateServerSettings,
@@ -55,7 +56,7 @@ import {
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
-import { adminKey } from '../admin';
+import { consumeAdminKey, setAdminKeyEnabled } from '../admin';
 import fs from 'node:fs';
 import path from 'node:path';
 import { dataDir } from '../db';
@@ -3260,8 +3261,17 @@ const handleGetProducers = async (client: ClientConnection, payload: { channel_i
 const handleSubmitAdminKey = async (client: ClientConnection, payload: { key: string }) => {
   if (!client.userId) return;
   const { key } = payload;
+  const adminExists = await hasAdminUser();
 
-  if (key === adminKey) {
+  if (adminExists) {
+    setAdminKeyEnabled(false);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Bootstrap admin key is disabled' } }));
+    return;
+  }
+
+  setAdminKeyEnabled(true);
+
+  if (consumeAdminKey(key)) {
     await updateUserRole(client.userId, 'admin');
     const user = await getUserById(client.userId);
     client.ws.send(JSON.stringify({
