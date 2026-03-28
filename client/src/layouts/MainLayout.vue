@@ -86,6 +86,8 @@ const serverSettingsForm = ref({
     accessKey: '',
     secretKey: '',
     prefix: '',
+    hasAccessKey: false,
+    hasSecretKey: false,
     status: 'data_dir' as 'data_dir' | 's3',
     lastError: null as string | null
   }
@@ -133,9 +135,11 @@ const populateServerSettingsStorageForm = () => {
   serverSettingsForm.value.storage.endpoint = storageSettings.s3.endpoint
   serverSettingsForm.value.storage.region = storageSettings.s3.region
   serverSettingsForm.value.storage.bucket = storageSettings.s3.bucket
-  serverSettingsForm.value.storage.accessKey = storageSettings.s3.accessKey
-  serverSettingsForm.value.storage.secretKey = storageSettings.s3.secretKey
   serverSettingsForm.value.storage.prefix = storageSettings.s3.prefix
+  serverSettingsForm.value.storage.hasAccessKey = storageSettings.s3.hasAccessKey
+  serverSettingsForm.value.storage.hasSecretKey = storageSettings.s3.hasSecretKey
+  serverSettingsForm.value.storage.accessKey = ''
+  serverSettingsForm.value.storage.secretKey = ''
   serverSettingsForm.value.storage.status = storageSettings.storageType
   serverSettingsForm.value.storage.lastError = storageSettings.storageLastError
 }
@@ -161,8 +165,8 @@ const getCurrentStorageFingerprint = () => {
     endpoint: storage.endpoint.trim(),
     region: storage.region.trim(),
     bucket: storage.bucket.trim(),
-    accessKey: storage.accessKey.trim(),
-    secretKey: storage.secretKey.trim(),
+    accessKeyChanged: storage.accessKey.trim().length > 0,
+    secretKeyChanged: storage.secretKey.trim().length > 0,
     prefix: storage.prefix.trim()
   })
 }
@@ -178,8 +182,8 @@ const hasStorageSettingsChanges = computed(() => {
     endpoint: (currentStorage.s3.endpoint || '').trim(),
     region: (currentStorage.s3.region || '').trim(),
     bucket: (currentStorage.s3.bucket || '').trim(),
-    accessKey: (currentStorage.s3.accessKey || '').trim(),
-    secretKey: (currentStorage.s3.secretKey || '').trim(),
+    hasAccessKey: currentStorage.s3.hasAccessKey,
+    hasSecretKey: currentStorage.s3.hasSecretKey,
     prefix: (currentStorage.s3.prefix || '').trim()
   })
 
@@ -190,8 +194,8 @@ const hasStorageSettingsChanges = computed(() => {
     endpoint: formStorage.endpoint.trim(),
     region: formStorage.region.trim(),
     bucket: formStorage.bucket.trim(),
-    accessKey: formStorage.accessKey.trim(),
-    secretKey: formStorage.secretKey.trim(),
+    hasAccessKey: formStorage.accessKey.trim().length > 0 ? true : currentStorage.s3.hasAccessKey,
+    hasSecretKey: formStorage.secretKey.trim().length > 0 ? true : currentStorage.s3.hasSecretKey,
     prefix: formStorage.prefix.trim()
   })
 
@@ -463,6 +467,9 @@ const saveServerSettings = async () => {
         removeIcon: removeServerIcon.value
       }
     )
+
+    serverSettingsForm.value.storage.accessKey = ''
+    serverSettingsForm.value.storage.secretKey = ''
 
     serverSettingsSaveMessage.value = updatedRoleCount > 0
       ? 'Saving settings and roles...'
