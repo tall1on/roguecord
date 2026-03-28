@@ -1104,11 +1104,6 @@ function ensureDefaultServerRoles(done: (error?: Error) => void) {
                   `
                     UPDATE server_roles
                     SET
-                      name = CASE
-                        WHEN key = 'all_users' THEN COALESCE(NULLIF(TRIM(name), ''), 'all users')
-                        WHEN key = 'admin' THEN COALESCE(NULLIF(TRIM(name), ''), 'admin')
-                        ELSE name
-                      END,
                       is_default = CASE WHEN key IN ('all_users', 'admin') THEN 1 ELSE is_default END,
                       is_deletable = CASE WHEN key IN ('all_users', 'admin') THEN 0 ELSE is_deletable END,
                       position = CASE
