@@ -33,6 +33,8 @@ const roleMap = computed(() => {
 
 const getDisplayRole = (user: User) => chatStore.getPrimaryServerRole(user) || roleMap.value.get(user.role) || null
 
+const getDisplayRoleById = (roleId: string) => roleMap.value.get(roleId) || null
+
 const getDisplayRoleName = (user: User) => {
   const role = getDisplayRole(user)
   if (role) {
@@ -161,8 +163,8 @@ const groupedMembers = computed(() => {
   })
 
   const sortedRoles = Object.keys(onlineByRole).sort((a, b) => {
-    const roleA = getDisplayRole(a)
-    const roleB = getDisplayRole(b)
+    const roleA = getDisplayRoleById(a)
+    const roleB = getDisplayRoleById(b)
 
     if ((roleA?.key || a) === 'admin') return -1
     if ((roleB?.key || b) === 'admin') return 1
@@ -173,7 +175,7 @@ const groupedMembers = computed(() => {
       return positionA - positionB
     }
 
-    return getDisplayRoleName(a).localeCompare(getDisplayRoleName(b))
+    return (roleA?.name || a || 'all users').localeCompare(roleB?.name || b || 'all users')
   })
 
   const sortedOnlineByRole: Record<string, typeof online> = {}
