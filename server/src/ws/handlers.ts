@@ -747,42 +747,76 @@ const getStorageRuntimeConfig = async (): Promise<{ storageType: 'data_dir' | 's
   };
 };
 
-const buildStorageSettingsPayloadForClient = (settings: Awaited<ReturnType<typeof getServerStorageSettings>>) => {
-  return {
-    storageType: settings?.storageType || 'data_dir',
-    storageLastError: settings?.storageLastError || null,
-    migration: {
-      status: settings?.storageMigrationStatus || 'idle',
-      target: settings?.storageMigrationTarget || null,
-      total: settings?.storageMigrationTotal || 0,
-      done: settings?.storageMigrationDone || 0,
-      message: settings?.storageMigrationMessage || null,
-      startedAt: settings?.storageMigrationStartedAt || null,
-      updatedAt: settings?.storageMigrationUpdatedAt || null
-    },
-    s3: settings?.s3
-      ? {
-        provider: settings.s3.provider,
-        providerUrl: settings.s3.providerUrl || '',
-        endpoint: settings.s3.endpoint,
-        region: settings.s3.region,
-        bucket: settings.s3.bucket,
-        accessKey: settings.s3.accessKey,
-        secretKey: settings.s3.secretKey,
-        prefix: settings.s3.prefix || ''
-      }
-      : {
-        provider: 'generic_s3',
-        providerUrl: '',
-        endpoint: '',
-        region: '',
-        bucket: '',
-        accessKey: '',
-        secretKey: '',
-        prefix: ''
-      }
-  };
-};
+const buildStorageSettingsBasePayload = (
+  settings: Awaited<ReturnType<typeof getServerStorageSettings>>
+) => ({
+  storageType: settings?.storageType || 'data_dir',
+  storageLastError: settings?.storageLastError || null,
+  migration: {
+    status: settings?.storageMigrationStatus || 'idle',
+    target: settings?.storageMigrationTarget || null,
+    total: settings?.storageMigrationTotal || 0,
+    done: settings?.storageMigrationDone || 0,
+    message: settings?.storageMigrationMessage || null,
+    startedAt: settings?.storageMigrationStartedAt || null,
+    updatedAt: settings?.storageMigrationUpdatedAt || null
+  }
+});
+
+const buildAuthenticatedStorageSettingsPayload = (
+  settings: Awaited<ReturnType<typeof getServerStorageSettings>>
+) => ({
+  ...buildStorageSettingsBasePayload(settings),
+  s3: {
+    provider: settings?.s3?.provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3',
+    providerUrl: '',
+    endpoint: '',
+    region: '',
+    bucket: '',
+    prefix: ''
+  }
+});
+
+const buildAdminStorageSettingsPayload = (
+  settings: Awaited<ReturnType<typeof getServerStorageSettings>>
+) => ({
+  ...buildStorageSettingsBasePayload(settings),
+  s3: settings?.s3
+    ? {
+      provider: settings.s3.provider,
+      providerUrl: settings.s3.providerUrl || '',
+      endpoint: settings.s3.endpoint,
+      region: settings.s3.region,
+      bucket: settings.s3.bucket,
+      prefix: settings.s3.prefix || '',
+      hasAccessKey: Boolean(settings.s3.accessKey),
+      hasSecretKey: Boolean(settings.s3.secretKey)
+    }
+    : {
+      provider: 'generic_s3',
+      providerUrl: '',
+      endpoint: '',
+      region: '',
+      bucket: '',
+      prefix: '',
+      hasAccessKey: false,
+      hasSecretKey: false
+    }
+});
+
+const buildMergedS3ConfigFromInput = (
+  currentS3: NonNullable<Awaited<ReturnType<typeof getServerStorageSettings>>>['s3'],
+  storageInput: StorageSettingsInput
+) => normalizeS3Config({
+  provider: storageInput.provider || currentS3?.provider || 'generic_s3',
+  providerUrl: storageInput.providerUrl || currentS3?.providerUrl || null,
+  endpoint: storageInput.endpoint || currentS3?.endpoint || null,
+  region: storageInput.region || currentS3?.region || null,
+  bucket: storageInput.bucket || currentS3?.bucket || null,
+  accessKey: storageInput.accessKey || currentS3?.accessKey || null,
+  secretKey: storageInput.secretKey || currentS3?.secretKey || null,
+  prefix: storageInput.prefix ?? currentS3?.prefix ?? null
+});
 
 type StorageMigrationTarget = 'data_dir' | 's3';
 
@@ -826,18 +860,26 @@ const areS3ConfigsEquivalent = (left: S3StorageConfig, right: S3StorageConfig) =
 
 const broadcastServerStorageSettings = async () => {
   const settings = await getServerStorageSettings();
-  connectionManager.broadcastToAuthenticated({
-    type: 'server_storage_settings',
-    payload: buildStorageSettingsPayloadForClient(settings)
-  });
+  const authenticatedConnections = Array.from(connectionManager.getClients()).filter((connection) => Boolean(connection.userId));
+
+  for (const connection of authenticatedConnections) {
+    connection.ws.send(JSON.stringify({
+      type: 'server_storage_settings',
+      payload: buildAuthenticatedStorageSettingsPayload(settings)
+    }));
+  }
 };
 
 const broadcastServerStorageMigrationProgress = async () => {
   const settings = await getServerStorageSettings();
-  connectionManager.broadcastToAuthenticated({
-    type: 'server_storage_migration_progress',
-    payload: buildStorageSettingsPayloadForClient(settings)
-  });
+  const authenticatedConnections = Array.from(connectionManager.getClients()).filter((connection) => Boolean(connection.userId));
+
+  for (const connection of authenticatedConnections) {
+    connection.ws.send(JSON.stringify({
+      type: 'server_storage_migration_progress',
+      payload: buildAuthenticatedStorageSettingsPayload(settings)
+    }));
+  }
 };
 
 const persistMigrationProgress = async (
@@ -3435,7 +3477,7 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
     if (typedPayload.storage) {
       const currentStorage = await getServerStorageSettings();
       currentStorageType = currentStorage?.storageType ?? null;
-      const currentS3 = currentStorage?.s3;
+      const currentS3 = currentStorage?.s3 ?? null;
       const rawStorageInput = typedPayload.storage;
       const nestedS3Input = rawStorageInput?.s3;
       const storageInput: StorageSettingsInput = {
@@ -3453,16 +3495,7 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
       };
 
         if (storageInput.enabled) {
-          const mergedS3Config = normalizeS3Config({
-          provider: storageInput.provider || currentS3?.provider || 'generic_s3',
-          providerUrl: storageInput.providerUrl || currentS3?.providerUrl || null,
-          endpoint: storageInput.endpoint || currentS3?.endpoint || null,
-          region: storageInput.region || currentS3?.region || null,
-          bucket: storageInput.bucket || currentS3?.bucket || null,
-          accessKey: storageInput.accessKey || currentS3?.accessKey || null,
-          secretKey: storageInput.secretKey || currentS3?.secretKey || null,
-          prefix: storageInput.prefix ?? currentS3?.prefix ?? null
-        });
+          const mergedS3Config = buildMergedS3ConfigFromInput(currentS3, storageInput);
           normalizedCurrentS3Config = mergedS3Config;
 
           const validation = await validateS3Configuration(mergedS3Config);
@@ -3689,7 +3722,7 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
 
     client.ws.send(JSON.stringify({
       type: 'server_storage_settings',
-      payload: buildStorageSettingsPayloadForClient(updatedStorageSettings)
+      payload: buildAdminStorageSettingsPayload(updatedStorageSettings)
     }));
   } catch (error) {
     console.error('[WS DEBUG] Failed to update server settings:', error);
@@ -3925,7 +3958,7 @@ const handleTestServerStorageS3 = async (
   }
 
   const currentStorage = await getServerStorageSettings();
-  const currentS3 = currentStorage?.s3;
+  const currentS3 = currentStorage?.s3 ?? null;
   const rawStorageInput = payload?.storage || {};
   const nestedS3Input = rawStorageInput?.s3;
   const storageInput: StorageSettingsInput = {
@@ -3943,16 +3976,7 @@ const handleTestServerStorageS3 = async (
   };
 
   try {
-    const mergedS3Config = normalizeS3Config({
-      provider: storageInput.provider || currentS3?.provider || 'generic_s3',
-      providerUrl: storageInput.providerUrl || currentS3?.providerUrl || null,
-      endpoint: storageInput.endpoint || currentS3?.endpoint || null,
-      region: storageInput.region || currentS3?.region || null,
-      bucket: storageInput.bucket || currentS3?.bucket || null,
-      accessKey: storageInput.accessKey || currentS3?.accessKey || null,
-      secretKey: storageInput.secretKey || currentS3?.secretKey || null,
-      prefix: storageInput.prefix ?? currentS3?.prefix ?? null
-    });
+    const mergedS3Config = buildMergedS3ConfigFromInput(currentS3, storageInput);
 
     const validation = await validateS3Configuration(mergedS3Config);
     client.ws.send(JSON.stringify({
@@ -3985,7 +4009,7 @@ const handleGetServerStorageSettings = async (client: ClientConnection) => {
     const settings = await getServerStorageSettings();
     client.ws.send(JSON.stringify({
       type: 'server_storage_settings',
-      payload: buildStorageSettingsPayloadForClient(settings)
+      payload: buildAdminStorageSettingsPayload(settings)
     }));
   } catch (error) {
     console.error('[WS DEBUG] Failed to read storage settings:', error);

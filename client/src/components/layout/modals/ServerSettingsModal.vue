@@ -38,6 +38,8 @@ const form = defineModel<{
     accessKey: string
     secretKey: string
     prefix: string
+    hasAccessKey: boolean
+    hasSecretKey: boolean
     status: 'data_dir' | 's3'
     lastError: string | null
   }
@@ -535,6 +537,7 @@ const onIconInputChange = (event: Event) => {
                   class="w-full bg-zinc-950 text-white rounded-lg p-2.5 outline-none border border-white/10 focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50"
                   :disabled="props.storageLocked"
                   autocomplete="off"
+                  :placeholder="form.storage.hasAccessKey ? 'Stored access key configured — leave blank to keep unchanged' : 'Enter access key'"
                 />
               </div>
 
@@ -546,6 +549,7 @@ const onIconInputChange = (event: Event) => {
                   class="w-full bg-zinc-950 text-white rounded-lg p-2.5 outline-none border border-white/10 focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50"
                   :disabled="props.storageLocked"
                   autocomplete="new-password"
+                  :placeholder="form.storage.hasSecretKey ? 'Stored secret key configured — leave blank to keep unchanged' : 'Enter secret key'"
                 />
               </div>
 

@@ -159,9 +159,9 @@ export interface ServerStorageS3Settings {
   endpoint: string;
   region: string;
   bucket: string;
-  accessKey: string;
-  secretKey: string;
   prefix: string;
+  hasAccessKey: boolean;
+  hasSecretKey: boolean;
 }
 
 export interface ServerStorageTestResult {
@@ -336,9 +336,9 @@ export const useChatStore = defineStore('chat', () => {
       endpoint: '',
       region: '',
       bucket: '',
-      accessKey: '',
-      secretKey: '',
-      prefix: ''
+      prefix: '',
+      hasAccessKey: false,
+      hasSecretKey: false
     },
     migration: {
       status: 'idle',
@@ -405,9 +405,9 @@ export const useChatStore = defineStore('chat', () => {
       endpoint: payload?.s3?.endpoint || '',
       region: payload?.s3?.region || '',
       bucket: payload?.s3?.bucket || '',
-      accessKey: payload?.s3?.accessKey || '',
-      secretKey: payload?.s3?.secretKey || '',
-      prefix: payload?.s3?.prefix || ''
+      prefix: payload?.s3?.prefix || '',
+      hasAccessKey: payload?.s3?.hasAccessKey === true,
+      hasSecretKey: payload?.s3?.hasSecretKey === true
     },
     migration: {
       status: payload?.migration?.status === 'running' || payload?.migration?.status === 'failed'
@@ -1229,20 +1229,20 @@ export const useChatStore = defineStore('chat', () => {
           endpoint: '',
           region: '',
           bucket: '',
-          accessKey: '',
-          secretKey: '',
-        prefix: ''
-      },
-      migration: {
-        status: 'idle',
-        target: null,
-        total: 0,
-        done: 0,
-        message: null,
-        startedAt: null,
-        updatedAt: null
-      }
-    };
+          hasAccessKey: false,
+          hasSecretKey: false,
+          prefix: ''
+        },
+        migration: {
+          status: 'idle',
+          target: null,
+          total: 0,
+          done: 0,
+          message: null,
+          startedAt: null,
+          updatedAt: null
+        }
+      };
   };
 
   const messageListeners = ref<((message: any) => void)[]>([]);
