@@ -55,7 +55,10 @@ import {
   updateMessageAttachmentStorage,
   getServerRoles,
   getServerRoleById,
-  updateServerRole
+  updateServerRole,
+  hydrateUserWithServerRoles,
+  setUserServerRoles,
+  userHasServerRoleKey
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -555,6 +558,26 @@ const canDeleteMessage = (role: string | null | undefined, messageUserId: string
     return true;
   }
   return role === 'admin' || role === 'owner';
+};
+
+const getActiveServerId = async () => {
+  const server = await getServer();
+  return server?.id || null;
+};
+
+const getResolvedUser = async (userId: string) => {
+  const user = await getUserById(userId);
+  if (!user) return null;
+  const serverId = await getActiveServerId();
+  if (!serverId) return { ...user, role_ids: [], roles: [] };
+  return hydrateUserWithServerRoles(serverId, user);
+};
+
+const hasResolvedRole = async (userId: string, roleKeys: string[]) => {
+  const serverId = await getActiveServerId();
+  const user = await getUserById(userId);
+  if (!serverId || !user) return false;
+  return userHasServerRoleKey(serverId, user, roleKeys);
 };
 
 const deleteStoredMessageAttachment = async (channelId: string, attachment: {
@@ -1479,6 +1502,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'update_server_role':
         await handleUpdateServerRole(client, payload);
         break;
+      case 'assign_member_roles':
+        await handleAssignMemberRoles(client, payload);
+        break;
       case 'get_server_storage_settings':
         await handleGetServerStorageSettings(client);
         break;
@@ -1671,7 +1697,7 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
         }
 
         const server = await getServer();
-        const userWithUpdatedIp = await getUserById(user.id);
+        const userWithUpdatedIp = await getResolvedUser(user.id);
         client.ws.send(JSON.stringify({
           type: 'authenticated',
           payload: { user: userWithUpdatedIp || user, server }
@@ -1679,6 +1705,7 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
 
         // Send full member list to the newly authenticated user
         const allUsers = await getUsers();
+        const hydratedUsers = server?.id ? await Promise.all(allUsers.map((member) => hydrateUserWithServerRoles(server.id, member))) : allUsers;
         const onlineUserIds = connectionManager.getOnlineUserIds();
         const memberIps = Object.fromEntries(
           allUsers.map((member) => [member.id, member.last_ip || connectionManager.getUserIp(member.id) || null])
@@ -1686,7 +1713,7 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
         client.ws.send(JSON.stringify({
           type: 'member_list',
           payload: {
-            members: allUsers,
+            members: hydratedUsers,
             onlineUserIds,
             memberIps
           }
@@ -1846,7 +1873,7 @@ const handleCreateChannel = async (
   }
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can create channels' } }));
     return;
   }
@@ -1879,7 +1906,7 @@ const handleCreateCategory = async (
   }
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can create categories' } }));
     return;
   }
@@ -1905,7 +1932,7 @@ const handleReorderChannels = async (
   if (!client.userId) return;
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can reorder channels' } }));
     return;
   }
@@ -1972,7 +1999,7 @@ const handleReorderCategories = async (
   if (!client.userId) return;
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can reorder categories' } }));
     return;
   }
@@ -2029,7 +2056,7 @@ const handleDeleteCategory = async (client: ClientConnection, payload: { categor
   }
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can delete categories' } }));
     return;
   }
@@ -2063,7 +2090,7 @@ const handleDeleteUncategorizedCategory = async (client: ClientConnection) => {
   if (!client.userId) return;
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can delete categories' } }));
     return;
   }
@@ -2090,7 +2117,7 @@ const handleDeleteChannel = async (client: ClientConnection, payload: { channel_
   }
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can delete channels' } }));
     return;
   }
@@ -2208,7 +2235,7 @@ const handleBeginFileUpload = async (
       return;
     }
 
-    const user = await getUserById(client.userId);
+    const user = await getResolvedUser(client.userId);
     if (!user || user.role !== 'admin') {
       client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can upload files' } }));
       return;
@@ -2480,7 +2507,7 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     return;
   }
 
-  const user = await getUserById(client.userId);
+  const user = await getResolvedUser(client.userId);
   if (!user) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
     return;
@@ -2688,7 +2715,7 @@ const handleFolderUploadFile = async (
     return;
   }
 
-  const user = await getUserById(client.userId);
+  const user = await getResolvedUser(client.userId);
   if (!user || user.role !== 'admin') {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can upload files' } }));
     return;
@@ -2861,7 +2888,7 @@ const handleFolderDeleteFile = async (
     return;
   }
 
-  const user = await getUserById(client.userId);
+  const user = await getResolvedUser(client.userId);
   if (!user || !hasFolderManagementAccess(user.role)) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions to delete files' } }));
     return;
@@ -3317,11 +3344,22 @@ const handleSubmitAdminKey = async (client: ClientConnection, payload: { key: st
   setAdminKeyEnabled(true);
 
   if (consumeAdminKey(key)) {
-    await updateUserRole(client.userId, 'admin');
-    const user = await getUserById(client.userId);
+    const serverId = await getActiveServerId();
+    if (serverId) {
+      const roles = await getServerRoles(serverId);
+      const adminRoleId = roles.find((role) => role.key === 'admin')?.id;
+      if (adminRoleId) {
+        await setUserServerRoles(serverId, client.userId, [adminRoleId]);
+      } else {
+        await updateUserRole(client.userId, 'admin');
+      }
+    } else {
+      await updateUserRole(client.userId, 'admin');
+    }
+    const user = await getResolvedUser(client.userId);
     client.ws.send(JSON.stringify({
       type: 'role_updated',
-      payload: { role: 'admin', user }
+      payload: { role: user?.role || 'admin', user }
     }));
     
     // Broadcast user update to all authenticated clients
@@ -3338,7 +3376,7 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
   if (!client.userId) return;
   
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can update server settings' } }));
     return;
   }
@@ -3682,7 +3720,7 @@ const handleUpdateServerRole = async (
   if (!client.userId) return;
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can update roles' } }));
     return;
   }
@@ -3749,6 +3787,55 @@ const handleUpdateServerRole = async (
   }
 };
 
+const handleAssignMemberRoles = async (
+  client: ClientConnection,
+  payload: { serverId?: string; userId?: string; roleIds?: string[] }
+) => {
+  if (!client.userId) return;
+
+  if (!(await hasResolvedRole(client.userId, ['admin']))) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can assign member roles' } }));
+    return;
+  }
+
+  const serverId = typeof payload?.serverId === 'string' ? payload.serverId.trim() : '';
+  const userId = typeof payload?.userId === 'string' ? payload.userId.trim() : '';
+  const roleIds = Array.isArray(payload?.roleIds)
+    ? payload.roleIds.filter((roleId): roleId is string => typeof roleId === 'string' && roleId.trim().length > 0)
+    : [];
+
+  if (!serverId || !userId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID and user ID are required' } }));
+    return;
+  }
+
+  try {
+    await setUserServerRoles(serverId, userId, roleIds);
+    const hydratedUser = await getResolvedUser(userId);
+    if (!hydratedUser) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
+      return;
+    }
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'user_updated',
+      payload: { user: hydratedUser }
+    });
+
+    client.ws.send(JSON.stringify({
+      type: 'member_roles_updated',
+      payload: {
+        serverId,
+        user: hydratedUser,
+        roleIds: hydratedUser.role_ids || []
+      }
+    }));
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to assign member roles:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to assign member roles' } }));
+  }
+};
+
 const handleTestServerStorageS3 = async (
   client: ClientConnection,
   payload: {
@@ -3779,7 +3866,7 @@ const handleTestServerStorageS3 = async (
   if (!client.userId) return;
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can test storage settings' } }));
     return;
   }
@@ -3836,7 +3923,7 @@ const handleGetServerStorageSettings = async (client: ClientConnection) => {
   if (!client.userId) return;
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can read storage settings' } }));
     return;
   }
@@ -4063,7 +4150,7 @@ const handleKickMember = async (
   }
 ) => {
   if (!client.userId) return;
-  const moderator = await getUserById(client.userId);
+  const moderator = await getResolvedUser(client.userId);
   if (!moderator || !canModerate(moderator.role)) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions' } }));
     return;
@@ -4172,7 +4259,7 @@ const handleBanMember = async (
   }
 ) => {
   if (!client.userId) return;
-  const moderator = await getUserById(client.userId);
+  const moderator = await getResolvedUser(client.userId);
   if (!moderator || !canModerate(moderator.role)) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions' } }));
     return;

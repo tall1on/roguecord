@@ -106,6 +106,11 @@ export interface ServerRole {
   updatedAt: string | null;
 }
 
+export interface UserWithServerRoles extends User {
+  role_ids: string[];
+  roles: ServerRole[];
+}
+
 const mapServerRow = (row: any): Server => ({
   id: row.id,
   name: row.name,
@@ -233,6 +238,124 @@ export const getServerRoles = async (serverId: string): Promise<ServerRole[]> =>
     [serverId]
   );
   return rows.map(mapServerRoleRow);
+};
+
+const getServerRolesByIds = async (serverId: string, roleIds: string[]): Promise<ServerRole[]> => {
+  if (!roleIds.length) {
+    return [];
+  }
+
+  const placeholders = roleIds.map(() => '?').join(', ');
+  const rows = await dbAll<any>(
+    `SELECT * FROM server_roles WHERE server_id = ? AND id IN (${placeholders}) ORDER BY position ASC, name COLLATE NOCASE ASC`,
+    [serverId, ...roleIds]
+  );
+  return rows.map(mapServerRoleRow);
+};
+
+export const getUserServerRoleIds = async (serverId: string, userId: string, legacyRole?: string | null): Promise<string[]> => {
+  await ensureDefaultRolesForServer(serverId);
+  const rows = await dbAll<{ id: string; key: string }>(
+    `
+      SELECT sr.id, sr.key
+      FROM user_server_roles usr
+      INNER JOIN server_roles sr ON sr.id = usr.server_role_id
+      WHERE usr.user_id = ? AND sr.server_id = ?
+      ORDER BY sr.position ASC, sr.name COLLATE NOCASE ASC
+    `,
+    [userId, serverId]
+  );
+
+  const resolvedIds = rows.map((row) => row.id);
+  if (resolvedIds.length > 0) {
+    return Array.from(new Set(resolvedIds));
+  }
+
+  const fallbackRoles = await getServerRoles(serverId);
+  const defaultRoleIds = fallbackRoles.filter((role) => role.key === 'all_users').map((role) => role.id);
+  const legacyKey = (legacyRole || '').trim();
+  const legacyRoleIds = legacyKey && legacyKey !== 'user'
+    ? fallbackRoles.filter((role) => role.key === legacyKey).map((role) => role.id)
+    : [];
+
+  return Array.from(new Set([...defaultRoleIds, ...legacyRoleIds]));
+};
+
+export const getUserServerRoles = async (serverId: string, userId: string, legacyRole?: string | null): Promise<ServerRole[]> => {
+  const roleIds = await getUserServerRoleIds(serverId, userId, legacyRole);
+  return getServerRolesByIds(serverId, roleIds);
+};
+
+export const setUserServerRoles = async (serverId: string, userId: string, roleIds: string[]): Promise<ServerRole[]> => {
+  await ensureDefaultRolesForServer(serverId);
+  const availableRoles = await getServerRoles(serverId);
+  const roleById = new Map(availableRoles.map((role) => [role.id, role]));
+  const normalizedRoleIds = Array.from(new Set(roleIds.filter((roleId) => roleById.has(roleId))));
+  const defaultRoleIds = availableRoles.filter((role) => role.key === 'all_users').map((role) => role.id);
+  const finalRoleIds = Array.from(new Set([...defaultRoleIds, ...normalizedRoleIds]));
+
+  await dbRun('BEGIN TRANSACTION');
+  try {
+    await dbRun(
+      `
+        DELETE FROM user_server_roles
+        WHERE user_id = ?
+          AND server_role_id IN (
+            SELECT id FROM server_roles WHERE server_id = ?
+          )
+      `,
+      [userId, serverId]
+    );
+
+    for (const roleId of finalRoleIds) {
+      await dbRun('INSERT OR IGNORE INTO user_server_roles (user_id, server_role_id) VALUES (?, ?)', [userId, roleId]);
+    }
+
+    const adminAssigned = finalRoleIds.some((roleId) => roleById.get(roleId)?.key === 'admin');
+    await updateUserRole(userId, adminAssigned ? 'admin' : 'user');
+    await dbRun('COMMIT');
+  } catch (error) {
+    try {
+      await dbRun('ROLLBACK');
+    } catch {
+      // no-op
+    }
+    throw error;
+  }
+
+  return getUserServerRoles(serverId, userId);
+};
+
+export const hydrateUserWithServerRoles = async (serverId: string, user: User): Promise<UserWithServerRoles> => {
+  const roles = await getUserServerRoles(serverId, user.id, user.role);
+  return {
+    ...user,
+    role: roles.find((entry) => entry.key !== 'all_users')?.key || roles[0]?.key || user.role || 'user',
+    role_ids: roles.map((role) => role.id),
+    roles
+  };
+};
+
+export const hydrateUsersWithServerRoles = async (serverId: string, users: User[]): Promise<UserWithServerRoles[]> => {
+  const hydratedUsers: UserWithServerRoles[] = [];
+  for (const user of users) {
+    hydratedUsers.push(await hydrateUserWithServerRoles(serverId, user));
+  }
+  return hydratedUsers;
+};
+
+export const userHasServerRoleKey = async (serverId: string, user: User | undefined, roleKeys: string[]): Promise<boolean> => {
+  if (!user) {
+    return false;
+  }
+
+  const normalizedRoleKeys = new Set(roleKeys.map((key) => key.trim()).filter(Boolean));
+  if (normalizedRoleKeys.has(user.role)) {
+    return true;
+  }
+
+  const roles = await getUserServerRoles(serverId, user.id, user.role);
+  return roles.some((role) => normalizedRoleKeys.has(role.key));
 };
 
 export const getServerRoleById = async (serverId: string, roleId: string): Promise<ServerRole | undefined> => {
@@ -423,7 +546,20 @@ export const getUsers = async (): Promise<User[]> => {
 };
 
 export const hasAdminUser = async (): Promise<boolean> => {
-  const row = await dbGet<{ id: string }>('SELECT id FROM users WHERE role = ? LIMIT 1', ['admin']);
+  const legacyRow = await dbGet<{ id: string }>('SELECT id FROM users WHERE role = ? LIMIT 1', ['admin']);
+  if (legacyRow) {
+    return true;
+  }
+
+  const row = await dbGet<{ id: string }>(
+    `
+      SELECT usr.user_id AS id
+      FROM user_server_roles usr
+      INNER JOIN server_roles sr ON sr.id = usr.server_role_id
+      WHERE sr.key = 'admin'
+      LIMIT 1
+    `
+  );
   return !!row;
 };
 
