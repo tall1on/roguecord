@@ -180,7 +180,7 @@ export const ensureDefaultRolesForServer = async (serverId: string): Promise<voi
   await dbRun(
     `
       INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, position)
-      SELECT ?, ?, 'all_users', 'all users', NULL, 1, 0, 0
+      SELECT ?, ?, 'all_users', 'User', NULL, 1, 0, 0
       WHERE NOT EXISTS (
         SELECT 1 FROM server_roles WHERE server_id = ? AND key = 'all_users'
       )
@@ -191,7 +191,7 @@ export const ensureDefaultRolesForServer = async (serverId: string): Promise<voi
   await dbRun(
     `
       INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, position)
-      SELECT ?, ?, 'admin', 'admin', NULL, 1, 0, 1
+      SELECT ?, ?, 'admin', 'Admin', '#c41717', 1, 0, 1
       WHERE NOT EXISTS (
         SELECT 1 FROM server_roles WHERE server_id = ? AND key = 'admin'
       )
@@ -203,6 +203,15 @@ export const ensureDefaultRolesForServer = async (serverId: string): Promise<voi
     `
       UPDATE server_roles
       SET
+        name = CASE
+          WHEN key = 'all_users' THEN 'User'
+          WHEN key = 'admin' THEN 'Admin'
+          ELSE name
+        END,
+        color = CASE
+          WHEN key = 'admin' THEN '#c41717'
+          ELSE color
+        END,
         is_default = CASE WHEN key IN ('all_users', 'admin') THEN 1 ELSE is_default END,
         is_deletable = CASE WHEN key IN ('all_users', 'admin') THEN 0 ELSE is_deletable END,
         position = CASE
