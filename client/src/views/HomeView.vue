@@ -1235,14 +1235,16 @@ watch(
                 </div>
               </div>
               <div v-if="getMessageReactions(entry.message).length > 0" class="mt-2 flex flex-wrap gap-2">
-                <button
-                  v-for="reaction in getMessageReactions(entry.message)"
-                  :key="`${entry.message.id}-${reaction.emoji}`"
-                  type="button"
-                  class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
-                  :class="reaction.reacted_by_current_user ? 'border-indigo-400/50 bg-indigo-500/15 text-indigo-200' : 'border-white/10 bg-zinc-900/70 text-zinc-300 hover:bg-zinc-800/80'"
-                  @click="toggleMessageReaction(entry.message, reaction.emoji)"
-                >
+                  <button
+                    v-for="reaction in getMessageReactions(entry.message)"
+                    :key="`${entry.message.id}-${reaction.emoji}`"
+                    type="button"
+                    class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium shadow-sm transition-all duration-150"
+                    :class="reaction.reacted_by_current_user
+                      ? 'border-indigo-300/45 bg-indigo-400/20 text-indigo-100 shadow-indigo-950/20 hover:bg-indigo-400/26'
+                      : 'border-white/10 bg-zinc-900/70 text-zinc-300 hover:bg-zinc-800/80'"
+                    @click="toggleMessageReaction(entry.message, reaction.emoji)"
+                  >
                   <span>{{ reaction.emoji }}</span>
                   <span>{{ reaction.count }}</span>
                 </button>
