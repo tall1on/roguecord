@@ -403,7 +403,7 @@ const handleTestStorageConnection = async () => {
   s3LastSuccessfulFingerprint.value = null
 }
 
-const saveServerSettings = () => {
+const saveServerSettings = async () => {
   if (!chatStore.server) {
     return
   }
@@ -443,18 +443,35 @@ const saveServerSettings = () => {
     serverSettingsStorageMigrationLock.value = true
   }
 
-  chatStore.updateServerSettings(
-    chatStore.server.id,
-    serverSettingsForm.value.title,
-    serverSettingsForm.value.rulesChannelId || null,
-    serverSettingsForm.value.welcomeChannelId || null,
-    nextStoragePayload,
-    {
-      iconDataUrl: serverIconDataUrl.value,
-      removeIcon: removeServerIcon.value
-    }
-  )
-  serverSettingsSaveMessage.value = 'Saving settings...'
+  try {
+    const updatedRoleCount = await chatStore.updateServerRoles(
+      serverSettingsForm.value.roles.map((role) => ({
+        id: role.id,
+        name: role.name,
+        color: role.color || null
+      }))
+    )
+
+    chatStore.updateServerSettings(
+      chatStore.server.id,
+      serverSettingsForm.value.title,
+      serverSettingsForm.value.rulesChannelId || null,
+      serverSettingsForm.value.welcomeChannelId || null,
+      nextStoragePayload,
+      {
+        iconDataUrl: serverIconDataUrl.value,
+        removeIcon: removeServerIcon.value
+      }
+    )
+
+    serverSettingsSaveMessage.value = updatedRoleCount > 0
+      ? 'Saving settings and roles...'
+      : 'Saving settings...'
+  } catch (error) {
+    serverSettingsSaveError.value = error instanceof Error ? error.message : 'Failed to prepare role changes'
+    serverSettingsSaveMessage.value = null
+    resetServerSettingsStorageLock()
+  }
 }
 
 const handleServerIconSelected = (file: File) => {
@@ -508,6 +525,14 @@ const handleChatStoreMessage = (message: any) => {
   }
 
   if (!showServerSettingsModal.value) {
+    return
+  }
+
+  if (message.type === 'server_role_updated') {
+    serverSettingsSaveError.value = null
+    if (!serverSettingsSaveMessage.value) {
+      serverSettingsSaveMessage.value = 'Saving roles...'
+    }
     return
   }
 

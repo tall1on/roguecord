@@ -199,6 +199,12 @@ export interface ServerRole {
   updatedAt: string | null;
 }
 
+type ServerRoleFormInput = {
+  id: string;
+  name: string;
+  color: string | null;
+};
+
 export interface ActiveMainPanel {
   type: 'text' | 'voice' | 'folder';
   channelId: string | null;
@@ -470,6 +476,19 @@ export const useChatStore = defineStore('chat', () => {
 
   const applyServerRoles = (roles: unknown) => {
     serverRoles.value = normalizeServerRoles(roles);
+  };
+
+  const getServerRoleByKey = (roleKey: string | null | undefined) => {
+    const normalizedRoleKey = typeof roleKey === 'string' ? roleKey.trim() : '';
+    if (!normalizedRoleKey) {
+      return null;
+    }
+
+    return serverRoles.value.find((role) => role.key === normalizedRoleKey) || null;
+  };
+
+  const getServerRoleColor = (roleKey: string | null | undefined) => {
+    return getServerRoleByKey(roleKey)?.color || null;
   };
 
   const readBlobAsArrayBuffer = (blob: Blob) => {
@@ -2041,6 +2060,42 @@ export const useChatStore = defineStore('chat', () => {
     });
   };
 
+  const updateServerRoles = async (roles: ServerRoleFormInput[]) => {
+    const normalizedRoles = roles.map((role) => ({
+      id: role.id,
+      name: role.name.trim(),
+      color: (() => {
+        const normalizedColor = (role.color || '').trim().toLowerCase();
+        return /^#([0-9a-f]{6})$/.test(normalizedColor) ? normalizedColor : null;
+      })()
+    }));
+
+    const existingRoles = normalizedRoles.map((role) => serverRoles.value.find((existingRole) => existingRole.id === role.id));
+    const invalidRole = normalizedRoles.find((role) => !role.name);
+    if (invalidRole) {
+      throw new Error('Role name is required');
+    }
+
+    if (existingRoles.some((role) => !role)) {
+      throw new Error('Role metadata is out of date. Reopen server settings and try again.');
+    }
+
+    const changedRoles = normalizedRoles.filter((role, index) => {
+      const existingRole = existingRoles[index];
+      if (!existingRole) {
+        return false;
+      }
+
+      return role.name !== existingRole.name || role.color !== existingRole.color;
+    });
+
+    for (const role of changedRoles) {
+      updateServerRole(role.id, role.name, role.color);
+    }
+
+    return changedRoles.length;
+  };
+
   const clearError = () => {
     lastError.value = null;
   };
@@ -2357,6 +2412,9 @@ export const useChatStore = defineStore('chat', () => {
     updateServerSettings,
     requestServerRoles,
     updateServerRole,
+    updateServerRoles,
+    getServerRoleByKey,
+    getServerRoleColor,
     testServerStorageSettings,
     requestServerStorageSettings,
     requestServerRefresh,
