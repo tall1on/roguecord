@@ -11,6 +11,7 @@ const moderationAction = ref<'kick' | 'ban'>('kick')
 const selectedMember = ref<User | null>(null)
 const reason = ref('')
 const deleteMode = ref<ModerationDeleteMode>('none')
+const isAssigningRoles = ref(false)
 const contextMenu = ref<{ visible: boolean; x: number; y: number; member: User | null }>({
   visible: false,
   x: 0,
@@ -21,6 +22,10 @@ const blacklistIdentity = ref(true)
 const blacklistIp = ref(false)
 
 const isAdmin = computed(() => chatStore.userHasRole(chatStore.currentUser, ['admin']))
+
+const assignableRoles = computed(() => {
+  return chatStore.serverRoles.filter((role) => role.key !== 'all_users')
+})
 
 const roleMap = computed(() => {
   const map = new Map<string, ServerRole>()
@@ -75,6 +80,41 @@ const closeContextMenu = () => {
     y: 0,
     member: null
   }
+}
+
+const isRoleAssignedToMember = (user: User | null, roleId: string) => {
+  if (!user) return false
+  return Array.isArray(user.role_ids) && user.role_ids.includes(roleId)
+}
+
+const toggleRoleAssignment = async (roleId: string) => {
+  const member = contextMenu.value.member
+  if (!member || !chatStore.server?.id || isAssigningRoles.value) return
+
+  const currentRoleIds = Array.isArray(member.role_ids) ? member.role_ids : []
+  const nextRoleIds = currentRoleIds.includes(roleId)
+    ? currentRoleIds.filter((id) => id !== roleId)
+    : [...currentRoleIds, roleId]
+
+  isAssigningRoles.value = true
+  try {
+    await chatStore.assignMemberRoles(chatStore.server.id, member.id, nextRoleIds)
+    const updatedMember = chatStore.users.find((user) => user.id === member.id) || null
+    contextMenu.value = {
+      ...contextMenu.value,
+      member: updatedMember
+    }
+  } finally {
+    isAssigningRoles.value = false
+  }
+}
+
+const getRoleButtonClass = (assigned: boolean) => {
+  if (assigned) {
+    return 'text-white bg-zinc-900/90'
+  }
+
+  return 'text-zinc-300 hover:text-white hover:bg-zinc-900'
 }
 
 const openContextMenu = (event: MouseEvent, user: User) => {
@@ -252,10 +292,27 @@ onUnmounted(() => {
 
     <div
       v-if="contextMenu.visible"
-      class="fixed z-[70] min-w-[10rem] bg-zinc-950 border border-white/10 rounded-xl shadow-2xl py-1 backdrop-blur-md"
+      class="fixed z-[70] min-w-[14rem] bg-zinc-950 border border-white/10 rounded-xl shadow-2xl py-1 backdrop-blur-md"
       :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
       @click.stop
     >
+      <div v-if="contextMenu.member && assignableRoles.length > 0" class="px-1 py-1 border-b border-white/5 mb-1">
+        <div class="px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-zinc-500">Roles</div>
+        <button
+          v-for="role in assignableRoles"
+          :key="role.id"
+          class="w-full flex items-center justify-between gap-3 text-left px-3 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+          :class="getRoleButtonClass(isRoleAssignedToMember(contextMenu.member, role.id))"
+          :disabled="isAssigningRoles"
+          @click="toggleRoleAssignment(role.id)"
+        >
+          <span class="flex items-center gap-2 min-w-0">
+            <span class="w-2.5 h-2.5 rounded-full shrink-0" :style="{ backgroundColor: role.color || '#71717a' }"></span>
+            <span class="truncate">{{ role.name }}</span>
+          </span>
+          <span class="text-[11px] uppercase tracking-wider text-zinc-500">{{ isRoleAssignedToMember(contextMenu.member, role.id) ? 'On' : 'Off' }}</span>
+        </button>
+      </div>
       <button
         class="w-full text-left px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-zinc-900 font-medium transition-colors"
         @click="openModerationFromContextMenu('kick')"

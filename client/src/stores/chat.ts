@@ -1589,6 +1589,22 @@ export const useChatStore = defineStore('chat', () => {
         memberIps.value = payload.memberIps || {};
         break;
 
+      case 'member_roles_updated': {
+        const updatedUser = normalizeUser(payload.user);
+        const existingIndex = users.value.findIndex((user) => user.id === updatedUser.id);
+        if (existingIndex >= 0) {
+          const nextUsers = [...users.value];
+          nextUsers.splice(existingIndex, 1, updatedUser);
+          users.value = nextUsers;
+        }
+
+        if (currentUser.value?.id === updatedUser.id) {
+          currentUser.value = updatedUser;
+          currentUserRole.value = updatedUser.role;
+        }
+        break;
+      }
+
       case 'member_removed': {
         const removedUserId = (payload.userId || payload.targetUserId) as string | undefined;
         if (!removedUserId) break;

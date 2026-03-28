@@ -3811,7 +3811,8 @@ const handleAssignMemberRoles = async (
 
   try {
     await setUserServerRoles(serverId, userId, roleIds);
-    const hydratedUser = await getResolvedUser(userId);
+    const baseUser = await getUserById(userId);
+    const hydratedUser = baseUser ? await hydrateUserWithServerRoles(serverId, baseUser) : null;
     if (!hydratedUser) {
       client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
       return;
