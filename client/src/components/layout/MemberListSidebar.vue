@@ -20,42 +20,43 @@ const contextMenu = ref<{ visible: boolean; x: number; y: number; member: User |
 const blacklistIdentity = ref(true)
 const blacklistIp = ref(false)
 
-const isAdmin = computed(() => chatStore.currentUserRole === 'admin')
+const isAdmin = computed(() => chatStore.userHasRole(chatStore.currentUser, ['admin']))
 
 const roleMap = computed(() => {
   const map = new Map<string, ServerRole>()
   for (const role of chatStore.serverRoles) {
+    map.set(role.id, role)
     map.set(role.key, role)
   }
   return map
 })
 
-const getDisplayRole = (roleKey: string) => chatStore.getServerRoleByKey(roleKey) || roleMap.value.get(roleKey) || null
+const getDisplayRole = (user: User) => chatStore.getPrimaryServerRole(user) || roleMap.value.get(user.role) || null
 
-const getDisplayRoleName = (roleKey: string) => {
-  const role = getDisplayRole(roleKey)
+const getDisplayRoleName = (user: User) => {
+  const role = getDisplayRole(user)
   if (role) {
     return role.name
   }
 
-  return roleKey || 'all users'
+  return user.role || 'all users'
 }
 
-const getDisplayRoleColor = (roleKey: string) => chatStore.getServerRoleColor(roleKey) || getDisplayRole(roleKey)?.color || null
+const getDisplayRoleColor = (user: User) => getDisplayRole(user)?.color || chatStore.getServerRoleColor(user.role) || null
 
-const getRoleHeading = (roleKey: string) => {
-  const label = getDisplayRoleName(roleKey)
+const getRoleHeading = (user: User) => {
+  const label = getDisplayRoleName(user)
   return label.endsWith('s') ? label : `${label}s`
 }
 
 const isHiddenSystemMember = (user: User) => {
-  return user.role === 'system' || (user.role === 'bot' && user.username === 'RSS Bot')
+  return chatStore.userHasRole(user, ['system']) || (chatStore.userHasRole(user, ['bot']) && user.username === 'RSS Bot')
 }
 
 const canModerate = (user: User) => {
   if (!isAdmin.value || !chatStore.currentUser) return false
   if (chatStore.currentUser.id === user.id) return false
-  return user.role !== 'admin'
+  return !chatStore.userHasRole(user, ['admin'])
 }
 
 const resetModerationForm = () => {
@@ -153,7 +154,7 @@ const groupedMembers = computed(() => {
 
   const onlineByRole: Record<string, typeof online> = {}
   online.forEach((u) => {
-    const role = u.role || 'all_users'
+    const role = chatStore.getPrimaryServerRole(u)?.id || u.role || 'all_users'
 
     if (!onlineByRole[role]) onlineByRole[role] = []
     onlineByRole[role]!.push(u)
@@ -201,8 +202,8 @@ onUnmounted(() => {
   <aside v-if="chatStore.isConnected && chatStore.activeChannelId" class="w-60 bg-zinc-950 flex flex-col shrink-0 border-l border-white/5">
     <div class="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar">
       <div v-for="(members, role) in groupedMembers.onlineByRole" :key="role">
-        <h3 class="text-xs font-bold uppercase tracking-widest mb-3 px-2" :style="{ color: getDisplayRoleColor(role) || '#71717a' }">
-          {{ getRoleHeading(role) }} — {{ members.length }}
+        <h3 class="text-xs font-bold uppercase tracking-widest mb-3 px-2" :style="{ color: members[0] ? getDisplayRoleColor(members[0]) || '#71717a' : '#71717a' }">
+          {{ members[0] ? getRoleHeading(members[0]) : 'Members' }} — {{ members.length }}
         </h3>
         <div class="space-y-0.5">
           <div
@@ -217,7 +218,7 @@ onUnmounted(() => {
               <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-950 group-hover:border-zinc-900 bg-green-500 transition-colors"></div>
             </div>
             <div class="flex-1 min-w-0">
-              <div class="text-[13px] font-semibold truncate transition-colors group-hover:text-white" :style="{ color: getDisplayRoleColor(user.role || 'all_users') || '#d4d4d8' }">{{ user.username }}</div>
+              <div class="text-[13px] font-semibold truncate transition-colors group-hover:text-white" :style="{ color: getDisplayRoleColor(user) || '#d4d4d8' }">{{ user.username }}</div>
             </div>
           </div>
         </div>
@@ -240,7 +241,7 @@ onUnmounted(() => {
               <div class="absolute bottom-0 right-0 w-3 h-3 bg-zinc-600 rounded-full border-2 border-zinc-950 group-hover:border-zinc-900 transition-colors"></div>
             </div>
             <div class="flex-1 min-w-0">
-              <div class="text-[13px] font-medium truncate transition-colors group-hover:text-zinc-300" :style="{ color: getDisplayRoleColor(user.role || 'all_users') ? `${getDisplayRoleColor(user.role || 'all_users')}b3` : '#71717a' }">{{ user.username }}</div>
+              <div class="text-[13px] font-medium truncate transition-colors group-hover:text-zinc-300" :style="{ color: getDisplayRoleColor(user) ? `${getDisplayRoleColor(user)}b3` : '#71717a' }">{{ user.username }}</div>
             </div>
           </div>
         </div>

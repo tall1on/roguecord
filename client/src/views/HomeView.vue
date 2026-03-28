@@ -51,8 +51,7 @@ const activeFolderFiles = computed<FolderChannelFile[]>(() => {
 })
 
 const canManageFolderFiles = computed(() => {
-  const role = chatStore.currentUserRole || 'user'
-  return role === 'admin' || role === 'owner'
+  return chatStore.userHasRole(chatStore.currentUser, ['admin', 'owner'])
 })
 
 const canUploadToFolder = computed(() => canManageFolderFiles.value)
@@ -211,8 +210,7 @@ const openScreenContextMenu = (event: MouseEvent, userId: string) => {
 
 const canDeleteMessage = (message: Message) => {
   const currentUserId = chatStore.currentUser?.id
-  const currentRole = chatStore.currentUserRole || 'user'
-  return message.user_id === currentUserId || currentRole === 'admin' || currentRole === 'owner'
+  return message.user_id === currentUserId || chatStore.userHasRole(chatStore.currentUser, ['admin', 'owner'])
 }
 
 const canReplyToMessage = (message: Message) => {
@@ -549,8 +547,8 @@ const isReadOnlyRssChannel = computed(() => {
     return false
   }
 
-  const role = chatStore.currentUserRole || 'user'
-  return !privilegedRoles.has(role)
+  const roleKeys = chatStore.getUserRoleKeys(chatStore.currentUser)
+  return !roleKeys.some((role) => privilegedRoles.has(role))
 })
 
 const messagePlaceholder = computed(() => {

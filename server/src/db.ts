@@ -21,6 +21,7 @@ export const channelsSchemaReady = new Promise<void>((resolve, reject) => {
 let serversSchemaMigrated = false;
 let usersSchemaMigrated = false;
 let rolesSchemaMigrated = false;
+let userServerRolesSchemaMigrated = false;
 let channelsSchemaMigrated = false;
 let folderFilesSchemaMigrated = false;
 let messageAttachmentsSchemaMigrated = false;
@@ -31,17 +32,18 @@ function failSchemaInitialization(error: Error) {
   rejectChannelsSchemaReady?.(error);
 }
 
-function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions') {
+function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'user_server_roles' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions') {
   if (step === 'servers') serversSchemaMigrated = true;
   if (step === 'users') usersSchemaMigrated = true;
   if (step === 'roles') rolesSchemaMigrated = true;
+  if (step === 'user_server_roles') userServerRolesSchemaMigrated = true;
   if (step === 'channels') channelsSchemaMigrated = true;
   if (step === 'folder_files') folderFilesSchemaMigrated = true;
   if (step === 'message_attachments') messageAttachmentsSchemaMigrated = true;
   if (step === 'messages') messagesSchemaMigrated = true;
   if (step === 'message_reactions') messageReactionsSchemaMigrated = true;
 
-  if (serversSchemaMigrated && usersSchemaMigrated && rolesSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated) {
+  if (serversSchemaMigrated && usersSchemaMigrated && rolesSchemaMigrated && userServerRolesSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated) {
     resolveChannelsSchemaReady?.();
   }
 }
@@ -183,6 +185,39 @@ function initializeDatabase() {
 
           markSchemaStepDone('roles');
         });
+      });
+    });
+
+    // User Server Roles Table
+    db.run(`
+      CREATE TABLE IF NOT EXISTS user_server_roles (
+        user_id TEXT NOT NULL,
+        server_role_id TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, server_role_id),
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (server_role_id) REFERENCES server_roles(id)
+      )
+    `, (err) => {
+      if (err) {
+        console.error('Error creating user_server_roles table:', err.message);
+        failSchemaInitialization(err);
+        return;
+      }
+
+      migrateUserServerRolesTableSchema((migrationErr) => {
+        if (migrationErr) {
+          console.error('Error migrating user_server_roles table:', migrationErr.message);
+          failSchemaInitialization(migrationErr);
+          return;
+        }
+
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_user_server_roles_user_id ON user_server_roles(user_id)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_user_server_roles_role_id ON user_server_roles(server_role_id)');
+        });
+
+        markSchemaStepDone('user_server_roles');
       });
     });
 
@@ -1150,6 +1185,109 @@ function ensureDefaultServerRoles(done: (error?: Error) => void) {
     };
 
     ensureForServer(0);
+  });
+}
+
+function migrateUserServerRolesTableSchema(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(user_server_roles)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasUserId = columns.some((column) => column.name === 'user_id');
+    const hasServerRoleId = columns.some((column) => column.name === 'server_role_id');
+    const hasCreatedAt = columns.some((column) => column.name === 'created_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasUserId) pendingAlterStatements.push('ALTER TABLE user_server_roles ADD COLUMN user_id TEXT');
+    if (!hasServerRoleId) pendingAlterStatements.push('ALTER TABLE user_server_roles ADD COLUMN server_role_id TEXT');
+    if (!hasCreatedAt) pendingAlterStatements.push('ALTER TABLE user_server_roles ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP');
+
+    const backfillLegacyRoles = () => {
+      db.all('SELECT id, role FROM users', (usersErr, users: Array<{ id: string; role: string | null }>) => {
+        if (usersErr) {
+          done(usersErr);
+          return;
+        }
+
+        db.all('SELECT id, server_id, key FROM server_roles', (rolesErr, roles: Array<{ id: string; server_id: string; key: string }>) => {
+          if (rolesErr) {
+            done(rolesErr);
+            return;
+          }
+
+          const roleByServerAndKey = new Map<string, string>();
+          for (const role of roles) {
+            roleByServerAndKey.set(`${role.server_id}:${role.key}`, role.id);
+          }
+
+          db.all('SELECT id FROM servers', (serversErr, servers: Array<{ id: string }>) => {
+            if (serversErr) {
+              done(serversErr);
+              return;
+            }
+
+            const assignments: Array<{ userId: string; roleId: string }> = [];
+            for (const user of users) {
+              const legacyRole = (user.role || '').trim() || 'user';
+              for (const server of servers) {
+                const allUsersRoleId = roleByServerAndKey.get(`${server.id}:all_users`);
+                if (allUsersRoleId) {
+                  assignments.push({ userId: user.id, roleId: allUsersRoleId });
+                }
+
+                if (legacyRole !== 'user') {
+                  const mappedRoleId = roleByServerAndKey.get(`${server.id}:${legacyRole}`);
+                  if (mappedRoleId && mappedRoleId !== allUsersRoleId) {
+                    assignments.push({ userId: user.id, roleId: mappedRoleId });
+                  }
+                }
+              }
+            }
+
+            const insertNext = (index: number) => {
+              if (index >= assignments.length) {
+                done();
+                return;
+              }
+
+              const assignment = assignments[index];
+              db.run(
+                'INSERT OR IGNORE INTO user_server_roles (user_id, server_role_id) VALUES (?, ?)',
+                [assignment.userId, assignment.roleId],
+                (insertErr) => {
+                  if (insertErr) {
+                    done(insertErr);
+                    return;
+                  }
+                  insertNext(index + 1);
+                }
+              );
+            };
+
+            insertNext(0);
+          });
+        });
+      });
+    };
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        backfillLegacyRoles();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
   });
 }
 

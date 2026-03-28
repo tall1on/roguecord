@@ -11,6 +11,8 @@ export interface User {
   avatar_url: string | null;
   avatar_mime_type?: string | null;
   role: string;
+  role_ids?: string[];
+  roles?: ServerRole[];
   created_at: string;
 }
 
@@ -476,6 +478,51 @@ export const useChatStore = defineStore('chat', () => {
 
   const applyServerRoles = (roles: unknown) => {
     serverRoles.value = normalizeServerRoles(roles);
+  };
+
+  const normalizeUser = (user: any): User => {
+    const normalizedRoles = normalizeServerRoles(user?.roles);
+    const normalizedRoleIds = Array.isArray(user?.role_ids)
+      ? user.role_ids.filter((roleId: unknown): roleId is string => typeof roleId === 'string' && roleId.trim().length > 0)
+      : [];
+
+    return {
+      ...user,
+      avatar_url: user?.avatar_url || null,
+      avatar_mime_type: user?.avatar_mime_type || null,
+      role: typeof user?.role === 'string' && user.role.trim() ? user.role : 'user',
+      role_ids: normalizedRoleIds,
+      roles: normalizedRoles
+    };
+  };
+
+  const getPrimaryServerRole = (user: User | null | undefined) => {
+    if (!user) {
+      return null;
+    }
+
+    const userRoleIds = Array.isArray(user.role_ids) ? user.role_ids : [];
+    const userRoles = Array.isArray(user.roles) ? user.roles : [];
+    const resolvedRoles = userRoles.length > 0
+      ? userRoles
+      : serverRoles.value.filter((role) => userRoleIds.includes(role.id));
+
+    return resolvedRoles.find((role) => role.key !== 'all_users')
+      || resolvedRoles[0]
+      || getServerRoleByKey(user.role)
+      || null;
+  };
+
+  const getUserRoleKeys = (user: User | null | undefined): string[] => {
+    const primaryRole = user?.role || 'user';
+    const roles = Array.isArray(user?.roles) ? user.roles : [];
+    const keys = roles.map((role) => role.key).filter(Boolean);
+    return Array.from(new Set([primaryRole, ...keys]));
+  };
+
+  const userHasRole = (user: User | null | undefined, roleKeys: string[]) => {
+    const keys = new Set(getUserRoleKeys(user));
+    return roleKeys.some((roleKey) => keys.has(roleKey));
   };
 
   const getServerRoleByKey = (roleKey: string | null | undefined) => {
@@ -1473,8 +1520,8 @@ export const useChatStore = defineStore('chat', () => {
         break;
 
       case 'authenticated':
-        currentUser.value = payload.user;
-        currentUserRole.value = payload.user.role || 'user';
+        currentUser.value = normalizeUser(payload.user);
+        currentUserRole.value = currentUser.value.role || 'user';
         if (payload.user && payload.user.avatar_url !== readStoredAvatar()) {
           saveLocalAvatar(payload.user.avatar_url || null);
         }
@@ -1537,7 +1584,7 @@ export const useChatStore = defineStore('chat', () => {
         break;
         
       case 'member_list':
-        users.value = payload.members;
+        users.value = Array.isArray(payload.members) ? payload.members.map((member: any) => normalizeUser(member)) : [];
         onlineUserIds.value = new Set(payload.onlineUserIds);
         memberIps.value = payload.memberIps || {};
         break;
@@ -1585,7 +1632,7 @@ export const useChatStore = defineStore('chat', () => {
       case 'user_online':
         onlineUserIds.value.add(payload.user.id);
         if (!users.value.find(u => u.id === payload.user.id)) {
-          users.value.push(payload.user);
+          users.value.push(normalizeUser(payload.user));
         }
         break;
         
@@ -1596,13 +1643,13 @@ export const useChatStore = defineStore('chat', () => {
       case 'user_updated':
         const index = users.value.findIndex(u => u.id === payload.user.id);
         if (index !== -1) {
-          users.value[index] = payload.user;
+          users.value[index] = normalizeUser(payload.user);
         } else {
-          users.value.push(payload.user);
+          users.value.push(normalizeUser(payload.user));
         }
         if (currentUser.value?.id === payload.user.id) {
-          currentUser.value = payload.user;
-          currentUserRole.value = payload.user.role;
+          currentUser.value = normalizeUser(payload.user);
+          currentUserRole.value = currentUser.value.role;
         }
         break;
         
@@ -1831,7 +1878,10 @@ export const useChatStore = defineStore('chat', () => {
         break;
         
       case 'role_updated':
-        currentUserRole.value = payload.role;
+        currentUserRole.value = typeof payload.role === 'string' ? payload.role : currentUser.value?.role || 'user';
+        if (payload.user) {
+          currentUser.value = normalizeUser(payload.user);
+        }
         break;
     }
   };
@@ -2065,6 +2115,14 @@ export const useChatStore = defineStore('chat', () => {
       roleId,
       name,
       color
+    });
+  };
+
+  const assignMemberRoles = (serverId: string, userId: string, roleIds: string[]) => {
+    send('assign_member_roles', {
+      serverId,
+      userId,
+      roleIds
     });
   };
 
@@ -2426,8 +2484,12 @@ export const useChatStore = defineStore('chat', () => {
     requestServerRoles,
     updateServerRole,
     updateServerRoles,
+    assignMemberRoles,
     getServerRoleByKey,
     getServerRoleColor,
+    getPrimaryServerRole,
+    getUserRoleKeys,
+    userHasRole,
     testServerStorageSettings,
     requestServerStorageSettings,
     requestServerRefresh,
