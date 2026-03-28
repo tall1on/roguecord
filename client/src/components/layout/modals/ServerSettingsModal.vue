@@ -19,6 +19,15 @@ const form = defineModel<{
   title: string
   rulesChannelId: string
   welcomeChannelId: string
+  roles: Array<{
+    id: string
+    key: string
+    name: string
+    color: string
+    isDefault: boolean
+    isDeletable: boolean
+    position: number
+  }>
   storage: {
     storageType: 'data_dir' | 's3'
     provider: 'generic_s3' | 'cloudflare_r2'
@@ -73,6 +82,9 @@ const isS3Selected = computed(() => form.value.storage.storageType === 's3')
 const isCloudflareR2Selected = computed(() => isS3Selected.value && form.value.storage.provider === 'cloudflare_r2')
 const migration = computed(() => props.storageSettings.migration)
 const migrationVisible = computed(() => migration.value.status === 'running' || migration.value.status === 'failed')
+const rolePreviewStyle = (color: string) => ({
+  backgroundColor: color || '#9ca3af'
+})
 const migrationProgressPercent = computed(() => {
   if (migration.value.total <= 0) {
     return 0
@@ -177,7 +189,7 @@ const onIconInputChange = (event: Event) => {
 
         <div class="px-8 pt-8 pb-4">
           <h3 class="text-2xl font-bold text-white tracking-tight">
-            {{ activeSection === 'general-settings' ? 'Server Overview' : activeSection === 'storage-settings' ? 'Storage Settings' : 'Server Settings' }}
+            {{ activeSection === 'general-settings' ? 'Server Overview' : activeSection === 'role-settings' ? 'Role Management' : activeSection === 'storage-settings' ? 'Storage Settings' : 'Server Settings' }}
           </h3>
         </div>
 
@@ -276,6 +288,63 @@ const onIconInputChange = (event: Event) => {
                   </div>
                 </div>
                 <p class="text-zinc-500 text-xs mt-2">Select a channel where new members will be welcomed.</p>
+              </div>
+            </div>
+          </div>
+
+          <div v-else-if="activeSection === 'role-settings'" class="space-y-6 max-w-3xl">
+            <div class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm">
+              <p class="text-sm font-semibold text-white">Server roles</p>
+              <p class="mt-1 text-xs text-zinc-500">Default roles <span class="font-semibold text-zinc-300">all users</span> and <span class="font-semibold text-zinc-300">admin</span> always exist and cannot be deleted. Update display names and colors to control member list presentation live.</p>
+            </div>
+
+            <div class="space-y-4">
+              <div
+                v-for="role in form.roles"
+                :key="role.id"
+                class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm space-y-4"
+              >
+                <div class="flex items-center justify-between gap-4">
+                  <div class="flex items-center gap-3 min-w-0">
+                    <span class="w-3 h-3 rounded-full border border-white/10 shrink-0" :style="rolePreviewStyle(role.color)" />
+                    <div class="min-w-0">
+                      <p class="text-sm font-semibold truncate" :style="{ color: role.color || '#e4e4e7' }">{{ role.name || role.key }}</p>
+                      <p class="text-xs text-zinc-500">{{ role.isDefault ? 'Default role' : 'Custom role' }}</p>
+                    </div>
+                  </div>
+                  <span v-if="!role.isDeletable" class="rounded-full border border-white/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-300">Protected</span>
+                </div>
+
+                <div class="grid gap-4 md:grid-cols-[1fr_auto]">
+                  <div>
+                    <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Display name</label>
+                    <input
+                      v-model="role.name"
+                      type="text"
+                      maxlength="64"
+                      class="w-full bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all font-medium"
+                      :placeholder="role.key"
+                    />
+                  </div>
+
+                  <div>
+                    <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Color</label>
+                    <div class="flex items-center gap-3">
+                      <input
+                        v-model="role.color"
+                        type="color"
+                        class="h-11 w-14 bg-zinc-950 rounded-lg border border-white/10 cursor-pointer"
+                      />
+                      <input
+                        v-model="role.color"
+                        type="text"
+                        maxlength="7"
+                        class="w-28 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all font-mono text-sm uppercase"
+                        placeholder="#9CA3AF"
+                      />
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

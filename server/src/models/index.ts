@@ -93,6 +93,19 @@ export interface ServerStorageSettings {
   storageMigrationUpdatedAt: string | null;
 }
 
+export interface ServerRole {
+  id: string;
+  serverId: string;
+  key: string;
+  name: string;
+  color: string | null;
+  isDefault: boolean;
+  isDeletable: boolean;
+  position: number;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
 const mapServerRow = (row: any): Server => ({
   id: row.id,
   name: row.name,
@@ -136,6 +149,19 @@ const mapServerStorageSettings = (row: any): ServerStorageSettings => ({
   storageMigrationUpdatedAt: row.storage_migration_updated_at || null
 });
 
+const mapServerRoleRow = (row: any): ServerRole => ({
+  id: row.id,
+  serverId: row.server_id,
+  key: row.key,
+  name: row.name,
+  color: row.color || null,
+  isDefault: Boolean(row.is_default),
+  isDeletable: Boolean(row.is_deletable),
+  position: Number.isFinite(Number(row.position)) ? Number(row.position) : 0,
+  createdAt: row.created_at || null,
+  updatedAt: row.updated_at || null
+});
+
 export const getServer = async (): Promise<Server | undefined> => {
   const row = await dbGet<any>('SELECT * FROM servers LIMIT 1');
   if (!row) return undefined;
@@ -145,8 +171,94 @@ export const getServer = async (): Promise<Server | undefined> => {
 export const createServer = async (name: string, welcomeChannelId?: string): Promise<Server> => {
   const id = crypto.randomUUID();
   await dbRun('INSERT INTO servers (id, name, title, welcome_channel_id) VALUES (?, ?, ?, ?)', [id, name, name, welcomeChannelId]);
+  await ensureDefaultRolesForServer(id);
   const row = await dbGet<any>('SELECT * FROM servers WHERE id = ?', [id]);
   return mapServerRow(row);
+};
+
+export const ensureDefaultRolesForServer = async (serverId: string): Promise<void> => {
+  await dbRun(
+    `
+      INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, position)
+      SELECT ?, ?, 'all_users', 'all users', NULL, 1, 0, 0
+      WHERE NOT EXISTS (
+        SELECT 1 FROM server_roles WHERE server_id = ? AND key = 'all_users'
+      )
+    `,
+    [crypto.randomUUID(), serverId, serverId]
+  );
+
+  await dbRun(
+    `
+      INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, position)
+      SELECT ?, ?, 'admin', 'admin', NULL, 1, 0, 1
+      WHERE NOT EXISTS (
+        SELECT 1 FROM server_roles WHERE server_id = ? AND key = 'admin'
+      )
+    `,
+    [crypto.randomUUID(), serverId, serverId]
+  );
+
+  await dbRun(
+    `
+      UPDATE server_roles
+      SET
+        is_default = CASE WHEN key IN ('all_users', 'admin') THEN 1 ELSE is_default END,
+        is_deletable = CASE WHEN key IN ('all_users', 'admin') THEN 0 ELSE is_deletable END,
+        position = CASE
+          WHEN key = 'all_users' THEN 0
+          WHEN key = 'admin' THEN 1
+          ELSE position
+        END,
+        name = CASE
+          WHEN key = 'all_users' THEN COALESCE(NULLIF(TRIM(name), ''), 'all users')
+          WHEN key = 'admin' THEN COALESCE(NULLIF(TRIM(name), ''), 'admin')
+          ELSE name
+        END,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE server_id = ? AND key IN ('all_users', 'admin')
+    `,
+    [serverId]
+  );
+};
+
+export const getServerRoles = async (serverId: string): Promise<ServerRole[]> => {
+  await ensureDefaultRolesForServer(serverId);
+  const rows = await dbAll<any>(
+    'SELECT * FROM server_roles WHERE server_id = ? ORDER BY position ASC, name COLLATE NOCASE ASC',
+    [serverId]
+  );
+  return rows.map(mapServerRoleRow);
+};
+
+export const getServerRoleById = async (serverId: string, roleId: string): Promise<ServerRole | undefined> => {
+  await ensureDefaultRolesForServer(serverId);
+  const row = await dbGet<any>('SELECT * FROM server_roles WHERE server_id = ? AND id = ?', [serverId, roleId]);
+  return row ? mapServerRoleRow(row) : undefined;
+};
+
+export const updateServerRole = async (input: {
+  serverId: string;
+  roleId: string;
+  name: string;
+  color: string | null;
+}): Promise<ServerRole> => {
+  await ensureDefaultRolesForServer(input.serverId);
+  await dbRun(
+    `
+      UPDATE server_roles
+      SET name = ?, color = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE server_id = ? AND id = ?
+    `,
+    [input.name, input.color, input.serverId, input.roleId]
+  );
+
+  const updated = await getServerRoleById(input.serverId, input.roleId);
+  if (!updated) {
+    throw new Error('Role not found');
+  }
+
+  return updated;
 };
 
 export const updateServerSettings = async (

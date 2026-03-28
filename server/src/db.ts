@@ -20,6 +20,7 @@ export const channelsSchemaReady = new Promise<void>((resolve, reject) => {
 
 let serversSchemaMigrated = false;
 let usersSchemaMigrated = false;
+let rolesSchemaMigrated = false;
 let channelsSchemaMigrated = false;
 let folderFilesSchemaMigrated = false;
 let messageAttachmentsSchemaMigrated = false;
@@ -30,16 +31,17 @@ function failSchemaInitialization(error: Error) {
   rejectChannelsSchemaReady?.(error);
 }
 
-function markSchemaStepDone(step: 'servers' | 'users' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions') {
+function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions') {
   if (step === 'servers') serversSchemaMigrated = true;
   if (step === 'users') usersSchemaMigrated = true;
+  if (step === 'roles') rolesSchemaMigrated = true;
   if (step === 'channels') channelsSchemaMigrated = true;
   if (step === 'folder_files') folderFilesSchemaMigrated = true;
   if (step === 'message_attachments') messageAttachmentsSchemaMigrated = true;
   if (step === 'messages') messagesSchemaMigrated = true;
   if (step === 'message_reactions') messageReactionsSchemaMigrated = true;
 
-  if (serversSchemaMigrated && usersSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated) {
+  if (serversSchemaMigrated && usersSchemaMigrated && rolesSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated) {
     resolveChannelsSchemaReady?.();
   }
 }
@@ -134,6 +136,53 @@ function initializeDatabase() {
         });
 
         markSchemaStepDone('users');
+      });
+    });
+
+    // Server Roles Table
+    db.run(`
+      CREATE TABLE IF NOT EXISTS server_roles (
+        id TEXT PRIMARY KEY,
+        server_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        name TEXT NOT NULL,
+        color TEXT,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        is_deletable INTEGER NOT NULL DEFAULT 1,
+        position INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(server_id, key),
+        FOREIGN KEY (server_id) REFERENCES servers(id)
+      )
+    `, (err) => {
+      if (err) {
+        console.error('Error creating server_roles table:', err.message);
+        failSchemaInitialization(err);
+        return;
+      }
+
+      migrateServerRolesTableSchema((migrationErr) => {
+        if (migrationErr) {
+          console.error('Error migrating server_roles table:', migrationErr.message);
+          failSchemaInitialization(migrationErr);
+          return;
+        }
+
+        db.serialize(() => {
+          db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_server_roles_server_key ON server_roles(server_id, key)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_server_roles_server_position ON server_roles(server_id, position)');
+        });
+
+        ensureDefaultServerRoles((ensureErr) => {
+          if (ensureErr) {
+            console.error('Error ensuring default server roles:', ensureErr.message);
+            failSchemaInitialization(ensureErr);
+            return;
+          }
+
+          markSchemaStepDone('roles');
+        });
       });
     });
 
@@ -936,6 +985,158 @@ function migrateServersTableSchema(done: (error?: Error) => void) {
     };
 
     runNextAlter(0);
+  });
+}
+
+function migrateServerRolesTableSchema(done: (error?: Error) => void) {
+  db.all('PRAGMA table_info(server_roles)', (pragmaErr, columns: any[]) => {
+    if (pragmaErr) {
+      done(pragmaErr);
+      return;
+    }
+
+    const hasServerId = columns.some((column) => column.name === 'server_id');
+    const hasKey = columns.some((column) => column.name === 'key');
+    const hasName = columns.some((column) => column.name === 'name');
+    const hasColor = columns.some((column) => column.name === 'color');
+    const hasIsDefault = columns.some((column) => column.name === 'is_default');
+    const hasIsDeletable = columns.some((column) => column.name === 'is_deletable');
+    const hasPosition = columns.some((column) => column.name === 'position');
+    const hasCreatedAt = columns.some((column) => column.name === 'created_at');
+    const hasUpdatedAt = columns.some((column) => column.name === 'updated_at');
+
+    const pendingAlterStatements: string[] = [];
+    if (!hasServerId) pendingAlterStatements.push('ALTER TABLE server_roles ADD COLUMN server_id TEXT');
+    if (!hasKey) pendingAlterStatements.push("ALTER TABLE server_roles ADD COLUMN key TEXT NOT NULL DEFAULT ''");
+    if (!hasName) pendingAlterStatements.push("ALTER TABLE server_roles ADD COLUMN name TEXT NOT NULL DEFAULT 'Role'");
+    if (!hasColor) pendingAlterStatements.push('ALTER TABLE server_roles ADD COLUMN color TEXT');
+    if (!hasIsDefault) pendingAlterStatements.push('ALTER TABLE server_roles ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0');
+    if (!hasIsDeletable) pendingAlterStatements.push('ALTER TABLE server_roles ADD COLUMN is_deletable INTEGER NOT NULL DEFAULT 1');
+    if (!hasPosition) pendingAlterStatements.push('ALTER TABLE server_roles ADD COLUMN position INTEGER NOT NULL DEFAULT 0');
+    if (!hasCreatedAt) pendingAlterStatements.push('ALTER TABLE server_roles ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP');
+    if (!hasUpdatedAt) pendingAlterStatements.push('ALTER TABLE server_roles ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP');
+
+    const finalizeMigration = () => {
+      db.run(
+        `
+          UPDATE server_roles
+          SET
+            name = COALESCE(NULLIF(TRIM(name), ''), 'Role'),
+            color = CASE
+              WHEN color IS NULL OR TRIM(color) = '' THEN NULL
+              ELSE color
+            END,
+            is_default = CASE WHEN COALESCE(is_default, 0) != 0 THEN 1 ELSE 0 END,
+            is_deletable = CASE WHEN COALESCE(is_deletable, 1) != 0 THEN 1 ELSE 0 END,
+            position = COALESCE(position, 0),
+            created_at = COALESCE(created_at, CURRENT_TIMESTAMP),
+            updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)
+        `,
+        (updateErr) => done(updateErr || undefined)
+      );
+    };
+
+    const runNextAlter = (index: number) => {
+      if (index >= pendingAlterStatements.length) {
+        finalizeMigration();
+        return;
+      }
+
+      db.run(pendingAlterStatements[index], (alterErr) => {
+        if (alterErr) {
+          done(alterErr);
+          return;
+        }
+        runNextAlter(index + 1);
+      });
+    };
+
+    runNextAlter(0);
+  });
+}
+
+function ensureDefaultServerRoles(done: (error?: Error) => void) {
+  db.all('SELECT id, name FROM servers', (serversErr, servers: Array<{ id: string; name: string }>) => {
+    if (serversErr) {
+      done(serversErr);
+      return;
+    }
+
+    const ensureForServer = (index: number) => {
+      if (index >= servers.length) {
+        done();
+        return;
+      }
+
+      const server = servers[index];
+      db.serialize(() => {
+        db.run(
+          `
+            INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, position)
+            SELECT ?, ?, 'all_users', 'all users', NULL, 1, 0, 0
+            WHERE NOT EXISTS (
+              SELECT 1 FROM server_roles WHERE server_id = ? AND key = 'all_users'
+            )
+          `,
+          [crypto.randomUUID(), server.id, server.id],
+          (allUsersErr) => {
+            if (allUsersErr) {
+              done(allUsersErr);
+              return;
+            }
+
+            db.run(
+              `
+                INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, position)
+                SELECT ?, ?, 'admin', 'admin', NULL, 1, 0, 1
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM server_roles WHERE server_id = ? AND key = 'admin'
+                )
+              `,
+              [crypto.randomUUID(), server.id, server.id],
+              (adminInsertErr) => {
+                if (adminInsertErr) {
+                  done(adminInsertErr);
+                  return;
+                }
+
+                db.run(
+                  `
+                    UPDATE server_roles
+                    SET
+                      name = CASE
+                        WHEN key = 'all_users' THEN COALESCE(NULLIF(TRIM(name), ''), 'all users')
+                        WHEN key = 'admin' THEN COALESCE(NULLIF(TRIM(name), ''), 'admin')
+                        ELSE name
+                      END,
+                      is_default = CASE WHEN key IN ('all_users', 'admin') THEN 1 ELSE is_default END,
+                      is_deletable = CASE WHEN key IN ('all_users', 'admin') THEN 0 ELSE is_deletable END,
+                      position = CASE
+                        WHEN key = 'all_users' THEN 0
+                        WHEN key = 'admin' THEN 1
+                        ELSE position
+                      END,
+                      updated_at = CURRENT_TIMESTAMP
+                    WHERE server_id = ? AND key IN ('all_users', 'admin')
+                  `,
+                  [server.id],
+                  (updateErr) => {
+                    if (updateErr) {
+                      done(updateErr);
+                      return;
+                    }
+
+                    ensureForServer(index + 1);
+                  }
+                );
+              }
+            );
+          }
+        );
+      });
+    };
+
+    ensureForServer(0);
   });
 }
 

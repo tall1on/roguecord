@@ -186,6 +186,19 @@ export interface ServerStorageSettings {
   migration: ServerStorageMigrationState;
 }
 
+export interface ServerRole {
+  id: string;
+  serverId: string;
+  key: string;
+  name: string;
+  color: string | null;
+  isDefault: boolean;
+  isDeletable: boolean;
+  position: number;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
 export interface ActiveMainPanel {
   type: 'text' | 'voice' | 'folder';
   channelId: string | null;
@@ -304,6 +317,7 @@ export const useChatStore = defineStore('chat', () => {
   const currentUser = ref<User | null>(null);
   const currentUserRole = ref<string>('user');
   const server = ref<Server | null>(null);
+  const serverRoles = ref<ServerRole[]>([]);
   const uncategorizedCategoryDeleted = ref(false);
   const serverStorageSettings = ref<ServerStorageSettings>({
     storageType: 'data_dir',
@@ -407,6 +421,56 @@ export const useChatStore = defineStore('chat', () => {
         : null
     }
   });
+
+  const normalizeServerRole = (role: any): ServerRole | null => {
+    if (!role || typeof role !== 'object') {
+      return null;
+    }
+
+    const id = typeof role.id === 'string' ? role.id : '';
+    const serverId = typeof role.serverId === 'string'
+      ? role.serverId
+      : (typeof role.server_id === 'string' ? role.server_id : '');
+    const key = typeof role.key === 'string' ? role.key : '';
+    const normalizedName = typeof role.name === 'string' ? role.name.trim() : '';
+    const rawColor = typeof role.color === 'string' ? role.color.trim() : '';
+
+    if (!id || !serverId || !key) {
+      return null;
+    }
+
+    return {
+      id,
+      serverId,
+      key,
+      name: normalizedName || key,
+      color: /^#([0-9a-fA-F]{6})$/.test(rawColor) ? rawColor.toLowerCase() : null,
+      isDefault: role.isDefault === true || role.is_default === true || role.is_default === 1,
+      isDeletable: role.isDeletable === true || role.is_deletable === true || role.is_deletable === 1,
+      position: Number.isFinite(Number(role.position)) ? Number(role.position) : 0,
+      createdAt: typeof role.createdAt === 'string'
+        ? role.createdAt
+        : (typeof role.created_at === 'string' ? role.created_at : null),
+      updatedAt: typeof role.updatedAt === 'string'
+        ? role.updatedAt
+        : (typeof role.updated_at === 'string' ? role.updated_at : null)
+    };
+  };
+
+  const normalizeServerRoles = (roles: unknown): ServerRole[] => {
+    if (!Array.isArray(roles)) {
+      return [];
+    }
+
+    return roles
+      .map((role) => normalizeServerRole(role))
+      .filter((role): role is ServerRole => Boolean(role))
+      .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
+  };
+
+  const applyServerRoles = (roles: unknown) => {
+    serverRoles.value = normalizeServerRoles(roles);
+  };
 
   const readBlobAsArrayBuffer = (blob: Blob) => {
     return new Promise<ArrayBuffer>((resolve, reject) => {
@@ -1086,6 +1150,7 @@ export const useChatStore = defineStore('chat', () => {
     unreadChannelIds.value = new Set();
     lastMarkedReadMessageByChannel.value = {};
     users.value = [];
+    serverRoles.value = [];
     onlineUserIds.value.clear();
     currentUser.value = null;
     server.value = null;
@@ -1400,6 +1465,7 @@ export const useChatStore = defineStore('chat', () => {
         if ((payload.user.role || 'user') === 'admin') {
           requestServerStorageSettings();
         }
+        requestServerRoles();
         saveLocalUsername(payload.user.username);
         getChannels();
         break;
@@ -1445,6 +1511,11 @@ export const useChatStore = defineStore('chat', () => {
         }
         break;
       }
+
+      case 'server_roles_list':
+      case 'server_roles_updated':
+        applyServerRoles(payload.roles);
+        break;
         
       case 'member_list':
         users.value = payload.members;
@@ -1958,6 +2029,18 @@ export const useChatStore = defineStore('chat', () => {
     send('get_server_storage_settings');
   };
 
+  const requestServerRoles = () => {
+    send('get_server_roles');
+  };
+
+  const updateServerRole = (roleId: string, name: string, color: string | null) => {
+    send('update_server_role', {
+      roleId,
+      name,
+      color
+    });
+  };
+
   const clearError = () => {
     lastError.value = null;
   };
@@ -2231,6 +2314,7 @@ export const useChatStore = defineStore('chat', () => {
     currentUser,
     currentUserRole,
     server,
+    serverRoles,
     uncategorizedCategoryDeleted,
     serverStorageSettings,
     lastError,
@@ -2271,6 +2355,8 @@ export const useChatStore = defineStore('chat', () => {
     deleteChannel,
     reorderChannels,
     updateServerSettings,
+    requestServerRoles,
+    updateServerRole,
     testServerStorageSettings,
     requestServerStorageSettings,
     requestServerRefresh,
