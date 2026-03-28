@@ -63,7 +63,7 @@ const isHiddenSystemMember = (user: User) => {
 const canModerate = (user: User) => {
   if (!isAdmin.value || !chatStore.currentUser) return false
   if (chatStore.currentUser.id === user.id) return false
-  return !chatStore.userHasRole(user, ['admin'])
+  return true
 }
 
 const resetModerationForm = () => {
