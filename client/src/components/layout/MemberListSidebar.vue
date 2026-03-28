@@ -30,7 +30,7 @@ const roleMap = computed(() => {
   return map
 })
 
-const getDisplayRole = (roleKey: string) => roleMap.value.get(roleKey)
+const getDisplayRole = (roleKey: string) => chatStore.getServerRoleByKey(roleKey) || roleMap.value.get(roleKey) || null
 
 const getDisplayRoleName = (roleKey: string) => {
   const role = getDisplayRole(roleKey)
@@ -41,7 +41,7 @@ const getDisplayRoleName = (roleKey: string) => {
   return roleKey || 'all users'
 }
 
-const getDisplayRoleColor = (roleKey: string) => getDisplayRole(roleKey)?.color || null
+const getDisplayRoleColor = (roleKey: string) => chatStore.getServerRoleColor(roleKey) || getDisplayRole(roleKey)?.color || null
 
 const getRoleHeading = (roleKey: string) => {
   const label = getDisplayRoleName(roleKey)

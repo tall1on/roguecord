@@ -951,6 +951,11 @@ const resolveMessageAvatarUrl = (message: Message) => {
 
 const getMessageInitial = (message: Message) => message.user?.username.charAt(0).toUpperCase() || '?'
 
+const getMessageRoleColor = (message: Message) => {
+  const roleKey = message.user?.role || 'all_users'
+  return chatStore.getServerRoleColor(roleKey)
+}
+
 type RenderEntry =
   | { type: 'divider'; key: string; label: string }
   | { type: 'message'; key: string; message: Message }
@@ -1128,7 +1133,10 @@ watch(
             </div>
             <div class="flex-1 min-w-0">
               <div class="flex items-baseline gap-2 mb-[1px]">
-                <span class="font-semibold text-[14px] cursor-pointer transition-colors" :class="entry.message.user?.role === 'admin' ? 'text-red-400 hover:text-red-300' : 'text-zinc-200 hover:text-white'">{{ entry.message.user?.username || 'Unknown User' }}</span>
+                <span
+                  class="font-semibold text-[14px] cursor-pointer transition-colors hover:brightness-110"
+                  :style="{ color: getMessageRoleColor(entry.message) || '#e4e4e7' }"
+                >{{ entry.message.user?.username || 'Unknown User' }}</span>
                 <span class="text-[10px] font-medium text-zinc-500 group-hover:text-zinc-400">{{ formatTime(entry.message.created_at) }}</span>
               </div>
               <div v-if="entry.message.reply_to_message" class="mb-1 flex max-w-[420px] items-center gap-2 rounded-md border border-white/5 bg-zinc-900/50 px-2.5 py-1.5">
