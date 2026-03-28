@@ -67,6 +67,15 @@ const serverSettingsForm = ref({
   title: '',
   rulesChannelId: '',
   welcomeChannelId: '',
+  roles: [] as Array<{
+    id: string
+    key: string
+    name: string
+    color: string
+    isDefault: boolean
+    isDeletable: boolean
+    position: number
+  }>,
   storage: {
     storageType: 'data_dir' as 'data_dir' | 's3',
     provider: 'generic_s3' as 'generic_s3' | 'cloudflare_r2',
@@ -77,6 +86,8 @@ const serverSettingsForm = ref({
     accessKey: '',
     secretKey: '',
     prefix: '',
+    hasAccessKey: false,
+    hasSecretKey: false,
     status: 'data_dir' as 'data_dir' | 's3',
     lastError: null as string | null
   }
@@ -90,6 +101,7 @@ const serverSettingsNavGroups = ref<ServerSettingsNavGroup[]>([
     expanded: true,
     items: [
       { id: 'general-settings', label: 'General Settings' },
+      { id: 'role-settings', label: 'Roles' },
       { id: 'storage-settings', label: 'Storage / S3' }
     ]
   }
@@ -123,11 +135,25 @@ const populateServerSettingsStorageForm = () => {
   serverSettingsForm.value.storage.endpoint = storageSettings.s3.endpoint
   serverSettingsForm.value.storage.region = storageSettings.s3.region
   serverSettingsForm.value.storage.bucket = storageSettings.s3.bucket
-  serverSettingsForm.value.storage.accessKey = storageSettings.s3.accessKey
-  serverSettingsForm.value.storage.secretKey = storageSettings.s3.secretKey
   serverSettingsForm.value.storage.prefix = storageSettings.s3.prefix
+  serverSettingsForm.value.storage.hasAccessKey = storageSettings.s3.hasAccessKey
+  serverSettingsForm.value.storage.hasSecretKey = storageSettings.s3.hasSecretKey
+  serverSettingsForm.value.storage.accessKey = ''
+  serverSettingsForm.value.storage.secretKey = ''
   serverSettingsForm.value.storage.status = storageSettings.storageType
   serverSettingsForm.value.storage.lastError = storageSettings.storageLastError
+}
+
+const populateServerRoleSettingsForm = () => {
+  serverSettingsForm.value.roles = chatStore.serverRoles.map((role) => ({
+    id: role.id,
+    key: role.key,
+    name: role.name,
+    color: role.color || '#9ca3af',
+    isDefault: role.isDefault,
+    isDeletable: role.isDeletable,
+    position: role.position
+  }))
 }
 
 const getCurrentStorageFingerprint = () => {
@@ -139,8 +165,8 @@ const getCurrentStorageFingerprint = () => {
     endpoint: storage.endpoint.trim(),
     region: storage.region.trim(),
     bucket: storage.bucket.trim(),
-    accessKey: storage.accessKey.trim(),
-    secretKey: storage.secretKey.trim(),
+    accessKeyChanged: storage.accessKey.trim().length > 0,
+    secretKeyChanged: storage.secretKey.trim().length > 0,
     prefix: storage.prefix.trim()
   })
 }
@@ -156,8 +182,8 @@ const hasStorageSettingsChanges = computed(() => {
     endpoint: (currentStorage.s3.endpoint || '').trim(),
     region: (currentStorage.s3.region || '').trim(),
     bucket: (currentStorage.s3.bucket || '').trim(),
-    accessKey: (currentStorage.s3.accessKey || '').trim(),
-    secretKey: (currentStorage.s3.secretKey || '').trim(),
+    hasAccessKey: currentStorage.s3.hasAccessKey,
+    hasSecretKey: currentStorage.s3.hasSecretKey,
     prefix: (currentStorage.s3.prefix || '').trim()
   })
 
@@ -168,8 +194,8 @@ const hasStorageSettingsChanges = computed(() => {
     endpoint: formStorage.endpoint.trim(),
     region: formStorage.region.trim(),
     bucket: formStorage.bucket.trim(),
-    accessKey: formStorage.accessKey.trim(),
-    secretKey: formStorage.secretKey.trim(),
+    hasAccessKey: formStorage.accessKey.trim().length > 0 ? true : currentStorage.s3.hasAccessKey,
+    hasSecretKey: formStorage.secretKey.trim().length > 0 ? true : currentStorage.s3.hasSecretKey,
     prefix: formStorage.prefix.trim()
   })
 
@@ -196,8 +222,31 @@ const hasGeneralSettingsChanges = computed(() => {
   )
 })
 
+const hasRoleSettingsChanges = computed(() => {
+  const currentRoles = chatStore.serverRoles
+  const nextRoles = serverSettingsForm.value.roles
+
+  if (currentRoles.length !== nextRoles.length) {
+    return true
+  }
+
+  return currentRoles.some((role, index) => {
+    const nextRole = nextRoles[index]
+    if (!nextRole || nextRole.id !== role.id) {
+      return true
+    }
+
+    const nextName = nextRole.name.trim()
+    const nextColor = (nextRole.color || '').trim().toLowerCase()
+    const currentColor = (role.color || '').trim().toLowerCase()
+
+    return nextName !== role.name || nextColor !== currentColor
+  })
+})
+
 const hasServerSettingsChanges = computed(() =>
   hasGeneralSettingsChanges.value ||
+  hasRoleSettingsChanges.value ||
   hasStorageSettingsChanges.value ||
   Boolean(serverIconDataUrl.value) ||
   removeServerIcon.value
@@ -358,7 +407,7 @@ const handleTestStorageConnection = async () => {
   s3LastSuccessfulFingerprint.value = null
 }
 
-const saveServerSettings = () => {
+const saveServerSettings = async () => {
   if (!chatStore.server) {
     return
   }
@@ -398,18 +447,38 @@ const saveServerSettings = () => {
     serverSettingsStorageMigrationLock.value = true
   }
 
-  chatStore.updateServerSettings(
-    chatStore.server.id,
-    serverSettingsForm.value.title,
-    serverSettingsForm.value.rulesChannelId || null,
-    serverSettingsForm.value.welcomeChannelId || null,
-    nextStoragePayload,
-    {
-      iconDataUrl: serverIconDataUrl.value,
-      removeIcon: removeServerIcon.value
-    }
-  )
-  serverSettingsSaveMessage.value = 'Saving settings...'
+  try {
+    const updatedRoleCount = await chatStore.updateServerRoles(
+      serverSettingsForm.value.roles.map((role) => ({
+        id: role.id,
+        name: role.name,
+        color: role.color || null
+      }))
+    )
+
+    chatStore.updateServerSettings(
+      chatStore.server.id,
+      serverSettingsForm.value.title,
+      serverSettingsForm.value.rulesChannelId || null,
+      serverSettingsForm.value.welcomeChannelId || null,
+      nextStoragePayload,
+      {
+        iconDataUrl: serverIconDataUrl.value,
+        removeIcon: removeServerIcon.value
+      }
+    )
+
+    serverSettingsForm.value.storage.accessKey = ''
+    serverSettingsForm.value.storage.secretKey = ''
+
+    serverSettingsSaveMessage.value = updatedRoleCount > 0
+      ? 'Saving settings and roles...'
+      : 'Saving settings...'
+  } catch (error) {
+    serverSettingsSaveError.value = error instanceof Error ? error.message : 'Failed to prepare role changes'
+    serverSettingsSaveMessage.value = null
+    resetServerSettingsStorageLock()
+  }
 }
 
 const handleServerIconSelected = (file: File) => {
@@ -463,6 +532,14 @@ const handleChatStoreMessage = (message: any) => {
   }
 
   if (!showServerSettingsModal.value) {
+    return
+  }
+
+  if (message.type === 'server_role_updated') {
+    serverSettingsSaveError.value = null
+    if (!serverSettingsSaveMessage.value) {
+      serverSettingsSaveMessage.value = 'Saving roles...'
+    }
     return
   }
 
@@ -556,6 +633,7 @@ watch(showServerSettingsModal, (newVal) => {
   if (newVal && chatStore.server) {
     activeServerSettingsSection.value = 'general-settings'
     chatStore.requestServerStorageSettings()
+    chatStore.requestServerRoles()
     serverSettingsNavGroups.value = serverSettingsNavGroups.value.map((group) => ({
       ...group,
       expanded: true
@@ -563,6 +641,7 @@ watch(showServerSettingsModal, (newVal) => {
     serverSettingsForm.value.title = chatStore.server.title || chatStore.server.name || ''
     serverSettingsForm.value.rulesChannelId = chatStore.server.rulesChannelId || ''
     serverSettingsForm.value.welcomeChannelId = chatStore.server.welcomeChannelId || ''
+    populateServerRoleSettingsForm()
     populateServerSettingsStorageForm()
     serverIconDataUrl.value = null
     removeServerIcon.value = false
@@ -576,6 +655,39 @@ watch(showServerSettingsModal, (newVal) => {
     resetServerSettingsStorageLock()
   }
 })
+
+watch(
+  () => chatStore.serverRoles,
+  (nextRoles, previousRoles) => {
+    if (!showServerSettingsModal.value) {
+      return
+    }
+
+    const previousSignature = JSON.stringify(
+      (previousRoles || []).map((role) => ({
+        id: role.id,
+        name: role.name,
+        color: role.color,
+        updatedAt: role.updatedAt
+      }))
+    )
+    const nextSignature = JSON.stringify(
+      (nextRoles || []).map((role) => ({
+        id: role.id,
+        name: role.name,
+        color: role.color,
+        updatedAt: role.updatedAt
+      }))
+    )
+
+    if (previousSignature === nextSignature) {
+      return
+    }
+
+    populateServerRoleSettingsForm()
+  },
+  { deep: false }
+)
 
 watch(
   () => chatStore.serverStorageSettings,

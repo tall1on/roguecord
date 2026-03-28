@@ -11,6 +11,8 @@ export interface User {
   avatar_url: string | null;
   avatar_mime_type?: string | null;
   role: string;
+  role_ids?: string[];
+  roles?: ServerRole[];
   created_at: string;
 }
 
@@ -157,9 +159,9 @@ export interface ServerStorageS3Settings {
   endpoint: string;
   region: string;
   bucket: string;
-  accessKey: string;
-  secretKey: string;
   prefix: string;
+  hasAccessKey: boolean;
+  hasSecretKey: boolean;
 }
 
 export interface ServerStorageTestResult {
@@ -185,6 +187,25 @@ export interface ServerStorageSettings {
   s3: ServerStorageS3Settings;
   migration: ServerStorageMigrationState;
 }
+
+export interface ServerRole {
+  id: string;
+  serverId: string;
+  key: string;
+  name: string;
+  color: string | null;
+  isDefault: boolean;
+  isDeletable: boolean;
+  position: number;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+type ServerRoleFormInput = {
+  id: string;
+  name: string;
+  color: string | null;
+};
 
 export interface ActiveMainPanel {
   type: 'text' | 'voice' | 'folder';
@@ -304,6 +325,7 @@ export const useChatStore = defineStore('chat', () => {
   const currentUser = ref<User | null>(null);
   const currentUserRole = ref<string>('user');
   const server = ref<Server | null>(null);
+  const serverRoles = ref<ServerRole[]>([]);
   const uncategorizedCategoryDeleted = ref(false);
   const serverStorageSettings = ref<ServerStorageSettings>({
     storageType: 'data_dir',
@@ -314,9 +336,9 @@ export const useChatStore = defineStore('chat', () => {
       endpoint: '',
       region: '',
       bucket: '',
-      accessKey: '',
-      secretKey: '',
-      prefix: ''
+      prefix: '',
+      hasAccessKey: false,
+      hasSecretKey: false
     },
     migration: {
       status: 'idle',
@@ -330,13 +352,40 @@ export const useChatStore = defineStore('chat', () => {
   });
   const lastError = ref<string | null>(null);
   
-  const savedConnections = ref<SavedConnection[]>(
-    JSON.parse(localStorage.getItem('savedConnections') || '[]').map((c: SavedConnection) => ({
+  const DEFAULT_NEW_USER_SERVER_ADDRESS = 'wss://rc1.exatek.de:1337';
+
+  const seedDefaultSavedConnections = (): SavedConnection[] => {
+    const defaultAddress = DEFAULT_NEW_USER_SERVER_ADDRESS.trim();
+    const normalizedDefaultAddress = defaultAddress.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0(?=[:/]|$)/i, (_match, protocol) => `${protocol || ''}localhost`);
+
+    return [
+      {
+        id: crypto.randomUUID(),
+        name: 'rc1.exatek.de',
+        address: normalizedDefaultAddress,
+        cachedIconUrl: null
+      }
+    ];
+  };
+
+  const readSavedConnections = (): SavedConnection[] => {
+    const rawStoredConnections = JSON.parse(localStorage.getItem('savedConnections') || '[]');
+    const normalizedConnections = (Array.isArray(rawStoredConnections) ? rawStoredConnections : []).map((c: SavedConnection) => ({
       ...c,
       address: c.address.replace(/(ws:\/\/|wss:\/\/)?0\.0\.0\.0/, (_match, p1) => `${p1 || ''}localhost`),
       cachedIconUrl: c.cachedIconUrl || getCachedServerIcon(c.id)?.dataUrl || null
-    }))
-  );
+    }));
+
+    if (normalizedConnections.length > 0) {
+      return normalizedConnections;
+    }
+
+    const defaultConnections = seedDefaultSavedConnections();
+    localStorage.setItem('savedConnections', JSON.stringify(defaultConnections));
+    return defaultConnections;
+  };
+
+  const savedConnections = ref<SavedConnection[]>(readSavedConnections());
   const activeConnectionId = ref<string | null>(null);
   const localUsername = ref<string | null>(localStorage.getItem('username'));
   const users = ref<User[]>([]);
@@ -383,9 +432,9 @@ export const useChatStore = defineStore('chat', () => {
       endpoint: payload?.s3?.endpoint || '',
       region: payload?.s3?.region || '',
       bucket: payload?.s3?.bucket || '',
-      accessKey: payload?.s3?.accessKey || '',
-      secretKey: payload?.s3?.secretKey || '',
-      prefix: payload?.s3?.prefix || ''
+      prefix: payload?.s3?.prefix || '',
+      hasAccessKey: payload?.s3?.hasAccessKey === true,
+      hasSecretKey: payload?.s3?.hasSecretKey === true
     },
     migration: {
       status: payload?.migration?.status === 'running' || payload?.migration?.status === 'failed'
@@ -407,6 +456,114 @@ export const useChatStore = defineStore('chat', () => {
         : null
     }
   });
+
+  const normalizeServerRole = (role: any): ServerRole | null => {
+    if (!role || typeof role !== 'object') {
+      return null;
+    }
+
+    const id = typeof role.id === 'string' ? role.id : '';
+    const serverId = typeof role.serverId === 'string'
+      ? role.serverId
+      : (typeof role.server_id === 'string' ? role.server_id : '');
+    const key = typeof role.key === 'string' ? role.key : '';
+    const normalizedName = typeof role.name === 'string' ? role.name.trim() : '';
+    const rawColor = typeof role.color === 'string' ? role.color.trim() : '';
+
+    if (!id || !serverId || !key) {
+      return null;
+    }
+
+    return {
+      id,
+      serverId,
+      key,
+      name: normalizedName || key,
+      color: /^#([0-9a-fA-F]{6})$/.test(rawColor) ? rawColor.toLowerCase() : null,
+      isDefault: role.isDefault === true || role.is_default === true || role.is_default === 1,
+      isDeletable: role.isDeletable === true || role.is_deletable === true || role.is_deletable === 1,
+      position: Number.isFinite(Number(role.position)) ? Number(role.position) : 0,
+      createdAt: typeof role.createdAt === 'string'
+        ? role.createdAt
+        : (typeof role.created_at === 'string' ? role.created_at : null),
+      updatedAt: typeof role.updatedAt === 'string'
+        ? role.updatedAt
+        : (typeof role.updated_at === 'string' ? role.updated_at : null)
+    };
+  };
+
+  const normalizeServerRoles = (roles: unknown): ServerRole[] => {
+    if (!Array.isArray(roles)) {
+      return [];
+    }
+
+    return roles
+      .map((role) => normalizeServerRole(role))
+      .filter((role): role is ServerRole => Boolean(role))
+      .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
+  };
+
+  const applyServerRoles = (roles: unknown) => {
+    serverRoles.value = normalizeServerRoles(roles);
+  };
+
+  const normalizeUser = (user: any): User => {
+    const normalizedRoles = normalizeServerRoles(user?.roles);
+    const normalizedRoleIds = Array.isArray(user?.role_ids)
+      ? user.role_ids.filter((roleId: unknown): roleId is string => typeof roleId === 'string' && roleId.trim().length > 0)
+      : [];
+
+    return {
+      ...user,
+      avatar_url: user?.avatar_url || null,
+      avatar_mime_type: user?.avatar_mime_type || null,
+      role: typeof user?.role === 'string' && user.role.trim() ? user.role : 'user',
+      role_ids: normalizedRoleIds,
+      roles: normalizedRoles
+    };
+  };
+
+  const getPrimaryServerRole = (user: User | null | undefined) => {
+    if (!user) {
+      return null;
+    }
+
+    const userRoleIds = Array.isArray(user.role_ids) ? user.role_ids : [];
+    const userRoles = Array.isArray(user.roles) ? user.roles : [];
+    const resolvedRoles = userRoles.length > 0
+      ? userRoles
+      : serverRoles.value.filter((role) => userRoleIds.includes(role.id));
+
+    return resolvedRoles.find((role) => role.key !== 'all_users')
+      || resolvedRoles[0]
+      || getServerRoleByKey(user.role)
+      || null;
+  };
+
+  const getUserRoleKeys = (user: User | null | undefined): string[] => {
+    const primaryRole = user?.role || 'user';
+    const roles = Array.isArray(user?.roles) ? user.roles : [];
+    const keys = roles.map((role) => role.key).filter(Boolean);
+    return Array.from(new Set([primaryRole, ...keys]));
+  };
+
+  const userHasRole = (user: User | null | undefined, roleKeys: string[]) => {
+    const keys = new Set(getUserRoleKeys(user));
+    return roleKeys.some((roleKey) => keys.has(roleKey));
+  };
+
+  const getServerRoleByKey = (roleKey: string | null | undefined) => {
+    const normalizedRoleKey = typeof roleKey === 'string' ? roleKey.trim() : '';
+    if (!normalizedRoleKey) {
+      return null;
+    }
+
+    return serverRoles.value.find((role) => role.key === normalizedRoleKey) || null;
+  };
+
+  const getServerRoleColor = (roleKey: string | null | undefined) => {
+    return getServerRoleByKey(roleKey)?.color || null;
+  };
 
   const readBlobAsArrayBuffer = (blob: Blob) => {
     return new Promise<ArrayBuffer>((resolve, reject) => {
@@ -1086,6 +1243,7 @@ export const useChatStore = defineStore('chat', () => {
     unreadChannelIds.value = new Set();
     lastMarkedReadMessageByChannel.value = {};
     users.value = [];
+    serverRoles.value = [];
     onlineUserIds.value.clear();
     currentUser.value = null;
     server.value = null;
@@ -1098,20 +1256,20 @@ export const useChatStore = defineStore('chat', () => {
           endpoint: '',
           region: '',
           bucket: '',
-          accessKey: '',
-          secretKey: '',
-        prefix: ''
-      },
-      migration: {
-        status: 'idle',
-        target: null,
-        total: 0,
-        done: 0,
-        message: null,
-        startedAt: null,
-        updatedAt: null
-      }
-    };
+          hasAccessKey: false,
+          hasSecretKey: false,
+          prefix: ''
+        },
+        migration: {
+          status: 'idle',
+          target: null,
+          total: 0,
+          done: 0,
+          message: null,
+          startedAt: null,
+          updatedAt: null
+        }
+      };
   };
 
   const messageListeners = ref<((message: any) => void)[]>([]);
@@ -1389,8 +1547,8 @@ export const useChatStore = defineStore('chat', () => {
         break;
 
       case 'authenticated':
-        currentUser.value = payload.user;
-        currentUserRole.value = payload.user.role || 'user';
+        currentUser.value = normalizeUser(payload.user);
+        currentUserRole.value = currentUser.value.role || 'user';
         if (payload.user && payload.user.avatar_url !== readStoredAvatar()) {
           saveLocalAvatar(payload.user.avatar_url || null);
         }
@@ -1400,6 +1558,7 @@ export const useChatStore = defineStore('chat', () => {
         if ((payload.user.role || 'user') === 'admin') {
           requestServerStorageSettings();
         }
+        requestServerRoles();
         saveLocalUsername(payload.user.username);
         getChannels();
         break;
@@ -1445,12 +1604,33 @@ export const useChatStore = defineStore('chat', () => {
         }
         break;
       }
+
+      case 'server_roles_list':
+      case 'server_roles_updated':
+        applyServerRoles(payload.roles);
+        break;
         
       case 'member_list':
-        users.value = payload.members;
+        users.value = Array.isArray(payload.members) ? payload.members.map((member: any) => normalizeUser(member)) : [];
         onlineUserIds.value = new Set(payload.onlineUserIds);
         memberIps.value = payload.memberIps || {};
         break;
+
+      case 'member_roles_updated': {
+        const updatedUser = normalizeUser(payload.user);
+        const existingIndex = users.value.findIndex((user) => user.id === updatedUser.id);
+        if (existingIndex >= 0) {
+          const nextUsers = [...users.value];
+          nextUsers.splice(existingIndex, 1, updatedUser);
+          users.value = nextUsers;
+        }
+
+        if (currentUser.value?.id === updatedUser.id) {
+          currentUser.value = updatedUser;
+          currentUserRole.value = updatedUser.role;
+        }
+        break;
+      }
 
       case 'member_removed': {
         const removedUserId = (payload.userId || payload.targetUserId) as string | undefined;
@@ -1495,7 +1675,7 @@ export const useChatStore = defineStore('chat', () => {
       case 'user_online':
         onlineUserIds.value.add(payload.user.id);
         if (!users.value.find(u => u.id === payload.user.id)) {
-          users.value.push(payload.user);
+          users.value.push(normalizeUser(payload.user));
         }
         break;
         
@@ -1506,13 +1686,13 @@ export const useChatStore = defineStore('chat', () => {
       case 'user_updated':
         const index = users.value.findIndex(u => u.id === payload.user.id);
         if (index !== -1) {
-          users.value[index] = payload.user;
+          users.value[index] = normalizeUser(payload.user);
         } else {
-          users.value.push(payload.user);
+          users.value.push(normalizeUser(payload.user));
         }
         if (currentUser.value?.id === payload.user.id) {
-          currentUser.value = payload.user;
-          currentUserRole.value = payload.user.role;
+          currentUser.value = normalizeUser(payload.user);
+          currentUserRole.value = currentUser.value.role;
         }
         break;
         
@@ -1741,7 +1921,10 @@ export const useChatStore = defineStore('chat', () => {
         break;
         
       case 'role_updated':
-        currentUserRole.value = payload.role;
+        currentUserRole.value = typeof payload.role === 'string' ? payload.role : currentUser.value?.role || 'user';
+        if (payload.user) {
+          currentUser.value = normalizeUser(payload.user);
+        }
         break;
     }
   };
@@ -1884,7 +2067,7 @@ export const useChatStore = defineStore('chat', () => {
       });
     }
 
-    send('UPDATE_SERVER_SETTINGS', {
+    send('update_server_settings', {
       serverId,
       title,
       rulesChannelId,
@@ -1956,6 +2139,75 @@ export const useChatStore = defineStore('chat', () => {
 
   const requestServerStorageSettings = () => {
     send('get_server_storage_settings');
+  };
+
+  const requestServerRoles = () => {
+    const activeServerId = server.value?.id?.trim();
+    if (!activeServerId) {
+      return;
+    }
+
+    send('get_server_roles', {
+      serverId: activeServerId
+    });
+  };
+
+  const updateServerRole = (serverId: string, roleId: string, name: string, color: string | null) => {
+    send('update_server_role', {
+      serverId,
+      roleId,
+      name,
+      color
+    });
+  };
+
+  const assignMemberRoles = (serverId: string, userId: string, roleIds: string[]) => {
+    send('assign_member_roles', {
+      serverId,
+      userId,
+      roleIds
+    });
+  };
+
+  const updateServerRoles = async (roles: ServerRoleFormInput[]) => {
+    const normalizedRoles = roles.map((role) => ({
+      id: role.id,
+      name: role.name.trim(),
+      color: (() => {
+        const normalizedColor = (role.color || '').trim().toLowerCase();
+        return /^#([0-9a-f]{6})$/.test(normalizedColor) ? normalizedColor : null;
+      })()
+    }));
+
+    const existingRoles = normalizedRoles.map((role) => serverRoles.value.find((existingRole) => existingRole.id === role.id));
+    const invalidRole = normalizedRoles.find((role) => !role.name);
+    if (invalidRole) {
+      throw new Error('Role name is required');
+    }
+
+    if (existingRoles.some((role) => !role)) {
+      throw new Error('Role metadata is out of date. Reopen server settings and try again.');
+    }
+
+    const changedRoles = normalizedRoles.filter((role, index) => {
+      const existingRole = existingRoles[index];
+      if (!existingRole) {
+        return false;
+      }
+
+      return role.name !== existingRole.name || role.color !== existingRole.color;
+    });
+
+    const activeServerId = server.value?.id?.trim();
+    if (!activeServerId) {
+      throw new Error('Server metadata is unavailable. Reopen server settings and try again.');
+    }
+
+    for (const role of changedRoles) {
+      updateServerRole(activeServerId, role.id, role.name, role.color);
+    }
+
+    return changedRoles.length;
   };
 
   const clearError = () => {
@@ -2231,6 +2483,7 @@ export const useChatStore = defineStore('chat', () => {
     currentUser,
     currentUserRole,
     server,
+    serverRoles,
     uncategorizedCategoryDeleted,
     serverStorageSettings,
     lastError,
@@ -2271,6 +2524,15 @@ export const useChatStore = defineStore('chat', () => {
     deleteChannel,
     reorderChannels,
     updateServerSettings,
+    requestServerRoles,
+    updateServerRole,
+    updateServerRoles,
+    assignMemberRoles,
+    getServerRoleByKey,
+    getServerRoleColor,
+    getPrimaryServerRole,
+    getUserRoleKeys,
+    userHasRole,
     testServerStorageSettings,
     requestServerStorageSettings,
     requestServerRefresh,

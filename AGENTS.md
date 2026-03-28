@@ -1,5 +1,7 @@
 - this project is about a self-hosted discord, similiar to teamspeak hosting but all discord features, every user spins its own guild as a standalone server, client can connect to any guild/server
 - use vuejs 3 setup api, vite, typescript, nodejs, sqllite (data storage server)
-- dont make mistakes, try to make it work first time and think a lot if necessary
-- dont care about token/cost, make sure you dont make mistakes
+- don't make mistakes, try to make it work first time and think a lot if necessary
+- don't care about token/cost, make sure you don't make mistakes
 - provide migrations for existing server-dbs when adding/changing sqllite tables or content
+- dont use python for anything
+- use dynamic imports on client/frontend side where possible

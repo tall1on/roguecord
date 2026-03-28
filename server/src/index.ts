@@ -8,9 +8,9 @@ import {db, channelsSchemaReady, dataDir} from './db';
 import {createWorker} from './mediasoup';
 import {connectionManager} from './ws/connectionManager';
 import {handleMessage, handleClientDisconnect} from './ws/handlers';
-import {adminKey} from './admin';
+import { setAdminKeyEnabled } from './admin';
 import { startRssPolling } from './rssPolling';
-import { getServer, getServerStorageSettings } from './models';
+import { getServer, getServerStorageSettings, hasAdminUser } from './models';
 import type { S3StorageConfig } from './storage/s3Storage';
 import { getFileStreamFromS3 } from './storage/s3Storage';
 
@@ -452,7 +452,10 @@ async function startServer() {
             console.error('Failed to create Mediasoup worker:', error);
         }
         startRssPolling();
-        console.log(`Admin Key: ${adminKey}`);
+        const adminKey = setAdminKeyEnabled(!(await hasAdminUser()));
+        if (adminKey) {
+            console.log(`Admin Key: ${adminKey}`);
+        }
     });
 }
 

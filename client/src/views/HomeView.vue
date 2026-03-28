@@ -51,8 +51,7 @@ const activeFolderFiles = computed<FolderChannelFile[]>(() => {
 })
 
 const canManageFolderFiles = computed(() => {
-  const role = chatStore.currentUserRole || 'user'
-  return role === 'admin' || role === 'owner'
+  return chatStore.userHasRole(chatStore.currentUser, ['admin', 'owner'])
 })
 
 const canUploadToFolder = computed(() => canManageFolderFiles.value)
@@ -211,8 +210,7 @@ const openScreenContextMenu = (event: MouseEvent, userId: string) => {
 
 const canDeleteMessage = (message: Message) => {
   const currentUserId = chatStore.currentUser?.id
-  const currentRole = chatStore.currentUserRole || 'user'
-  return message.user_id === currentUserId || currentRole === 'admin' || currentRole === 'owner'
+  return message.user_id === currentUserId || chatStore.userHasRole(chatStore.currentUser, ['admin', 'owner'])
 }
 
 const canReplyToMessage = (message: Message) => {
@@ -549,8 +547,8 @@ const isReadOnlyRssChannel = computed(() => {
     return false
   }
 
-  const role = chatStore.currentUserRole || 'user'
-  return !privilegedRoles.has(role)
+  const roleKeys = chatStore.getUserRoleKeys(chatStore.currentUser)
+  return !roleKeys.some((role) => privilegedRoles.has(role))
 })
 
 const messagePlaceholder = computed(() => {
@@ -951,6 +949,11 @@ const resolveMessageAvatarUrl = (message: Message) => {
 
 const getMessageInitial = (message: Message) => message.user?.username.charAt(0).toUpperCase() || '?'
 
+const getMessageRoleColor = (message: Message) => {
+  const roleKey = message.user?.role || 'all_users'
+  return chatStore.getServerRoleColor(roleKey)
+}
+
 type RenderEntry =
   | { type: 'divider'; key: string; label: string }
   | { type: 'message'; key: string; message: Message }
@@ -1128,7 +1131,10 @@ watch(
             </div>
             <div class="flex-1 min-w-0">
               <div class="flex items-baseline gap-2 mb-[1px]">
-                <span class="font-semibold text-[14px] cursor-pointer transition-colors" :class="entry.message.user?.role === 'admin' ? 'text-red-400 hover:text-red-300' : 'text-zinc-200 hover:text-white'">{{ entry.message.user?.username || 'Unknown User' }}</span>
+                <span
+                  class="font-semibold text-[14px] cursor-pointer transition-colors hover:brightness-110"
+                  :style="{ color: getMessageRoleColor(entry.message) || '#e4e4e7' }"
+                >{{ entry.message.user?.username || 'Unknown User' }}</span>
                 <span class="text-[10px] font-medium text-zinc-500 group-hover:text-zinc-400">{{ formatTime(entry.message.created_at) }}</span>
               </div>
               <div v-if="entry.message.reply_to_message" class="mb-1 flex max-w-[420px] items-center gap-2 rounded-md border border-white/5 bg-zinc-900/50 px-2.5 py-1.5">
@@ -1235,14 +1241,16 @@ watch(
                 </div>
               </div>
               <div v-if="getMessageReactions(entry.message).length > 0" class="mt-2 flex flex-wrap gap-2">
-                <button
-                  v-for="reaction in getMessageReactions(entry.message)"
-                  :key="`${entry.message.id}-${reaction.emoji}`"
-                  type="button"
-                  class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
-                  :class="reaction.reacted_by_current_user ? 'border-indigo-400/50 bg-indigo-500/15 text-indigo-200' : 'border-white/10 bg-zinc-900/70 text-zinc-300 hover:bg-zinc-800/80'"
-                  @click="toggleMessageReaction(entry.message, reaction.emoji)"
-                >
+                  <button
+                    v-for="reaction in getMessageReactions(entry.message)"
+                    :key="`${entry.message.id}-${reaction.emoji}`"
+                    type="button"
+                    class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium shadow-sm transition-all duration-150"
+                    :class="reaction.reacted_by_current_user
+                      ? 'border-indigo-300/45 bg-indigo-400/20 text-indigo-100 shadow-indigo-950/20 hover:bg-indigo-400/26'
+                      : 'border-white/10 bg-zinc-900/70 text-zinc-300 hover:bg-zinc-800/80'"
+                    @click="toggleMessageReaction(entry.message, reaction.emoji)"
+                  >
                   <span>{{ reaction.emoji }}</span>
                   <span>{{ reaction.count }}</span>
                 </button>
