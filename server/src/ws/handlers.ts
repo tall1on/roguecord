@@ -20,6 +20,7 @@ import {
   updateUserRole,
   updateUserProfile,
   getUsers,
+  hasAdminUser,
   getServer,
   createServer,
   updateServerSettings,
@@ -51,11 +52,18 @@ import {
   deleteMessageById,
   toggleMessageReaction,
   getMessageReactionSummary,
-  updateMessageAttachmentStorage
+  updateMessageAttachmentStorage,
+  getServerRoles,
+  getServerRoleById,
+  updateServerRole,
+  getUserServerRoles,
+  hydrateUserWithServerRoles,
+  setUserServerRoles,
+  userHasServerRoleKey
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
-import { adminKey } from '../admin';
+import { consumeAdminKey, setAdminKeyEnabled } from '../admin';
 import fs from 'node:fs';
 import path from 'node:path';
 import { dataDir } from '../db';
@@ -194,6 +202,38 @@ const parseUserAvatarDataUrl = (value: unknown): { dataUrl: string; mimeType: 'i
     dataUrl: `data:${mimeType};base64,${buffer.toString('base64')}`,
     mimeType
   };
+};
+
+const normalizeRoleName = (value: unknown) => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  if (!normalized) return null;
+  return normalized.slice(0, 64);
+};
+
+const normalizeRoleColor = (value: unknown) => {
+  if (value == null) return null;
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  if (!/^#([0-9a-fA-F]{6})$/.test(normalized)) return null;
+  return normalized.toLowerCase();
+};
+
+const broadcastServerRoles = async (serverId: string) => {
+  const roles = await getServerRoles(serverId);
+  connectionManager.broadcastToAuthenticated({
+    type: 'server_roles_updated',
+    payload: { serverId, roles }
+  });
+};
+
+const sendServerRoles = async (client: ClientConnection, serverId: string) => {
+  const roles = await getServerRoles(serverId);
+  client.ws.send(JSON.stringify({
+    type: 'server_roles_list',
+    payload: { serverId, roles }
+  }));
 };
 
 const sanitizeUsernameForProfile = (value: unknown) => {
@@ -521,6 +561,26 @@ const canDeleteMessage = (role: string | null | undefined, messageUserId: string
   return role === 'admin' || role === 'owner';
 };
 
+const getActiveServerId = async () => {
+  const server = await getServer();
+  return server?.id || null;
+};
+
+const getResolvedUser = async (userId: string) => {
+  const user = await getUserById(userId);
+  if (!user) return null;
+  const serverId = await getActiveServerId();
+  if (!serverId) return { ...user, role_ids: [], roles: [] };
+  return hydrateUserWithServerRoles(serverId, user);
+};
+
+const hasResolvedRole = async (userId: string, roleKeys: string[]) => {
+  const serverId = await getActiveServerId();
+  const user = await getUserById(userId);
+  if (!serverId || !user) return false;
+  return userHasServerRoleKey(serverId, user, roleKeys);
+};
+
 const deleteStoredMessageAttachment = async (channelId: string, attachment: {
   storage_provider: 'data_dir' | 's3';
   storage_key: string | null;
@@ -687,42 +747,76 @@ const getStorageRuntimeConfig = async (): Promise<{ storageType: 'data_dir' | 's
   };
 };
 
-const buildStorageSettingsPayloadForClient = (settings: Awaited<ReturnType<typeof getServerStorageSettings>>) => {
-  return {
-    storageType: settings?.storageType || 'data_dir',
-    storageLastError: settings?.storageLastError || null,
-    migration: {
-      status: settings?.storageMigrationStatus || 'idle',
-      target: settings?.storageMigrationTarget || null,
-      total: settings?.storageMigrationTotal || 0,
-      done: settings?.storageMigrationDone || 0,
-      message: settings?.storageMigrationMessage || null,
-      startedAt: settings?.storageMigrationStartedAt || null,
-      updatedAt: settings?.storageMigrationUpdatedAt || null
-    },
-    s3: settings?.s3
-      ? {
-        provider: settings.s3.provider,
-        providerUrl: settings.s3.providerUrl || '',
-        endpoint: settings.s3.endpoint,
-        region: settings.s3.region,
-        bucket: settings.s3.bucket,
-        accessKey: settings.s3.accessKey,
-        secretKey: settings.s3.secretKey,
-        prefix: settings.s3.prefix || ''
-      }
-      : {
-        provider: 'generic_s3',
-        providerUrl: '',
-        endpoint: '',
-        region: '',
-        bucket: '',
-        accessKey: '',
-        secretKey: '',
-        prefix: ''
-      }
-  };
-};
+const buildStorageSettingsBasePayload = (
+  settings: Awaited<ReturnType<typeof getServerStorageSettings>>
+) => ({
+  storageType: settings?.storageType || 'data_dir',
+  storageLastError: settings?.storageLastError || null,
+  migration: {
+    status: settings?.storageMigrationStatus || 'idle',
+    target: settings?.storageMigrationTarget || null,
+    total: settings?.storageMigrationTotal || 0,
+    done: settings?.storageMigrationDone || 0,
+    message: settings?.storageMigrationMessage || null,
+    startedAt: settings?.storageMigrationStartedAt || null,
+    updatedAt: settings?.storageMigrationUpdatedAt || null
+  }
+});
+
+const buildAuthenticatedStorageSettingsPayload = (
+  settings: Awaited<ReturnType<typeof getServerStorageSettings>>
+) => ({
+  ...buildStorageSettingsBasePayload(settings),
+  s3: {
+    provider: settings?.s3?.provider === 'cloudflare_r2' ? 'cloudflare_r2' : 'generic_s3',
+    providerUrl: '',
+    endpoint: '',
+    region: '',
+    bucket: '',
+    prefix: ''
+  }
+});
+
+const buildAdminStorageSettingsPayload = (
+  settings: Awaited<ReturnType<typeof getServerStorageSettings>>
+) => ({
+  ...buildStorageSettingsBasePayload(settings),
+  s3: settings?.s3
+    ? {
+      provider: settings.s3.provider,
+      providerUrl: settings.s3.providerUrl || '',
+      endpoint: settings.s3.endpoint,
+      region: settings.s3.region,
+      bucket: settings.s3.bucket,
+      prefix: settings.s3.prefix || '',
+      hasAccessKey: Boolean(settings.s3.accessKey),
+      hasSecretKey: Boolean(settings.s3.secretKey)
+    }
+    : {
+      provider: 'generic_s3',
+      providerUrl: '',
+      endpoint: '',
+      region: '',
+      bucket: '',
+      prefix: '',
+      hasAccessKey: false,
+      hasSecretKey: false
+    }
+});
+
+const buildMergedS3ConfigFromInput = (
+  currentS3: NonNullable<Awaited<ReturnType<typeof getServerStorageSettings>>>['s3'],
+  storageInput: StorageSettingsInput
+) => normalizeS3Config({
+  provider: storageInput.provider || currentS3?.provider || 'generic_s3',
+  providerUrl: storageInput.providerUrl || currentS3?.providerUrl || null,
+  endpoint: storageInput.endpoint || currentS3?.endpoint || null,
+  region: storageInput.region || currentS3?.region || null,
+  bucket: storageInput.bucket || currentS3?.bucket || null,
+  accessKey: storageInput.accessKey || currentS3?.accessKey || null,
+  secretKey: storageInput.secretKey || currentS3?.secretKey || null,
+  prefix: storageInput.prefix ?? currentS3?.prefix ?? null
+});
 
 type StorageMigrationTarget = 'data_dir' | 's3';
 
@@ -766,18 +860,26 @@ const areS3ConfigsEquivalent = (left: S3StorageConfig, right: S3StorageConfig) =
 
 const broadcastServerStorageSettings = async () => {
   const settings = await getServerStorageSettings();
-  connectionManager.broadcastToAuthenticated({
-    type: 'server_storage_settings',
-    payload: buildStorageSettingsPayloadForClient(settings)
-  });
+  const authenticatedConnections = Array.from(connectionManager.getClients()).filter((connection) => Boolean(connection.userId));
+
+  for (const connection of authenticatedConnections) {
+    connection.ws.send(JSON.stringify({
+      type: 'server_storage_settings',
+      payload: buildAuthenticatedStorageSettingsPayload(settings)
+    }));
+  }
 };
 
 const broadcastServerStorageMigrationProgress = async () => {
   const settings = await getServerStorageSettings();
-  connectionManager.broadcastToAuthenticated({
-    type: 'server_storage_migration_progress',
-    payload: buildStorageSettingsPayloadForClient(settings)
-  });
+  const authenticatedConnections = Array.from(connectionManager.getClients()).filter((connection) => Boolean(connection.userId));
+
+  for (const connection of authenticatedConnections) {
+    connection.ws.send(JSON.stringify({
+      type: 'server_storage_migration_progress',
+      payload: buildAuthenticatedStorageSettingsPayload(settings)
+    }));
+  }
 };
 
 const persistMigrationProgress = async (
@@ -1437,6 +1539,15 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'update_server_settings':
         await handleUpdateServerSettings(client, payload);
         break;
+      case 'get_server_roles':
+        await handleGetServerRoles(client, payload);
+        break;
+      case 'update_server_role':
+        await handleUpdateServerRole(client, payload);
+        break;
+      case 'assign_member_roles':
+        await handleAssignMemberRoles(client, payload);
+        break;
       case 'get_server_storage_settings':
         await handleGetServerStorageSettings(client);
         break;
@@ -1629,7 +1740,7 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
         }
 
         const server = await getServer();
-        const userWithUpdatedIp = await getUserById(user.id);
+        const userWithUpdatedIp = await getResolvedUser(user.id);
         client.ws.send(JSON.stringify({
           type: 'authenticated',
           payload: { user: userWithUpdatedIp || user, server }
@@ -1637,6 +1748,7 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
 
         // Send full member list to the newly authenticated user
         const allUsers = await getUsers();
+        const hydratedUsers = server?.id ? await Promise.all(allUsers.map((member) => hydrateUserWithServerRoles(server.id, member))) : allUsers;
         const onlineUserIds = connectionManager.getOnlineUserIds();
         const memberIps = Object.fromEntries(
           allUsers.map((member) => [member.id, member.last_ip || connectionManager.getUserIp(member.id) || null])
@@ -1644,11 +1756,15 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
         client.ws.send(JSON.stringify({
           type: 'member_list',
           payload: {
-            members: allUsers,
+            members: hydratedUsers,
             onlineUserIds,
             memberIps
           }
         }));
+
+        if (server?.id) {
+          await sendServerRoles(client, server.id);
+        }
 
         // Broadcast to others that this user is online, if they weren't already
         if (!connectionManager.isUserOnline(user.id, client)) {
@@ -1800,7 +1916,7 @@ const handleCreateChannel = async (
   }
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can create channels' } }));
     return;
   }
@@ -1833,7 +1949,7 @@ const handleCreateCategory = async (
   }
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can create categories' } }));
     return;
   }
@@ -1859,7 +1975,7 @@ const handleReorderChannels = async (
   if (!client.userId) return;
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can reorder channels' } }));
     return;
   }
@@ -1926,7 +2042,7 @@ const handleReorderCategories = async (
   if (!client.userId) return;
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can reorder categories' } }));
     return;
   }
@@ -1983,7 +2099,7 @@ const handleDeleteCategory = async (client: ClientConnection, payload: { categor
   }
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can delete categories' } }));
     return;
   }
@@ -2017,7 +2133,7 @@ const handleDeleteUncategorizedCategory = async (client: ClientConnection) => {
   if (!client.userId) return;
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can delete categories' } }));
     return;
   }
@@ -2044,7 +2160,7 @@ const handleDeleteChannel = async (client: ClientConnection, payload: { channel_
   }
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can delete channels' } }));
     return;
   }
@@ -2162,7 +2278,7 @@ const handleBeginFileUpload = async (
       return;
     }
 
-    const user = await getUserById(client.userId);
+    const user = await getResolvedUser(client.userId);
     if (!user || user.role !== 'admin') {
       client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can upload files' } }));
       return;
@@ -2434,7 +2550,7 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
     return;
   }
 
-  const user = await getUserById(client.userId);
+  const user = await getResolvedUser(client.userId);
   if (!user) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
     return;
@@ -2642,7 +2758,7 @@ const handleFolderUploadFile = async (
     return;
   }
 
-  const user = await getUserById(client.userId);
+  const user = await getResolvedUser(client.userId);
   if (!user || user.role !== 'admin') {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can upload files' } }));
     return;
@@ -2815,7 +2931,7 @@ const handleFolderDeleteFile = async (
     return;
   }
 
-  const user = await getUserById(client.userId);
+  const user = await getResolvedUser(client.userId);
   if (!user || !hasFolderManagementAccess(user.role)) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions to delete files' } }));
     return;
@@ -3260,13 +3376,33 @@ const handleGetProducers = async (client: ClientConnection, payload: { channel_i
 const handleSubmitAdminKey = async (client: ClientConnection, payload: { key: string }) => {
   if (!client.userId) return;
   const { key } = payload;
+  const adminExists = await hasAdminUser();
 
-  if (key === adminKey) {
-    await updateUserRole(client.userId, 'admin');
-    const user = await getUserById(client.userId);
+  if (adminExists) {
+    setAdminKeyEnabled(false);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Bootstrap admin key is disabled' } }));
+    return;
+  }
+
+  setAdminKeyEnabled(true);
+
+  if (consumeAdminKey(key)) {
+    const serverId = await getActiveServerId();
+    if (serverId) {
+      const roles = await getServerRoles(serverId);
+      const adminRoleId = roles.find((role) => role.key === 'admin')?.id;
+      if (adminRoleId) {
+        await setUserServerRoles(serverId, client.userId, [adminRoleId]);
+      } else {
+        await updateUserRole(client.userId, 'admin');
+      }
+    } else {
+      await updateUserRole(client.userId, 'admin');
+    }
+    const user = await getResolvedUser(client.userId);
     client.ws.send(JSON.stringify({
       type: 'role_updated',
-      payload: { role: 'admin', user }
+      payload: { role: user?.role || 'admin', user }
     }));
     
     // Broadcast user update to all authenticated clients
@@ -3283,7 +3419,7 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
   if (!client.userId) return;
   
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can update server settings' } }));
     return;
   }
@@ -3341,7 +3477,7 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
     if (typedPayload.storage) {
       const currentStorage = await getServerStorageSettings();
       currentStorageType = currentStorage?.storageType ?? null;
-      const currentS3 = currentStorage?.s3;
+      const currentS3 = currentStorage?.s3 ?? null;
       const rawStorageInput = typedPayload.storage;
       const nestedS3Input = rawStorageInput?.s3;
       const storageInput: StorageSettingsInput = {
@@ -3359,16 +3495,7 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
       };
 
         if (storageInput.enabled) {
-          const mergedS3Config = normalizeS3Config({
-          provider: storageInput.provider || currentS3?.provider || 'generic_s3',
-          providerUrl: storageInput.providerUrl || currentS3?.providerUrl || null,
-          endpoint: storageInput.endpoint || currentS3?.endpoint || null,
-          region: storageInput.region || currentS3?.region || null,
-          bucket: storageInput.bucket || currentS3?.bucket || null,
-          accessKey: storageInput.accessKey || currentS3?.accessKey || null,
-          secretKey: storageInput.secretKey || currentS3?.secretKey || null,
-          prefix: storageInput.prefix ?? currentS3?.prefix ?? null
-        });
+          const mergedS3Config = buildMergedS3ConfigFromInput(currentS3, storageInput);
           normalizedCurrentS3Config = mergedS3Config;
 
           const validation = await validateS3Configuration(mergedS3Config);
@@ -3595,11 +3722,203 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
 
     client.ws.send(JSON.stringify({
       type: 'server_storage_settings',
-      payload: buildStorageSettingsPayloadForClient(updatedStorageSettings)
+      payload: buildAdminStorageSettingsPayload(updatedStorageSettings)
     }));
   } catch (error) {
     console.error('[WS DEBUG] Failed to update server settings:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to update server settings' } }));
+  }
+};
+
+const handleGetServerRoles = async (client: ClientConnection, payload: { serverId?: string }) => {
+  if (!client.userId) return;
+
+  const serverId = typeof payload?.serverId === 'string' ? payload.serverId.trim() : '';
+  if (!serverId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID is required' } }));
+    return;
+  }
+
+  try {
+    await sendServerRoles(client, serverId);
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to read server roles:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to read server roles' } }));
+  }
+};
+
+const handleUpdateServerRole = async (
+  client: ClientConnection,
+  payload: { serverId?: string; roleId?: string; name?: string; color?: string | null }
+) => {
+  if (!client.userId) return;
+
+  const user = await getUserById(client.userId);
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can update roles' } }));
+    return;
+  }
+
+  const requestedServerId = typeof payload?.serverId === 'string' ? payload.serverId.trim() : '';
+  const roleId = typeof payload?.roleId === 'string' ? payload.roleId.trim() : '';
+  const normalizedName = normalizeRoleName(payload?.name);
+  const colorProvided = Boolean(payload && Object.prototype.hasOwnProperty.call(payload, 'color'));
+  const normalizedColor = colorProvided ? normalizeRoleColor(payload?.color) : null;
+
+  if (!roleId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Role ID is required' } }));
+    return;
+  }
+
+  if (!normalizedName) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Role name is required' } }));
+    return;
+  }
+
+  if (colorProvided && payload?.color != null && normalizedColor == null) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Role color must be a hex value like #5865f2' } }));
+    return;
+  }
+
+  try {
+    const existingRole = requestedServerId
+      ? await getServerRoleById(requestedServerId, roleId)
+      : undefined;
+    const resolvedServerId = existingRole?.serverId || requestedServerId;
+
+    if (!resolvedServerId) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID is required' } }));
+      return;
+    }
+
+    if (existingRole && existingRole.serverId !== resolvedServerId) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Role does not belong to the active server' } }));
+      return;
+    }
+
+    const roleToUpdate = existingRole || await getServerRoleById(resolvedServerId, roleId);
+    if (!roleToUpdate) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Role not found' } }));
+      return;
+    }
+
+    const updatedRole = await updateServerRole({
+      serverId: resolvedServerId,
+      roleId,
+      name: normalizedName,
+      color: normalizedColor
+    });
+
+    client.ws.send(JSON.stringify({
+      type: 'server_role_updated',
+      payload: { serverId: resolvedServerId, role: updatedRole }
+    }));
+
+    await broadcastServerRoles(resolvedServerId);
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to update server role:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to update server role' } }));
+  }
+};
+
+const handleAssignMemberRoles = async (
+  client: ClientConnection,
+  payload: { serverId?: string; userId?: string; roleIds?: string[] }
+) => {
+  if (!client.userId) return;
+
+  if (!(await hasResolvedRole(client.userId, ['admin']))) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can assign member roles' } }));
+    return;
+  }
+
+  const serverId = typeof payload?.serverId === 'string' ? payload.serverId.trim() : '';
+  const userId = typeof payload?.userId === 'string' ? payload.userId.trim() : '';
+  const roleIds = Array.isArray(payload?.roleIds)
+    ? payload.roleIds.filter((roleId): roleId is string => typeof roleId === 'string' && roleId.trim().length > 0)
+    : [];
+
+  if (!serverId || !userId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID and user ID are required' } }));
+    return;
+  }
+
+  try {
+    const actingUser = await getUserById(client.userId);
+    const targetUser = await getUserById(userId);
+
+    if (!actingUser || !targetUser) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
+      return;
+    }
+
+    const [actingRoles, targetRoles, requestedRoles] = await Promise.all([
+      getUserServerRoles(serverId, actingUser.id, actingUser.role),
+      getUserServerRoles(serverId, targetUser.id, targetUser.role),
+      getServerRoles(serverId)
+    ]);
+
+    const requestedRoleIdSet = new Set(roleIds);
+    const requestedServerRoles = requestedRoles.filter((role) => requestedRoleIdSet.has(role.id));
+    const actingHasAdminRole = actingRoles.some((role) => role.key === 'admin');
+    const targetHasAdminRole = targetRoles.some((role) => role.key === 'admin');
+    const requestedHasAdminRole = requestedServerRoles.some((role) => role.key === 'admin');
+
+    if (!actingHasAdminRole) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can assign member roles' } }));
+      return;
+    }
+
+    if (userId === client.userId && !requestedHasAdminRole) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'You cannot remove your own admin role' } }));
+      return;
+    }
+
+    if (targetHasAdminRole && !requestedHasAdminRole) {
+      const otherAdmins = await getUsers();
+      let otherAdminExists = false;
+
+      for (const user of otherAdmins) {
+        if (user.id === targetUser.id) {
+          continue;
+        }
+
+        if (await userHasServerRoleKey(serverId, user, ['admin'])) {
+          otherAdminExists = true;
+          break;
+        }
+      }
+
+      if (!otherAdminExists) {
+        client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Cannot remove the last admin role from the server' } }));
+        return;
+      }
+    }
+
+    await setUserServerRoles(serverId, userId, roleIds);
+    const baseUser = await getUserById(userId);
+    const hydratedUser = baseUser ? await hydrateUserWithServerRoles(serverId, baseUser) : null;
+    if (!hydratedUser) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
+      return;
+    }
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'user_updated',
+      payload: { user: hydratedUser }
+    });
+
+    client.ws.send(JSON.stringify({
+      type: 'member_roles_updated',
+      payload: {
+        serverId,
+        user: hydratedUser,
+        roleIds: hydratedUser.role_ids || []
+      }
+    }));
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to assign member roles:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to assign member roles' } }));
   }
 };
 
@@ -3633,13 +3952,13 @@ const handleTestServerStorageS3 = async (
   if (!client.userId) return;
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can test storage settings' } }));
     return;
   }
 
   const currentStorage = await getServerStorageSettings();
-  const currentS3 = currentStorage?.s3;
+  const currentS3 = currentStorage?.s3 ?? null;
   const rawStorageInput = payload?.storage || {};
   const nestedS3Input = rawStorageInput?.s3;
   const storageInput: StorageSettingsInput = {
@@ -3657,16 +3976,7 @@ const handleTestServerStorageS3 = async (
   };
 
   try {
-    const mergedS3Config = normalizeS3Config({
-      provider: storageInput.provider || currentS3?.provider || 'generic_s3',
-      providerUrl: storageInput.providerUrl || currentS3?.providerUrl || null,
-      endpoint: storageInput.endpoint || currentS3?.endpoint || null,
-      region: storageInput.region || currentS3?.region || null,
-      bucket: storageInput.bucket || currentS3?.bucket || null,
-      accessKey: storageInput.accessKey || currentS3?.accessKey || null,
-      secretKey: storageInput.secretKey || currentS3?.secretKey || null,
-      prefix: storageInput.prefix ?? currentS3?.prefix ?? null
-    });
+    const mergedS3Config = buildMergedS3ConfigFromInput(currentS3, storageInput);
 
     const validation = await validateS3Configuration(mergedS3Config);
     client.ws.send(JSON.stringify({
@@ -3690,7 +4000,7 @@ const handleGetServerStorageSettings = async (client: ClientConnection) => {
   if (!client.userId) return;
 
   const user = await getUserById(client.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || !(await hasResolvedRole(client.userId, ['admin']))) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can read storage settings' } }));
     return;
   }
@@ -3699,7 +4009,7 @@ const handleGetServerStorageSettings = async (client: ClientConnection) => {
     const settings = await getServerStorageSettings();
     client.ws.send(JSON.stringify({
       type: 'server_storage_settings',
-      payload: buildStorageSettingsPayloadForClient(settings)
+      payload: buildAdminStorageSettingsPayload(settings)
     }));
   } catch (error) {
     console.error('[WS DEBUG] Failed to read storage settings:', error);
@@ -3917,7 +4227,7 @@ const handleKickMember = async (
   }
 ) => {
   if (!client.userId) return;
-  const moderator = await getUserById(client.userId);
+  const moderator = await getResolvedUser(client.userId);
   if (!moderator || !canModerate(moderator.role)) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions' } }));
     return;
@@ -4026,7 +4336,7 @@ const handleBanMember = async (
   }
 ) => {
   if (!client.userId) return;
-  const moderator = await getUserById(client.userId);
+  const moderator = await getResolvedUser(client.userId);
   if (!moderator || !canModerate(moderator.role)) {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Insufficient permissions' } }));
     return;

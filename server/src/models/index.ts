@@ -93,6 +93,24 @@ export interface ServerStorageSettings {
   storageMigrationUpdatedAt: string | null;
 }
 
+export interface ServerRole {
+  id: string;
+  serverId: string;
+  key: string;
+  name: string;
+  color: string | null;
+  isDefault: boolean;
+  isDeletable: boolean;
+  position: number;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface UserWithServerRoles extends User {
+  role_ids: string[];
+  roles: ServerRole[];
+}
+
 const mapServerRow = (row: any): Server => ({
   id: row.id,
   name: row.name,
@@ -136,6 +154,19 @@ const mapServerStorageSettings = (row: any): ServerStorageSettings => ({
   storageMigrationUpdatedAt: row.storage_migration_updated_at || null
 });
 
+const mapServerRoleRow = (row: any): ServerRole => ({
+  id: row.id,
+  serverId: row.server_id,
+  key: row.key,
+  name: row.name,
+  color: row.color || null,
+  isDefault: Boolean(row.is_default),
+  isDeletable: Boolean(row.is_deletable),
+  position: Number.isFinite(Number(row.position)) ? Number(row.position) : 0,
+  createdAt: row.created_at || null,
+  updatedAt: row.updated_at || null
+});
+
 export const getServer = async (): Promise<Server | undefined> => {
   const row = await dbGet<any>('SELECT * FROM servers LIMIT 1');
   if (!row) return undefined;
@@ -145,8 +176,216 @@ export const getServer = async (): Promise<Server | undefined> => {
 export const createServer = async (name: string, welcomeChannelId?: string): Promise<Server> => {
   const id = crypto.randomUUID();
   await dbRun('INSERT INTO servers (id, name, title, welcome_channel_id) VALUES (?, ?, ?, ?)', [id, name, name, welcomeChannelId]);
+  await ensureDefaultRolesForServer(id);
   const row = await dbGet<any>('SELECT * FROM servers WHERE id = ?', [id]);
   return mapServerRow(row);
+};
+
+export const ensureDefaultRolesForServer = async (serverId: string): Promise<void> => {
+  await dbRun(
+    `
+      INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, position)
+      SELECT ?, ?, 'all_users', 'User', NULL, 1, 0, 0
+      WHERE NOT EXISTS (
+        SELECT 1 FROM server_roles WHERE server_id = ? AND key = 'all_users'
+      )
+    `,
+    [crypto.randomUUID(), serverId, serverId]
+  );
+
+  await dbRun(
+    `
+      INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, position)
+      SELECT ?, ?, 'admin', 'Admin', '#c41717', 1, 0, 1
+      WHERE NOT EXISTS (
+        SELECT 1 FROM server_roles WHERE server_id = ? AND key = 'admin'
+      )
+    `,
+    [crypto.randomUUID(), serverId, serverId]
+  );
+
+  await dbRun(
+    `
+      UPDATE server_roles
+      SET
+        name = CASE
+          WHEN key = 'all_users' THEN 'User'
+          WHEN key = 'admin' THEN 'Admin'
+          ELSE name
+        END,
+        color = CASE
+          WHEN key = 'admin' THEN '#c41717'
+          ELSE color
+        END,
+        is_default = CASE WHEN key IN ('all_users', 'admin') THEN 1 ELSE is_default END,
+        is_deletable = CASE WHEN key IN ('all_users', 'admin') THEN 0 ELSE is_deletable END,
+        position = CASE
+          WHEN key = 'all_users' THEN 0
+          WHEN key = 'admin' THEN 1
+          ELSE position
+        END,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE server_id = ? AND key IN ('all_users', 'admin')
+    `,
+    [serverId]
+  );
+};
+
+export const getServerRoles = async (serverId: string): Promise<ServerRole[]> => {
+  await ensureDefaultRolesForServer(serverId);
+  const rows = await dbAll<any>(
+    'SELECT * FROM server_roles WHERE server_id = ? ORDER BY position ASC, name COLLATE NOCASE ASC',
+    [serverId]
+  );
+  return rows.map(mapServerRoleRow);
+};
+
+const getServerRolesByIds = async (serverId: string, roleIds: string[]): Promise<ServerRole[]> => {
+  if (!roleIds.length) {
+    return [];
+  }
+
+  const placeholders = roleIds.map(() => '?').join(', ');
+  const rows = await dbAll<any>(
+    `SELECT * FROM server_roles WHERE server_id = ? AND id IN (${placeholders}) ORDER BY position ASC, name COLLATE NOCASE ASC`,
+    [serverId, ...roleIds]
+  );
+  return rows.map(mapServerRoleRow);
+};
+
+export const getUserServerRoleIds = async (serverId: string, userId: string, legacyRole?: string | null): Promise<string[]> => {
+  await ensureDefaultRolesForServer(serverId);
+  const rows = await dbAll<{ id: string; key: string }>(
+    `
+      SELECT sr.id, sr.key
+      FROM user_server_roles usr
+      INNER JOIN server_roles sr ON sr.id = usr.server_role_id
+      WHERE usr.user_id = ? AND sr.server_id = ?
+      ORDER BY sr.position ASC, sr.name COLLATE NOCASE ASC
+    `,
+    [userId, serverId]
+  );
+
+  const resolvedIds = rows.map((row) => row.id);
+  if (resolvedIds.length > 0) {
+    return Array.from(new Set(resolvedIds));
+  }
+
+  const fallbackRoles = await getServerRoles(serverId);
+  const defaultRoleIds = fallbackRoles.filter((role) => role.key === 'all_users').map((role) => role.id);
+  const legacyKey = (legacyRole || '').trim();
+  const legacyRoleIds = legacyKey && legacyKey !== 'user'
+    ? fallbackRoles.filter((role) => role.key === legacyKey).map((role) => role.id)
+    : [];
+
+  return Array.from(new Set([...defaultRoleIds, ...legacyRoleIds]));
+};
+
+export const getUserServerRoles = async (serverId: string, userId: string, legacyRole?: string | null): Promise<ServerRole[]> => {
+  const roleIds = await getUserServerRoleIds(serverId, userId, legacyRole);
+  return getServerRolesByIds(serverId, roleIds);
+};
+
+export const setUserServerRoles = async (serverId: string, userId: string, roleIds: string[]): Promise<ServerRole[]> => {
+  await ensureDefaultRolesForServer(serverId);
+  const availableRoles = await getServerRoles(serverId);
+  const roleById = new Map(availableRoles.map((role) => [role.id, role]));
+  const normalizedRoleIds = Array.from(new Set(roleIds.filter((roleId) => roleById.has(roleId))));
+  const defaultRoleIds = availableRoles.filter((role) => role.key === 'all_users').map((role) => role.id);
+  const finalRoleIds = Array.from(new Set([...defaultRoleIds, ...normalizedRoleIds]));
+
+  await dbRun('BEGIN TRANSACTION');
+  try {
+    await dbRun(
+      `
+        DELETE FROM user_server_roles
+        WHERE user_id = ?
+          AND server_role_id IN (
+            SELECT id FROM server_roles WHERE server_id = ?
+          )
+      `,
+      [userId, serverId]
+    );
+
+    for (const roleId of finalRoleIds) {
+      await dbRun('INSERT OR IGNORE INTO user_server_roles (user_id, server_role_id) VALUES (?, ?)', [userId, roleId]);
+    }
+
+    const adminAssigned = finalRoleIds.some((roleId) => roleById.get(roleId)?.key === 'admin');
+    await updateUserRole(userId, adminAssigned ? 'admin' : 'user');
+    await dbRun('COMMIT');
+  } catch (error) {
+    try {
+      await dbRun('ROLLBACK');
+    } catch {
+      // no-op
+    }
+    throw error;
+  }
+
+  return getUserServerRoles(serverId, userId);
+};
+
+export const hydrateUserWithServerRoles = async (serverId: string, user: User): Promise<UserWithServerRoles> => {
+  const roles = await getUserServerRoles(serverId, user.id, user.role);
+  return {
+    ...user,
+    role: roles.find((entry) => entry.key !== 'all_users')?.key || roles[0]?.key || user.role || 'user',
+    role_ids: roles.map((role) => role.id),
+    roles
+  };
+};
+
+export const hydrateUsersWithServerRoles = async (serverId: string, users: User[]): Promise<UserWithServerRoles[]> => {
+  const hydratedUsers: UserWithServerRoles[] = [];
+  for (const user of users) {
+    hydratedUsers.push(await hydrateUserWithServerRoles(serverId, user));
+  }
+  return hydratedUsers;
+};
+
+export const userHasServerRoleKey = async (serverId: string, user: User | undefined, roleKeys: string[]): Promise<boolean> => {
+  if (!user) {
+    return false;
+  }
+
+  const normalizedRoleKeys = new Set(roleKeys.map((key) => key.trim()).filter(Boolean));
+  if (normalizedRoleKeys.has(user.role)) {
+    return true;
+  }
+
+  const roles = await getUserServerRoles(serverId, user.id, user.role);
+  return roles.some((role) => normalizedRoleKeys.has(role.key));
+};
+
+export const getServerRoleById = async (serverId: string, roleId: string): Promise<ServerRole | undefined> => {
+  await ensureDefaultRolesForServer(serverId);
+  const row = await dbGet<any>('SELECT * FROM server_roles WHERE server_id = ? AND id = ?', [serverId, roleId]);
+  return row ? mapServerRoleRow(row) : undefined;
+};
+
+export const updateServerRole = async (input: {
+  serverId: string;
+  roleId: string;
+  name: string;
+  color: string | null;
+}): Promise<ServerRole> => {
+  await ensureDefaultRolesForServer(input.serverId);
+  await dbRun(
+    `
+      UPDATE server_roles
+      SET name = ?, color = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE server_id = ? AND id = ?
+    `,
+    [input.name, input.color, input.serverId, input.roleId]
+  );
+
+  const updated = await getServerRoleById(input.serverId, input.roleId);
+  if (!updated) {
+    throw new Error('Role not found');
+  }
+
+  return updated;
 };
 
 export const updateServerSettings = async (
@@ -304,6 +543,24 @@ export const getUserByPublicKey = async (publicKey: string): Promise<User | unde
 
 export const getUsers = async (): Promise<User[]> => {
   return dbAll<User>('SELECT * FROM users');
+};
+
+export const hasAdminUser = async (): Promise<boolean> => {
+  const legacyRow = await dbGet<{ id: string }>('SELECT id FROM users WHERE role = ? LIMIT 1', ['admin']);
+  if (legacyRow) {
+    return true;
+  }
+
+  const row = await dbGet<{ id: string }>(
+    `
+      SELECT usr.user_id AS id
+      FROM user_server_roles usr
+      INNER JOIN server_roles sr ON sr.id = usr.server_role_id
+      WHERE sr.key = 'admin'
+      LIMIT 1
+    `
+  );
+  return !!row;
 };
 
 export const getOrCreateSystemUser = async (): Promise<User> => {

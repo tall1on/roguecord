@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useChatStore } from '../../stores/chat'
-import type { ModerationDeleteMode, User } from '../../stores/chat'
+import type { ModerationDeleteMode, ServerRole, User } from '../../stores/chat'
 
 const chatStore = useChatStore()
 const getUserInitial = (user: User) => user.username.charAt(0).toUpperCase()
@@ -11,6 +11,7 @@ const moderationAction = ref<'kick' | 'ban'>('kick')
 const selectedMember = ref<User | null>(null)
 const reason = ref('')
 const deleteMode = ref<ModerationDeleteMode>('none')
+const isAssigningRoles = ref(false)
 const contextMenu = ref<{ visible: boolean; x: number; y: number; member: User | null }>({
   visible: false,
   x: 0,
@@ -20,16 +21,49 @@ const contextMenu = ref<{ visible: boolean; x: number; y: number; member: User |
 const blacklistIdentity = ref(true)
 const blacklistIp = ref(false)
 
-const isAdmin = computed(() => chatStore.currentUserRole === 'admin')
+const isAdmin = computed(() => chatStore.userHasRole(chatStore.currentUser, ['admin']))
+
+const assignableRoles = computed(() => {
+  return chatStore.serverRoles.filter((role) => role.key !== 'all_users')
+})
+
+const roleMap = computed(() => {
+  const map = new Map<string, ServerRole>()
+  for (const role of chatStore.serverRoles) {
+    map.set(role.id, role)
+    map.set(role.key, role)
+  }
+  return map
+})
+
+const getDisplayRole = (user: User) => chatStore.getPrimaryServerRole(user) || roleMap.value.get(user.role) || null
+
+const getDisplayRoleById = (roleId: string) => roleMap.value.get(roleId) || null
+
+const getDisplayRoleName = (user: User) => {
+  const role = getDisplayRole(user)
+  if (role) {
+    return role.name
+  }
+
+  return user.role || 'all users'
+}
+
+const getDisplayRoleColor = (user: User) => getDisplayRole(user)?.color || chatStore.getServerRoleColor(user.role) || null
+
+const getRoleHeading = (user: User) => {
+  const label = getDisplayRoleName(user)
+  return label.endsWith('s') ? label : `${label}s`
+}
 
 const isHiddenSystemMember = (user: User) => {
-  return user.role === 'system' || (user.role === 'bot' && user.username === 'RSS Bot')
+  return chatStore.userHasRole(user, ['system']) || (chatStore.userHasRole(user, ['bot']) && user.username === 'RSS Bot')
 }
 
 const canModerate = (user: User) => {
   if (!isAdmin.value || !chatStore.currentUser) return false
   if (chatStore.currentUser.id === user.id) return false
-  return user.role !== 'admin'
+  return true
 }
 
 const resetModerationForm = () => {
@@ -46,6 +80,41 @@ const closeContextMenu = () => {
     y: 0,
     member: null
   }
+}
+
+const isRoleAssignedToMember = (user: User | null, roleId: string) => {
+  if (!user) return false
+  return Array.isArray(user.role_ids) && user.role_ids.includes(roleId)
+}
+
+const toggleRoleAssignment = async (roleId: string) => {
+  const member = contextMenu.value.member
+  if (!member || !chatStore.server?.id || isAssigningRoles.value) return
+
+  const currentRoleIds = Array.isArray(member.role_ids) ? member.role_ids : []
+  const nextRoleIds = currentRoleIds.includes(roleId)
+    ? currentRoleIds.filter((id) => id !== roleId)
+    : [...currentRoleIds, roleId]
+
+  isAssigningRoles.value = true
+  try {
+    await chatStore.assignMemberRoles(chatStore.server.id, member.id, nextRoleIds)
+    const updatedMember = chatStore.users.find((user) => user.id === member.id) || null
+    contextMenu.value = {
+      ...contextMenu.value,
+      member: updatedMember
+    }
+  } finally {
+    isAssigningRoles.value = false
+  }
+}
+
+const getRoleButtonClass = (assigned: boolean) => {
+  if (assigned) {
+    return 'text-white bg-zinc-900/90'
+  }
+
+  return 'text-zinc-300 hover:text-white hover:bg-zinc-900'
 }
 
 const openContextMenu = (event: MouseEvent, user: User) => {
@@ -127,17 +196,26 @@ const groupedMembers = computed(() => {
 
   const onlineByRole: Record<string, typeof online> = {}
   online.forEach((u) => {
-    let role = u.role || 'user'
-    role = role.charAt(0).toUpperCase() + role.slice(1) + 's'
+    const role = chatStore.getPrimaryServerRole(u)?.id || u.role || 'all_users'
 
     if (!onlineByRole[role]) onlineByRole[role] = []
     onlineByRole[role]!.push(u)
   })
 
   const sortedRoles = Object.keys(onlineByRole).sort((a, b) => {
-    if (a === 'Admins') return -1
-    if (b === 'Admins') return 1
-    return a.localeCompare(b)
+    const roleA = getDisplayRoleById(a)
+    const roleB = getDisplayRoleById(b)
+
+    if ((roleA?.key || a) === 'admin') return -1
+    if ((roleB?.key || b) === 'admin') return 1
+
+    const positionA = roleA?.position ?? Number.MAX_SAFE_INTEGER
+    const positionB = roleB?.position ?? Number.MAX_SAFE_INTEGER
+    if (positionA !== positionB) {
+      return positionA - positionB
+    }
+
+    return (roleA?.name || a || 'all users').localeCompare(roleB?.name || b || 'all users')
   })
 
   const sortedOnlineByRole: Record<string, typeof online> = {}
@@ -166,8 +244,8 @@ onUnmounted(() => {
   <aside v-if="chatStore.isConnected && chatStore.activeChannelId" class="w-60 bg-zinc-950 flex flex-col shrink-0 border-l border-white/5">
     <div class="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar">
       <div v-for="(members, role) in groupedMembers.onlineByRole" :key="role">
-        <h3 class="text-xs font-bold text-zinc-500 uppercase tracking-widest mb-3 px-2">
-          {{ role }} — {{ members.length }}
+        <h3 class="text-xs font-bold uppercase tracking-widest mb-3 px-2" :style="{ color: members[0] ? getDisplayRoleColor(members[0]) || '#71717a' : '#71717a' }">
+          {{ members[0] ? getRoleHeading(members[0]) : 'Members' }} — {{ members.length }}
         </h3>
         <div class="space-y-0.5">
           <div
@@ -182,7 +260,7 @@ onUnmounted(() => {
               <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-950 group-hover:border-zinc-900 bg-green-500 transition-colors"></div>
             </div>
             <div class="flex-1 min-w-0">
-              <div class="text-[13px] font-semibold truncate transition-colors" :class="user.role === 'admin' ? 'text-red-400 group-hover:text-red-300' : 'text-zinc-300 group-hover:text-white'">{{ user.username }}</div>
+              <div class="text-[13px] font-semibold truncate transition-colors group-hover:text-white" :style="{ color: getDisplayRoleColor(user) || '#d4d4d8' }">{{ user.username }}</div>
             </div>
           </div>
         </div>
@@ -205,7 +283,7 @@ onUnmounted(() => {
               <div class="absolute bottom-0 right-0 w-3 h-3 bg-zinc-600 rounded-full border-2 border-zinc-950 group-hover:border-zinc-900 transition-colors"></div>
             </div>
             <div class="flex-1 min-w-0">
-              <div class="text-[13px] font-medium truncate transition-colors" :class="user.role === 'admin' ? 'text-red-400/70 group-hover:text-red-400' : 'text-zinc-500 group-hover:text-zinc-300'">{{ user.username }}</div>
+              <div class="text-[13px] font-medium truncate transition-colors group-hover:text-zinc-300" :style="{ color: getDisplayRoleColor(user) ? `${getDisplayRoleColor(user)}b3` : '#71717a' }">{{ user.username }}</div>
             </div>
           </div>
         </div>
@@ -214,10 +292,27 @@ onUnmounted(() => {
 
     <div
       v-if="contextMenu.visible"
-      class="fixed z-[70] min-w-[10rem] bg-zinc-950 border border-white/10 rounded-xl shadow-2xl py-1 backdrop-blur-md"
+      class="fixed z-[70] min-w-[14rem] bg-zinc-950 border border-white/10 rounded-xl shadow-2xl py-1 backdrop-blur-md"
       :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
       @click.stop
     >
+      <div v-if="contextMenu.member && assignableRoles.length > 0" class="px-1 py-1 border-b border-white/5 mb-1">
+        <div class="px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-zinc-500">Roles</div>
+        <button
+          v-for="role in assignableRoles"
+          :key="role.id"
+          class="w-full flex items-center justify-between gap-3 text-left px-3 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+          :class="getRoleButtonClass(isRoleAssignedToMember(contextMenu.member, role.id))"
+          :disabled="isAssigningRoles"
+          @click="toggleRoleAssignment(role.id)"
+        >
+          <span class="flex items-center gap-2 min-w-0">
+            <span class="w-2.5 h-2.5 rounded-full shrink-0" :style="{ backgroundColor: role.color || '#71717a' }"></span>
+            <span class="truncate">{{ role.name }}</span>
+          </span>
+          <span class="text-[11px] uppercase tracking-wider text-zinc-500">{{ isRoleAssignedToMember(contextMenu.member, role.id) ? 'On' : 'Off' }}</span>
+        </button>
+      </div>
       <button
         class="w-full text-left px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-zinc-900 font-medium transition-colors"
         @click="openModerationFromContextMenu('kick')"
