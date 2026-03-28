@@ -1974,7 +1974,7 @@ export const useChatStore = defineStore('chat', () => {
       });
     }
 
-    send('UPDATE_SERVER_SETTINGS', {
+    send('update_server_settings', {
       serverId,
       title,
       rulesChannelId,
@@ -2049,11 +2049,19 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const requestServerRoles = () => {
-    send('get_server_roles');
+    const activeServerId = server.value?.id?.trim();
+    if (!activeServerId) {
+      return;
+    }
+
+    send('get_server_roles', {
+      serverId: activeServerId
+    });
   };
 
-  const updateServerRole = (roleId: string, name: string, color: string | null) => {
+  const updateServerRole = (serverId: string, roleId: string, name: string, color: string | null) => {
     send('update_server_role', {
+      serverId,
       roleId,
       name,
       color
@@ -2089,8 +2097,13 @@ export const useChatStore = defineStore('chat', () => {
       return role.name !== existingRole.name || role.color !== existingRole.color;
     });
 
+    const activeServerId = server.value?.id?.trim();
+    if (!activeServerId) {
+      throw new Error('Server metadata is unavailable. Reopen server settings and try again.');
+    }
+
     for (const role of changedRoles) {
-      updateServerRole(role.id, role.name, role.color);
+      updateServerRole(activeServerId, role.id, role.name, role.color);
     }
 
     return changedRoles.length;
