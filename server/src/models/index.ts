@@ -306,6 +306,11 @@ export const getUsers = async (): Promise<User[]> => {
   return dbAll<User>('SELECT * FROM users');
 };
 
+export const hasAdminUser = async (): Promise<boolean> => {
+  const row = await dbGet<{ id: string }>('SELECT id FROM users WHERE role = ? LIMIT 1', ['admin']);
+  return !!row;
+};
+
 export const getOrCreateSystemUser = async (): Promise<User> => {
   const systemPublicKey = '__system__';
   const existing = await getUserByPublicKey(systemPublicKey);
