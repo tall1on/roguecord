@@ -52,7 +52,10 @@ import {
   deleteMessageById,
   toggleMessageReaction,
   getMessageReactionSummary,
-  updateMessageAttachmentStorage
+  updateMessageAttachmentStorage,
+  getServerRoles,
+  getServerRoleById,
+  updateServerRole
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -195,6 +198,38 @@ const parseUserAvatarDataUrl = (value: unknown): { dataUrl: string; mimeType: 'i
     dataUrl: `data:${mimeType};base64,${buffer.toString('base64')}`,
     mimeType
   };
+};
+
+const normalizeRoleName = (value: unknown) => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  if (!normalized) return null;
+  return normalized.slice(0, 64);
+};
+
+const normalizeRoleColor = (value: unknown) => {
+  if (value == null) return null;
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  if (!/^#([0-9a-fA-F]{6})$/.test(normalized)) return null;
+  return normalized.toLowerCase();
+};
+
+const broadcastServerRoles = async (serverId: string) => {
+  const roles = await getServerRoles(serverId);
+  connectionManager.broadcastToAuthenticated({
+    type: 'server_roles_updated',
+    payload: { serverId, roles }
+  });
+};
+
+const sendServerRoles = async (client: ClientConnection, serverId: string) => {
+  const roles = await getServerRoles(serverId);
+  client.ws.send(JSON.stringify({
+    type: 'server_roles_list',
+    payload: { serverId, roles }
+  }));
 };
 
 const sanitizeUsernameForProfile = (value: unknown) => {
@@ -1438,6 +1473,12 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'update_server_settings':
         await handleUpdateServerSettings(client, payload);
         break;
+      case 'get_server_roles':
+        await handleGetServerRoles(client, payload);
+        break;
+      case 'update_server_role':
+        await handleUpdateServerRole(client, payload);
+        break;
       case 'get_server_storage_settings':
         await handleGetServerStorageSettings(client);
         break;
@@ -1650,6 +1691,10 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
             memberIps
           }
         }));
+
+        if (server?.id) {
+          await sendServerRoles(client, server.id);
+        }
 
         // Broadcast to others that this user is online, if they weren't already
         if (!connectionManager.isUserOnline(user.id, client)) {
@@ -3610,6 +3655,87 @@ const handleUpdateServerSettings = async (client: ClientConnection, payload: { s
   } catch (error) {
     console.error('[WS DEBUG] Failed to update server settings:', error);
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to update server settings' } }));
+  }
+};
+
+const handleGetServerRoles = async (client: ClientConnection, payload: { serverId?: string }) => {
+  if (!client.userId) return;
+
+  const serverId = typeof payload?.serverId === 'string' ? payload.serverId.trim() : '';
+  if (!serverId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID is required' } }));
+    return;
+  }
+
+  try {
+    await sendServerRoles(client, serverId);
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to read server roles:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to read server roles' } }));
+  }
+};
+
+const handleUpdateServerRole = async (
+  client: ClientConnection,
+  payload: { serverId?: string; roleId?: string; name?: string; color?: string | null }
+) => {
+  if (!client.userId) return;
+
+  const user = await getUserById(client.userId);
+  if (!user || user.role !== 'admin') {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Only admins can update roles' } }));
+    return;
+  }
+
+  const serverId = typeof payload?.serverId === 'string' ? payload.serverId.trim() : '';
+  const roleId = typeof payload?.roleId === 'string' ? payload.roleId.trim() : '';
+  const normalizedName = normalizeRoleName(payload?.name);
+  const colorProvided = Boolean(payload && Object.prototype.hasOwnProperty.call(payload, 'color'));
+  const normalizedColor = colorProvided ? normalizeRoleColor(payload?.color) : null;
+
+  if (!serverId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Server ID is required' } }));
+    return;
+  }
+
+  if (!roleId) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Role ID is required' } }));
+    return;
+  }
+
+  if (!normalizedName) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Role name is required' } }));
+    return;
+  }
+
+  if (colorProvided && payload?.color != null && normalizedColor == null) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Role color must be a hex value like #5865f2' } }));
+    return;
+  }
+
+  try {
+    const existingRole = await getServerRoleById(serverId, roleId);
+    if (!existingRole) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Role not found' } }));
+      return;
+    }
+
+    const updatedRole = await updateServerRole({
+      serverId,
+      roleId,
+      name: normalizedName,
+      color: normalizedColor
+    });
+
+    client.ws.send(JSON.stringify({
+      type: 'server_role_updated',
+      payload: { serverId, role: updatedRole }
+    }));
+
+    await broadcastServerRoles(serverId);
+  } catch (error) {
+    console.error('[WS DEBUG] Failed to update server role:', error);
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Failed to update server role' } }));
   }
 };
 

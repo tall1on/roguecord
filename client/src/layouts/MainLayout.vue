@@ -67,6 +67,15 @@ const serverSettingsForm = ref({
   title: '',
   rulesChannelId: '',
   welcomeChannelId: '',
+  roles: [] as Array<{
+    id: string
+    key: string
+    name: string
+    color: string
+    isDefault: boolean
+    isDeletable: boolean
+    position: number
+  }>,
   storage: {
     storageType: 'data_dir' as 'data_dir' | 's3',
     provider: 'generic_s3' as 'generic_s3' | 'cloudflare_r2',
@@ -90,6 +99,7 @@ const serverSettingsNavGroups = ref<ServerSettingsNavGroup[]>([
     expanded: true,
     items: [
       { id: 'general-settings', label: 'General Settings' },
+      { id: 'role-settings', label: 'Roles' },
       { id: 'storage-settings', label: 'Storage / S3' }
     ]
   }
@@ -128,6 +138,18 @@ const populateServerSettingsStorageForm = () => {
   serverSettingsForm.value.storage.prefix = storageSettings.s3.prefix
   serverSettingsForm.value.storage.status = storageSettings.storageType
   serverSettingsForm.value.storage.lastError = storageSettings.storageLastError
+}
+
+const populateServerRoleSettingsForm = () => {
+  serverSettingsForm.value.roles = chatStore.serverRoles.map((role) => ({
+    id: role.id,
+    key: role.key,
+    name: role.name,
+    color: role.color || '#9ca3af',
+    isDefault: role.isDefault,
+    isDeletable: role.isDeletable,
+    position: role.position
+  }))
 }
 
 const getCurrentStorageFingerprint = () => {
@@ -196,8 +218,31 @@ const hasGeneralSettingsChanges = computed(() => {
   )
 })
 
+const hasRoleSettingsChanges = computed(() => {
+  const currentRoles = chatStore.serverRoles
+  const nextRoles = serverSettingsForm.value.roles
+
+  if (currentRoles.length !== nextRoles.length) {
+    return true
+  }
+
+  return currentRoles.some((role, index) => {
+    const nextRole = nextRoles[index]
+    if (!nextRole || nextRole.id !== role.id) {
+      return true
+    }
+
+    const nextName = nextRole.name.trim()
+    const nextColor = (nextRole.color || '').trim().toLowerCase()
+    const currentColor = (role.color || '').trim().toLowerCase()
+
+    return nextName !== role.name || nextColor !== currentColor
+  })
+})
+
 const hasServerSettingsChanges = computed(() =>
   hasGeneralSettingsChanges.value ||
+  hasRoleSettingsChanges.value ||
   hasStorageSettingsChanges.value ||
   Boolean(serverIconDataUrl.value) ||
   removeServerIcon.value
@@ -556,6 +601,7 @@ watch(showServerSettingsModal, (newVal) => {
   if (newVal && chatStore.server) {
     activeServerSettingsSection.value = 'general-settings'
     chatStore.requestServerStorageSettings()
+    chatStore.requestServerRoles()
     serverSettingsNavGroups.value = serverSettingsNavGroups.value.map((group) => ({
       ...group,
       expanded: true
@@ -563,6 +609,7 @@ watch(showServerSettingsModal, (newVal) => {
     serverSettingsForm.value.title = chatStore.server.title || chatStore.server.name || ''
     serverSettingsForm.value.rulesChannelId = chatStore.server.rulesChannelId || ''
     serverSettingsForm.value.welcomeChannelId = chatStore.server.welcomeChannelId || ''
+    populateServerRoleSettingsForm()
     populateServerSettingsStorageForm()
     serverIconDataUrl.value = null
     removeServerIcon.value = false
@@ -576,6 +623,18 @@ watch(showServerSettingsModal, (newVal) => {
     resetServerSettingsStorageLock()
   }
 })
+
+watch(
+  () => chatStore.serverRoles,
+  () => {
+    if (!showServerSettingsModal.value) {
+      return
+    }
+
+    populateServerRoleSettingsForm()
+  },
+  { deep: true }
+)
 
 watch(
   () => chatStore.serverStorageSettings,
