@@ -61,7 +61,18 @@ const activeVoiceParticipants = computed(() => {
   return webrtcStore.channelParticipants.get(activeVoiceChannel.value.id) || []
 })
 
-const hideVoiceMembersWithoutScreenshare = ref(false)
+const HIDE_VOICE_MEMBERS_WITHOUT_SCREENSHARE_STORAGE_KEY = 'roguecord.voice.hide-members-without-screenshare'
+
+const getInitialHideVoiceMembersWithoutScreenshare = () => {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  const storedValue = window.localStorage.getItem(HIDE_VOICE_MEMBERS_WITHOUT_SCREENSHARE_STORAGE_KEY)
+  return storedValue === 'true'
+}
+
+const hideVoiceMembersWithoutScreenshare = ref(getInitialHideVoiceMembersWithoutScreenshare())
 
 const activeVoiceParticipantsWithMediaState = computed(() => {
   return activeVoiceParticipants.value.map((user) => ({
@@ -119,6 +130,14 @@ const voiceTileClass = computed(() => {
 const toggleHideVoiceMembersWithoutScreenshare = () => {
   hideVoiceMembersWithoutScreenshare.value = !hideVoiceMembersWithoutScreenshare.value
 }
+
+watch(hideVoiceMembersWithoutScreenshare, (value) => {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.setItem(HIDE_VOICE_MEMBERS_WITHOUT_SCREENSHARE_STORAGE_KEY, String(value))
+})
 
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
 const screenVideoElements = new Map<string, HTMLVideoElement>()
@@ -1639,12 +1658,6 @@ watch(
                 <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="h-full w-full object-cover" />
                 <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
               </div>
-            </div>
-
-            <div class="relative z-10 flex items-center justify-end gap-3 border-t border-white/5 bg-zinc-950/80 px-4 py-3 backdrop-blur-sm">
-              <span v-if="getAvatarBadgeType(user.id, false) === 'speaking'" class="rounded-full border border-green-500/30 bg-green-500/10 px-2.5 py-1 text-[11px] font-semibold text-green-300">
-                Speaking
-              </span>
             </div>
           </div>
         </div>
