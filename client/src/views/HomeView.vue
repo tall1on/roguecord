@@ -1641,13 +1641,7 @@ watch(
               </div>
             </div>
 
-            <div class="relative z-10 flex items-center justify-between gap-3 border-t border-white/5 bg-zinc-950/80 px-4 py-3 backdrop-blur-sm">
-              <div class="min-w-0">
-                <p class="truncate text-sm font-bold tracking-wide text-white">{{ user.username }}</p>
-                <p class="mt-0.5 text-xs text-zinc-400">
-                  {{ user.isScreenSharing ? 'Screen sharing' : 'Audio only' }}
-                </p>
-              </div>
+            <div class="relative z-10 flex items-center justify-end gap-3 border-t border-white/5 bg-zinc-950/80 px-4 py-3 backdrop-blur-sm">
               <span v-if="getAvatarBadgeType(user.id, false) === 'speaking'" class="rounded-full border border-green-500/30 bg-green-500/10 px-2.5 py-1 text-[11px] font-semibold text-green-300">
                 Speaking
               </span>
