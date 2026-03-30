@@ -61,24 +61,82 @@ const activeVoiceParticipants = computed(() => {
   return webrtcStore.channelParticipants.get(activeVoiceChannel.value.id) || []
 })
 
-const voiceParticipantCount = computed(() => activeVoiceParticipants.value.length)
+const HIDE_VOICE_MEMBERS_WITHOUT_SCREENSHARE_STORAGE_KEY = 'roguecord.voice.hide-members-without-screenshare'
 
-const isTwoParticipantVoiceLayout = computed(() => activeVoiceParticipants.value.length === 2)
+const getInitialHideVoiceMembersWithoutScreenshare = () => {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  const storedValue = window.localStorage.getItem(HIDE_VOICE_MEMBERS_WITHOUT_SCREENSHARE_STORAGE_KEY)
+  return storedValue === 'true'
+}
+
+const hideVoiceMembersWithoutScreenshare = ref(getInitialHideVoiceMembersWithoutScreenshare())
+
+const activeVoiceParticipantsWithMediaState = computed(() => {
+  return activeVoiceParticipants.value.map((user) => ({
+    ...user,
+    isScreenSharing: Boolean(getUserScreenStream(user.id))
+  }))
+})
+
+const visibleVoiceParticipants = computed(() => {
+  if (!hideVoiceMembersWithoutScreenshare.value) {
+    return activeVoiceParticipantsWithMediaState.value
+  }
+
+  return activeVoiceParticipantsWithMediaState.value.filter((user) => user.isScreenSharing)
+})
+
+const voiceParticipantCount = computed(() => visibleVoiceParticipants.value.length)
+
+const voiceGridClass = computed(() => {
+  const count = voiceParticipantCount.value
+
+  if (count <= 1) {
+    return 'grid-cols-1'
+  }
+
+  if (count === 2) {
+    return 'grid-cols-1 xl:grid-cols-2'
+  }
+
+  if (count <= 4) {
+    return 'grid-cols-1 md:grid-cols-2'
+  }
+
+  return 'grid-cols-1 md:grid-cols-2 2xl:grid-cols-3'
+})
 
 const voiceTileClass = computed(() => {
-  if (isTwoParticipantVoiceLayout.value) {
-    return 'w-full h-full min-h-0'
+  const count = voiceParticipantCount.value
+
+  if (count <= 1) {
+    return 'min-h-[26rem]'
   }
 
-  if (voiceParticipantCount.value === 1) {
-    return 'w-full h-full min-h-[320px]'
+  if (count === 2) {
+    return 'min-h-[22rem]'
   }
 
-  if (voiceParticipantCount.value <= 4) {
-    return 'w-full h-full min-h-[220px]'
+  if (count <= 4) {
+    return 'min-h-[18rem]'
   }
 
-  return 'w-full h-full min-h-[180px]'
+  return 'min-h-[15rem]'
+})
+
+const toggleHideVoiceMembersWithoutScreenshare = () => {
+  hideVoiceMembersWithoutScreenshare.value = !hideVoiceMembersWithoutScreenshare.value
+}
+
+watch(hideVoiceMembersWithoutScreenshare, (value) => {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.setItem(HIDE_VOICE_MEMBERS_WITHOUT_SCREENSHARE_STORAGE_KEY, String(value))
 })
 
 const isVoiceUserSpeaking = (userId: string) => webrtcStore.isUserSpeaking(userId)
@@ -100,8 +158,8 @@ type MessageContextMenuState = {
   message: Message | null
 }
 
-type ScreenStreamFps = 30 | 60
-type ScreenStreamResolution = 'source' | '1080p' | '720p' | '480p' | '4k' | '8k'
+type ScreenStreamFps = 15 | 30 | 60
+type ScreenStreamResolution = 'source' | '1440p' | '1080p' | '720p' | '480p' | '4k' | '8k'
 
 const screenContextMenu = ref<ScreenContextMenuState>({
   visible: false,
@@ -120,12 +178,14 @@ const messageContextMenu = ref<MessageContextMenuState>({
 const messageContextMenuRef = ref<HTMLElement | null>(null)
 
 const screenFpsOptions: Array<{ value: ScreenStreamFps; label: string }> = [
+  { value: 15, label: '15 FPS' },
   { value: 30, label: '30 FPS' },
   { value: 60, label: '60 FPS' }
 ]
 
 const baseScreenResolutionOptions: Array<{ value: ScreenStreamResolution; label: string }> = [
   { value: 'source', label: 'Source' },
+  { value: '1440p', label: '1440p' },
   { value: '1080p', label: '1080p' },
   { value: '720p', label: '720p' },
   { value: '480p', label: '480p' }
@@ -1538,19 +1598,20 @@ watch(
         </h2>
       </header>
 
-      <main class="flex-1 overflow-y-auto p-8 custom-scrollbar bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-zinc-900/40 via-zinc-950 to-zinc-950">
-        <div v-if="activeVoiceParticipants.length > 0" class="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-6">
+        <main class="flex min-h-0 flex-1 flex-col overflow-hidden bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-zinc-900/40 via-zinc-950 to-zinc-950">
+        <section class="flex min-h-0 flex-1 flex-col px-6 pt-6 pb-24 md:px-8 md:pt-8">
+          <div v-if="visibleVoiceParticipants.length > 0" :class="voiceGridClass" class="grid auto-rows-fr gap-4 overflow-y-auto custom-scrollbar pr-1 md:gap-5">
           <div
-            v-for="user in activeVoiceParticipants"
+            v-for="user in visibleVoiceParticipants"
             :key="user.id"
-            class="h-48 rounded-2xl bg-zinc-900/80 border border-white/5 flex flex-col items-center justify-center shadow-lg relative overflow-hidden group"
+            class="group relative flex flex-col overflow-hidden rounded-2xl border border-white/5 bg-zinc-900/80 shadow-lg"
             :class="voiceTileClass"
           >
             <div class="absolute inset-0 bg-indigo-500/5 transition-opacity duration-300" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'opacity-100' : 'opacity-0'"></div>
             <div
               v-show="getUserScreenStream(user.id)"
               :ref="(el) => setScreenContainerRef(user.id, el)"
-              class="screen-stream-wrapper group relative w-full h-full bg-black rounded-xl"
+              class="screen-stream-wrapper relative h-full min-h-0 flex-1 bg-black"
               @click="onScreenVideoClick(user.id)"
               @contextmenu.prevent.stop="openScreenContextMenu($event, user.id)"
             >
@@ -1560,7 +1621,7 @@ watch(
                 :volume.prop="webrtcStore.getScreenStreamVolume(user.id)"
                 autoplay
                 playsinline
-                class="screen-stream-video w-full h-full object-contain rounded-xl bg-black cursor-pointer"
+                class="screen-stream-video h-full w-full cursor-pointer bg-black object-contain"
               />
 
               <div
@@ -1594,18 +1655,42 @@ watch(
                 </span>
               </div>
             </div>
-            <div v-show="!getUserScreenStream(user.id)" class="relative w-24 h-24 rounded-full bg-zinc-800 overflow-hidden flex items-center justify-center text-zinc-400 font-bold text-4xl mb-4 transition-all duration-300" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-500 shadow-[0_0_20px_rgba(34,197,94,0.3)] bg-indigo-500/20 text-indigo-400' : 'shadow-sm'">
-              <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
-              <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
+            <div v-show="!getUserScreenStream(user.id)" class="flex h-full min-h-0 flex-1 items-center justify-center px-6 py-8">
+              <div class="relative flex h-28 w-28 items-center justify-center overflow-hidden rounded-full bg-zinc-800 text-4xl font-bold text-zinc-400 transition-all duration-300 md:h-32 md:w-32" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-500 shadow-[0_0_20px_rgba(34,197,94,0.3)] bg-indigo-500/20 text-indigo-400' : 'shadow-sm'">
+                <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="h-full w-full object-cover" />
+                <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
+              </div>
             </div>
-            <span class="text-sm font-bold text-white tracking-wide truncate px-4 relative z-10">{{ user.username }}</span>
           </div>
         </div>
 
-        <div v-else class="h-full flex items-center justify-center text-zinc-500 font-medium">
-          No participants in this voice channel.
+        <div v-else class="flex h-full min-h-[16rem] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-zinc-900/35 px-6 text-center text-zinc-500 font-medium">
+          {{ hideVoiceMembersWithoutScreenshare ? 'No visible members match the current filter.' : 'No participants in this voice channel.' }}
         </div>
+        </section>
       </main>
+
+      <div class="absolute bottom-4 left-1/2 z-30 w-[min(32rem,calc(100%-2rem))] -translate-x-1/2 rounded-2xl border border-white/10 bg-zinc-950/92 px-4 py-3 shadow-2xl backdrop-blur-md">
+        <div class="flex items-center justify-between gap-4">
+          <div class="min-w-0">
+            <p class="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">Voice panel</p>
+            <p class="mt-1 truncate text-sm font-medium text-white">Hide members without active screen share</p>
+          </div>
+
+          <button
+            type="button"
+            class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors"
+            :class="hideVoiceMembersWithoutScreenshare ? 'border-indigo-400/40 bg-indigo-500/15 text-indigo-200 hover:bg-indigo-500/20' : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'"
+            :aria-pressed="hideVoiceMembersWithoutScreenshare"
+            @click="toggleHideVoiceMembersWithoutScreenshare"
+          >
+            <span class="relative h-5 w-9 rounded-full transition-colors" :class="hideVoiceMembersWithoutScreenshare ? 'bg-indigo-400/70' : 'bg-zinc-700'">
+              <span class="absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform" :class="hideVoiceMembersWithoutScreenshare ? 'translate-x-4.5' : 'translate-x-0.5'"></span>
+            </span>
+            {{ hideVoiceMembersWithoutScreenshare ? 'On' : 'Off' }}
+          </button>
+        </div>
+      </div>
 
       <div
         v-if="screenContextMenu.visible"
