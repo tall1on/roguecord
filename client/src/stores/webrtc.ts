@@ -8,8 +8,8 @@ type AudioElementWithSinkId = HTMLAudioElement & {
 };
 
 type MediaSourceType = 'mic' | 'screen' | 'camera';
-type ScreenStreamFps = 30 | 60;
-type ScreenStreamResolution = 'source' | '1080p' | '720p' | '480p' | '4k' | '8k';
+type ScreenStreamFps = 15 | 30 | 60;
+type ScreenStreamResolution = 'source' | '1440p' | '1080p' | '720p' | '480p' | '4k' | '8k';
 
 type ScreenStreamPreference = {
   fps: ScreenStreamFps;
@@ -228,6 +228,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
   const getResolutionTarget = (resolution: ScreenStreamResolution, sourceAspectRatio: number) => {
     const targetHeightByResolution: Record<Exclude<ScreenStreamResolution, 'source'>, number> = {
+      '1440p': 1440,
       '1080p': 1080,
       '720p': 720,
       '480p': 480,

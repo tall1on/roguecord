@@ -4,6 +4,12 @@ RogueCord is a self-hosted, real-time communication platform where communities c
 
 The current implementation focuses on real-time text and voice communication using WebSocket signaling, Mediasoup-based media transport, and SQLite-backed persistence.
 
+## Quick Links
+
+- Test site available at: https://rc.exatek.de/
+- Test server WebSocket endpoint: wss://rc1.exatek.de:1337
+- Latest client builds available: https://github.com/tall1on/roguecord/actions
+
 ## Current Feature Status
 
 ### Implemented
