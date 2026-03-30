@@ -158,8 +158,8 @@ type MessageContextMenuState = {
   message: Message | null
 }
 
-type ScreenStreamFps = 30 | 60
-type ScreenStreamResolution = 'source' | '1080p' | '720p' | '480p' | '4k' | '8k'
+type ScreenStreamFps = 15 | 30 | 60
+type ScreenStreamResolution = 'source' | '1440p' | '1080p' | '720p' | '480p' | '4k' | '8k'
 
 const screenContextMenu = ref<ScreenContextMenuState>({
   visible: false,
@@ -178,12 +178,14 @@ const messageContextMenu = ref<MessageContextMenuState>({
 const messageContextMenuRef = ref<HTMLElement | null>(null)
 
 const screenFpsOptions: Array<{ value: ScreenStreamFps; label: string }> = [
+  { value: 15, label: '15 FPS' },
   { value: 30, label: '30 FPS' },
   { value: 60, label: '60 FPS' }
 ]
 
 const baseScreenResolutionOptions: Array<{ value: ScreenStreamResolution; label: string }> = [
   { value: 'source', label: 'Source' },
+  { value: '1440p', label: '1440p' },
   { value: '1080p', label: '1080p' },
   { value: '720p', label: '720p' },
   { value: '480p', label: '480p' }
