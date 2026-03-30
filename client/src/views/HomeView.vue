@@ -80,10 +80,6 @@ const visibleVoiceParticipants = computed(() => {
 
 const voiceParticipantCount = computed(() => visibleVoiceParticipants.value.length)
 
-const voiceScreenshareCount = computed(() => activeVoiceParticipantsWithMediaState.value.filter((user) => user.isScreenSharing).length)
-
-const voiceAudienceCount = computed(() => Math.max(activeVoiceParticipants.value.length - voiceScreenshareCount.value, 0))
-
 const voiceGridClass = computed(() => {
   const count = voiceParticipantCount.value
 
@@ -118,22 +114,6 @@ const voiceTileClass = computed(() => {
   }
 
   return 'min-h-[15rem]'
-})
-
-const voicePanelSummary = computed(() => {
-  if (hideVoiceMembersWithoutScreenshare.value) {
-    if (voiceParticipantCount.value === 0) {
-      return 'No members are currently screen sharing.'
-    }
-
-    return `Showing ${voiceParticipantCount.value} screen share${voiceParticipantCount.value === 1 ? '' : 's'}`
-  }
-
-  if (activeVoiceParticipants.value.length === 0) {
-    return 'No participants in this voice channel.'
-  }
-
-  return `${activeVoiceParticipants.value.length} member${activeVoiceParticipants.value.length === 1 ? '' : 's'} connected`
 })
 
 const toggleHideVoiceMembersWithoutScreenshare = () => {
@@ -1599,25 +1579,7 @@ watch(
 
         <main class="flex min-h-0 flex-1 flex-col overflow-hidden bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-zinc-900/40 via-zinc-950 to-zinc-950">
         <section class="flex min-h-0 flex-1 flex-col px-6 pt-6 pb-24 md:px-8 md:pt-8">
-          <div class="mb-5 flex flex-wrap items-start justify-between gap-4 rounded-2xl border border-white/5 bg-zinc-900/45 px-4 py-4 shadow-sm backdrop-blur-sm md:px-5">
-            <div class="min-w-0">
-              <p class="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">Voice overview</p>
-              <h3 class="mt-1 text-lg font-semibold text-white">{{ voicePanelSummary }}</h3>
-              <p class="mt-1 text-sm text-zinc-400">
-                {{ voiceScreenshareCount }} sharing screen · {{ voiceAudienceCount }} audio only
-              </p>
-            </div>
-            <div class="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
-              <span class="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 font-medium text-emerald-300">
-                {{ voiceParticipantCount }} visible
-              </span>
-              <span class="rounded-full border border-white/10 bg-white/5 px-3 py-1 font-medium text-zinc-300">
-                {{ activeVoiceParticipants.length }} total
-              </span>
-            </div>
-          </div>
-
-        <div v-if="visibleVoiceParticipants.length > 0" :class="voiceGridClass" class="grid auto-rows-fr gap-4 overflow-y-auto custom-scrollbar pr-1 md:gap-5">
+          <div v-if="visibleVoiceParticipants.length > 0" :class="voiceGridClass" class="grid auto-rows-fr gap-4 overflow-y-auto custom-scrollbar pr-1 md:gap-5">
           <div
             v-for="user in visibleVoiceParticipants"
             :key="user.id"
