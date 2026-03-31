@@ -1,0 +1,8 @@
+.DS_Store
+*.log
+*.tmp
+client/tauri/gen/
+client/tauri/target/
+client/dist/
+server/dist/
+server/.env
