@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp, Folder } from 'lucide-vue-next'
-import { useChatStore, type Channel } from '../../stores/chat'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp, Folder, ChevronDown, ChevronRight, Moon, MinusCircle, Circle, EyeOff } from 'lucide-vue-next'
+import AppAvatar from '../common/AppAvatar.vue'
+import { useChatStore, type Channel, type PresenceStatus, type User } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 
 const props = defineProps<{
@@ -36,6 +37,149 @@ const draggedChannelId = ref<string | null>(null)
 const dragOverChannelId = ref<string | null>(null)
 const dragOverCategoryId = ref<string | null>(null)
 const dragOverUncategorized = ref(false)
+const collapsedCategoryIds = ref<string[]>([])
+const userStatusMenuVisible = ref(false)
+const userStatusMenuX = ref(0)
+const userStatusMenuY = ref(0)
+const userStatusMenuRef = ref<HTMLElement | null>(null)
+
+const USER_STATUS_MENU_MARGIN = 8
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max)
+
+const updateUserStatusMenuPosition = () => {
+  if (!userStatusMenuVisible.value || !userStatusMenuRef.value || typeof window === 'undefined') {
+    return
+  }
+
+  const menuRect = userStatusMenuRef.value.getBoundingClientRect()
+  const viewportWidth = window.innerWidth
+  const viewportHeight = window.innerHeight
+
+  const maxX = Math.max(USER_STATUS_MENU_MARGIN, viewportWidth - menuRect.width - USER_STATUS_MENU_MARGIN)
+  const maxY = Math.max(USER_STATUS_MENU_MARGIN, viewportHeight - menuRect.height - USER_STATUS_MENU_MARGIN)
+
+  userStatusMenuX.value = clamp(userStatusMenuX.value, USER_STATUS_MENU_MARGIN, maxX)
+  userStatusMenuY.value = clamp(userStatusMenuY.value, USER_STATUS_MENU_MARGIN, maxY)
+}
+
+const COLLAPSED_CATEGORY_STORAGE_KEY = 'roguecord:collapsed-categories'
+
+const getCategoryStorageKey = (serverId: string) => `${COLLAPSED_CATEGORY_STORAGE_KEY}:${serverId}`
+
+const loadCollapsedCategories = (serverId: string | null | undefined) => {
+  if (!serverId || typeof window === 'undefined') {
+    collapsedCategoryIds.value = []
+    return
+  }
+
+  try {
+    const storedValue = window.localStorage.getItem(getCategoryStorageKey(serverId))
+    if (!storedValue) {
+      collapsedCategoryIds.value = []
+      return
+    }
+
+    const parsedValue = JSON.parse(storedValue)
+    collapsedCategoryIds.value = Array.isArray(parsedValue)
+      ? parsedValue.filter((value): value is string => typeof value === 'string')
+      : []
+  } catch {
+    collapsedCategoryIds.value = []
+  }
+}
+
+const persistCollapsedCategories = (serverId: string | null | undefined, categoryIds: string[]) => {
+  if (!serverId || typeof window === 'undefined') {
+    return
+  }
+
+  if (categoryIds.length === 0) {
+    window.localStorage.removeItem(getCategoryStorageKey(serverId))
+    return
+  }
+
+  window.localStorage.setItem(getCategoryStorageKey(serverId), JSON.stringify(categoryIds))
+}
+
+const isCategoryCollapsed = (categoryId: string) => collapsedCategoryIds.value.includes(categoryId)
+
+const visibleCategoryIds = computed(() => {
+  const activeCategoryIds = new Set<string>()
+
+  if (chatStore.activeMainPanel.channelId) {
+    const activePanelChannel = chatStore.activeServerChannels.find((channel) => channel.id === chatStore.activeMainPanel.channelId)
+    if (activePanelChannel?.category_id) {
+      activeCategoryIds.add(activePanelChannel.category_id)
+    }
+  }
+
+  if (webrtcStore.activeVoiceChannelId) {
+    const activeVoiceChannel = chatStore.activeServerChannels.find((channel) => channel.id === webrtcStore.activeVoiceChannelId)
+    if (activeVoiceChannel?.category_id) {
+      activeCategoryIds.add(activeVoiceChannel.category_id)
+    }
+  }
+
+  return activeCategoryIds
+})
+
+const visibleCollapsedChannelIds = computed(() => {
+  const activeChannelIds = new Set<string>()
+
+  if (chatStore.activeMainPanel.channelId) {
+    activeChannelIds.add(chatStore.activeMainPanel.channelId)
+  }
+
+  if (webrtcStore.activeVoiceChannelId) {
+    activeChannelIds.add(webrtcStore.activeVoiceChannelId)
+  }
+
+  return activeChannelIds
+})
+
+const shouldShowCategoryChannels = (categoryId: string) => {
+  if (!isCategoryCollapsed(categoryId)) {
+    return true
+  }
+
+  return visibleCategoryIds.value.has(categoryId)
+}
+
+const shouldRenderChannelInCategory = (categoryId: string, channelId: string) => {
+  if (!isCategoryCollapsed(categoryId)) {
+    return true
+  }
+
+  return visibleCollapsedChannelIds.value.has(channelId)
+}
+
+const shouldShowVoiceParticipants = (channel: Channel) => {
+  if (channel.type !== 'voice') {
+    return false
+  }
+
+  const hasParticipants = !!webrtcStore.channelParticipants.get(channel.id)?.length
+  if (!hasParticipants) {
+    return false
+  }
+
+  if (!channel.category_id || !isCategoryCollapsed(channel.category_id)) {
+    return true
+  }
+
+  return visibleCollapsedChannelIds.value.has(channel.id)
+}
+
+const toggleCategoryCollapsed = (categoryId: string) => {
+  const activeServerId = chatStore.activeConnectionId
+  const nextCollapsedCategoryIds = isCategoryCollapsed(categoryId)
+    ? collapsedCategoryIds.value.filter((id) => id !== categoryId)
+    : [...collapsedCategoryIds.value, categoryId]
+
+  collapsedCategoryIds.value = nextCollapsedCategoryIds
+  persistCollapsedCategories(activeServerId, nextCollapsedCategoryIds)
+}
 
 const sortChannels = (channelList: Channel[]) => {
   return [...channelList].sort((a, b) => {
@@ -251,6 +395,22 @@ watch(() => chatStore.activeConnectionId, () => {
   resetDragState()
 })
 
+watch(() => chatStore.activeConnectionId, (serverId) => {
+  loadCollapsedCategories(serverId)
+}, { immediate: true })
+
+watch(() => chatStore.activeServerCategories, (categories) => {
+  const validCategoryIds = new Set(categories.map((category) => category.id))
+  const nextCollapsedCategoryIds = collapsedCategoryIds.value.filter((categoryId) => validCategoryIds.has(categoryId))
+
+  if (nextCollapsedCategoryIds.length === collapsedCategoryIds.value.length) {
+    return
+  }
+
+  collapsedCategoryIds.value = nextCollapsedCategoryIds
+  persistCollapsedCategories(chatStore.activeConnectionId, nextCollapsedCategoryIds)
+}, { deep: true })
+
 const formattedBandwidth = computed(() => {
   const bandwidthKbps = webrtcStore.bandwidth
   if (bandwidthKbps > 1000) {
@@ -275,6 +435,96 @@ const activeServer = computed(() => {
 const userPanelName = computed(() => chatStore.currentUser?.username || chatStore.localUsername || 'Not connected')
 const hasCurrentUser = computed(() => !!chatStore.currentUser)
 const userPanelAvatarUrl = computed(() => chatStore.currentUser?.avatar_url || chatStore.getLocalAvatar())
+const currentPresenceStatus = computed<PresenceStatus>(() => chatStore.getUserPresenceStatus(chatStore.currentUser))
+
+const PRESENCE_OPTIONS: Array<{ value: PresenceStatus; label: string; icon: typeof Circle }> = [
+  { value: 'online', label: 'Online', icon: Circle },
+  { value: 'idle', label: 'Idle', icon: Moon },
+  { value: 'dnd', label: 'Do Not Disturb', icon: MinusCircle },
+  { value: 'invisible', label: 'Invisible', icon: EyeOff }
+]
+
+const getPresenceStatusColorClass = (status: PresenceStatus) => {
+  switch (status) {
+    case 'idle':
+      return 'bg-amber-400'
+    case 'dnd':
+      return 'bg-red-500'
+    case 'invisible':
+      return 'bg-zinc-600'
+    default:
+      return 'bg-green-500'
+  }
+}
+
+const getPresenceStatusLabel = (status: PresenceStatus) => {
+  switch (status) {
+    case 'idle':
+      return 'Idle'
+    case 'dnd':
+      return 'DND'
+    case 'invisible':
+      return 'Offline'
+    default:
+      return 'Online'
+  }
+}
+
+const getUserPresenceStatus = (user: User | null | undefined) => chatStore.getUserPresenceStatus(user)
+
+const getVoiceParticipantUser = (participant: User) => {
+  return chatStore.users.find((user) => user.id === participant.id) || participant
+}
+
+const openUserStatusMenu = (event: MouseEvent) => {
+  if (!hasCurrentUser.value) {
+    return
+  }
+
+  event.preventDefault()
+  event.stopPropagation()
+  userStatusMenuX.value = event.clientX
+  userStatusMenuY.value = event.clientY
+  contextMenuVisible.value = false
+  userStatusMenuVisible.value = true
+
+  nextTick(() => {
+    const menuElement = userStatusMenuRef.value
+    if (!menuElement || typeof window === 'undefined') {
+      return
+    }
+
+    const menuRect = menuElement.getBoundingClientRect()
+    const viewportWidth = window.innerWidth
+    const viewportHeight = window.innerHeight
+
+    const preferredX = event.clientX
+    const preferredY = event.clientY
+    const flippedX = event.clientX - menuRect.width
+    const flippedY = event.clientY - menuRect.height
+
+    userStatusMenuX.value = clamp(
+      preferredX + menuRect.width + USER_STATUS_MENU_MARGIN <= viewportWidth ? preferredX : flippedX,
+      USER_STATUS_MENU_MARGIN,
+      Math.max(USER_STATUS_MENU_MARGIN, viewportWidth - menuRect.width - USER_STATUS_MENU_MARGIN)
+    )
+
+    userStatusMenuY.value = clamp(
+      preferredY + menuRect.height + USER_STATUS_MENU_MARGIN <= viewportHeight ? preferredY : flippedY,
+      USER_STATUS_MENU_MARGIN,
+      Math.max(USER_STATUS_MENU_MARGIN, viewportHeight - menuRect.height - USER_STATUS_MENU_MARGIN)
+    )
+  })
+}
+
+const closeUserStatusMenu = () => {
+  userStatusMenuVisible.value = false
+}
+
+const selectPresenceStatus = (status: PresenceStatus) => {
+  chatStore.setPresenceStatus(status)
+  closeUserStatusMenu()
+}
 
 const handleClickOutside = (event: MouseEvent) => {
   if (showVoiceStats.value && voiceStatsContainerRef.value && !voiceStatsContainerRef.value.contains(event.target as Node)) {
@@ -289,6 +539,13 @@ const handleClickOutside = (event: MouseEvent) => {
       contextMenuCategoryId.value = null
     }
   }
+
+  if (userStatusMenuVisible.value) {
+    const target = event.target as HTMLElement | null
+    if (!target?.closest('.user-status-context-menu')) {
+      closeUserStatusMenu()
+    }
+  }
 }
 
 watch(() => webrtcStore.activeVoiceChannelId, (newVal) => {
@@ -299,10 +556,12 @@ watch(() => webrtcStore.activeVoiceChannelId, (newVal) => {
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
+  window.addEventListener('resize', updateUserStatusMenuPosition)
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
+  window.removeEventListener('resize', updateUserStatusMenuPosition)
 })
 
 const isChannelActive = (channel: Channel) => {
@@ -510,6 +769,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
         >
           <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer"
             :draggable="isAdmin"
+            @click="toggleCategoryCollapsed(category.id)"
             @dragstart="handleCategoryHeaderDragStart(category.id)"
             @dragover="draggedChannelId ? handleCategoryDragOver($event, category.id) : handleCategoryHeaderDragOver($event, category.id)"
             @dragenter.prevent="draggedChannelId ? handleCategoryDragOver($event, category.id) : handleCategoryHeaderDragOver($event, category.id)"
@@ -517,7 +777,8 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
             @dragend="handleDragEnd"
             @contextmenu.stop.prevent="openCategoryContextMenu($event, category.id)">
             <div class="flex items-center text-xs font-bold text-zinc-500 group-hover:text-zinc-300 uppercase tracking-widest transition-colors">
-              <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+              <ChevronDown v-if="!isCategoryCollapsed(category.id)" class="w-3 h-3 mr-1" />
+              <ChevronRight v-else class="w-3 h-3 mr-1" />
               {{ category.name }}
             </div>
             <button v-if="isAdmin" class="text-zinc-500 hover:text-zinc-300 opacity-0 group-hover:opacity-100 transition-all font-bold" @click.stop="emit('open-create-channel', { categoryId: category.id })">
@@ -525,8 +786,10 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
             </button>
           </div>
 
-          <div v-for="channel in getCategoryChannels(category.id)" :key="channel.id">
+          <template v-if="shouldShowCategoryChannels(category.id)">
+            <div v-for="channel in getCategoryChannels(category.id)" :key="channel.id">
             <div
+              v-if="shouldRenderChannelInCategory(category.id, channel.id)"
               class="relative flex items-center px-2 py-1.5 rounded-lg cursor-pointer group mb-[2px] transition-colors"
               :class="channelRowClass(channel)"
               :draggable="isAdmin"
@@ -545,24 +808,30 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
               <span class="truncate font-medium">{{ channel.name }}</span>
             </div>
 
-            <div v-if="channel.type === 'voice' && webrtcStore.channelParticipants.get(channel.id)?.length" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
-              <div v-for="user in webrtcStore.channelParticipants.get(channel.id)" :key="user.id" class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50">
-                <div class="relative w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 mr-2 flex items-center justify-center text-[10px] font-bold overflow-hidden" :class="isVoiceUserSpeaking(user.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''">
-                  <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
-                  <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
-                </div>
-                <span class="truncate flex-1 font-medium">{{ user.username }}</span>
+              <div v-if="shouldShowVoiceParticipants(channel)" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
+              <div v-for="participant in webrtcStore.channelParticipants.get(channel.id)" :key="participant.id" class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50">
+                <AppAvatar
+                  :src="getVoiceParticipantUser(participant).avatar_url"
+                  :fallback="getVoiceParticipantUser(participant).username"
+                  wrapper-class="relative w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 mr-2 flex items-center justify-center text-[10px] font-bold overflow-visible"
+                  image-class="w-full h-full object-cover rounded-full"
+                  :class="isVoiceUserSpeaking(participant.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''"
+                >
+                  <div class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border border-zinc-950" :class="getPresenceStatusColorClass(getUserPresenceStatus(getVoiceParticipantUser(participant)))"></div>
+                </AppAvatar>
+                <span class="truncate flex-1 font-medium">{{ getVoiceParticipantUser(participant).username }}</span>
                 <div class="flex items-center gap-1 ml-2">
-                  <MicOff v-if="user.isMuted || user.isDeafened" class="w-3 h-3 text-red-400" />
-                  <MonitorUp v-if="isUserScreenSharing(user.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
-                  <div v-if="user.isDeafened" class="relative flex items-center justify-center">
+                  <MicOff v-if="participant.isMuted || participant.isDeafened" class="w-3 h-3 text-red-400" />
+                  <MonitorUp v-if="isUserScreenSharing(participant.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
+                  <div v-if="participant.isDeafened" class="relative flex items-center justify-center">
                     <Headphones class="w-3 h-3 text-red-400" />
                     <div class="absolute w-3.5 h-[1.5px] bg-red-400 rotate-45 rounded-full"></div>
                   </div>
                 </div>
               </div>
             </div>
-          </div>
+            </div>
+          </template>
         </div>
 
         <div
@@ -601,16 +870,21 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
             </div>
 
             <div v-if="channel.type === 'voice' && webrtcStore.channelParticipants.get(channel.id)?.length" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
-              <div v-for="user in webrtcStore.channelParticipants.get(channel.id)" :key="user.id" class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50">
-                <div class="relative w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 mr-2 flex items-center justify-center text-[10px] font-bold overflow-hidden" :class="isVoiceUserSpeaking(user.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''">
-                  <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover" />
-                  <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
-                </div>
-                <span class="truncate flex-1 font-medium">{{ user.username }}</span>
+              <div v-for="participant in webrtcStore.channelParticipants.get(channel.id)" :key="participant.id" class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50">
+                <AppAvatar
+                  :src="getVoiceParticipantUser(participant).avatar_url"
+                  :fallback="getVoiceParticipantUser(participant).username"
+                  wrapper-class="relative w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 mr-2 flex items-center justify-center text-[10px] font-bold overflow-visible"
+                  image-class="w-full h-full object-cover rounded-full"
+                  :class="isVoiceUserSpeaking(participant.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''"
+                >
+                  <div class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border border-zinc-950" :class="getPresenceStatusColorClass(getUserPresenceStatus(getVoiceParticipantUser(participant)))"></div>
+                </AppAvatar>
+                <span class="truncate flex-1 font-medium">{{ getVoiceParticipantUser(participant).username }}</span>
                 <div class="flex items-center gap-1 ml-2">
-                  <MicOff v-if="user.isMuted || user.isDeafened" class="w-3 h-3 text-red-400" />
-                  <MonitorUp v-if="isUserScreenSharing(user.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
-                  <div v-if="user.isDeafened" class="relative flex items-center justify-center">
+                  <MicOff v-if="participant.isMuted || participant.isDeafened" class="w-3 h-3 text-red-400" />
+                  <MonitorUp v-if="isUserScreenSharing(participant.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
+                  <div v-if="participant.isDeafened" class="relative flex items-center justify-center">
                     <Headphones class="w-3 h-3 text-red-400" />
                     <div class="absolute w-3.5 h-[1.5px] bg-red-400 rotate-45 rounded-full"></div>
                   </div>
@@ -703,17 +977,19 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
     </div>
 
     <div class="h-[52px] bg-zinc-900 border-t border-white/5 px-2 flex items-center shrink-0">
-      <div class="flex items-center hover:bg-zinc-800/80 p-1.5 rounded-lg cursor-pointer flex-1 min-w-0 transition-colors">
-        <div class="w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 relative shrink-0 flex items-center justify-center font-bold text-sm overflow-hidden" :class="chatStore.currentUser && isVoiceUserSpeaking(chatStore.currentUser.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-900' : ''">
-          <img v-if="userPanelAvatarUrl" :src="userPanelAvatarUrl" alt="Avatar" class="w-full h-full object-cover" />
-          <span v-else>{{ userPanelName.charAt(0).toUpperCase() }}</span>
-          <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-900" :class="hasCurrentUser ? 'bg-green-500' : 'bg-zinc-600'"></div>
-        </div>
+      <div class="flex items-center hover:bg-zinc-800/80 p-1.5 rounded-lg cursor-pointer flex-1 min-w-0 transition-colors" @contextmenu="openUserStatusMenu">
+        <AppAvatar
+          :src="userPanelAvatarUrl"
+          :fallback="userPanelName"
+          wrapper-class="w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 relative shrink-0 flex items-center justify-center font-bold text-sm overflow-visible"
+          image-class="w-full h-full object-cover rounded-full"
+          :class="chatStore.currentUser && isVoiceUserSpeaking(chatStore.currentUser.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-900' : ''"
+        />
         <div class="ml-2.5 flex-1 min-w-0">
           <div class="text-[13px] font-bold text-white truncate drop-shadow-sm">{{ userPanelName }}</div>
           <div class="text-[11px] font-medium text-zinc-400 flex items-center gap-1.5 truncate mt-0.5">
-            <span class="w-1.5 h-1.5 rounded-full" :class="hasCurrentUser ? 'bg-green-500' : 'bg-zinc-600'"></span>
-            {{ hasCurrentUser ? 'Online' : 'Offline' }}
+            <span class="w-1.5 h-1.5 rounded-full" :class="getPresenceStatusColorClass(currentPresenceStatus)"></span>
+            {{ hasCurrentUser ? getPresenceStatusLabel(currentPresenceStatus) : 'Offline' }}
           </div>
         </div>
       </div>
@@ -730,6 +1006,22 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           <div v-if="webrtcStore.isDeafened" class="absolute w-5 h-[1.5px] bg-red-400 rotate-45 rounded-full"></div>
         </button>
       </div>
+    </div>
+
+    <div v-if="userStatusMenuVisible && hasCurrentUser" ref="userStatusMenuRef" class="user-status-context-menu fixed z-50 w-56 rounded-xl border border-white/10 bg-zinc-950 shadow-2xl py-1 backdrop-blur-md" :style="{ left: `${userStatusMenuX}px`, top: `${userStatusMenuY}px` }">
+      <button
+        v-for="option in PRESENCE_OPTIONS"
+        :key="option.value"
+        class="w-full px-3 py-2 text-left text-sm flex items-center justify-between gap-2 font-medium transition-colors hover:bg-zinc-900/80"
+        :class="currentPresenceStatus === option.value ? 'text-white' : 'text-zinc-300'"
+        @click="selectPresenceStatus(option.value)"
+      >
+        <span class="flex items-center gap-2">
+          <component :is="option.icon" class="w-4 h-4" />
+          {{ option.label }}
+        </span>
+        <span class="w-2.5 h-2.5 rounded-full" :class="getPresenceStatusColorClass(option.value)"></span>
+      </button>
     </div>
   </aside>
 </template>

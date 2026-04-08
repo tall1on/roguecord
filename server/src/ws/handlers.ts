@@ -19,6 +19,7 @@ import {
   getOrCreateSystemUser,
   updateUserRole,
   updateUserProfile,
+  updateUserPresenceStatus,
   getUsers,
   hasAdminUser,
   getServer,
@@ -572,6 +573,113 @@ const getResolvedUser = async (userId: string) => {
   const serverId = await getActiveServerId();
   if (!serverId) return { ...user, role_ids: [], roles: [] };
   return hydrateUserWithServerRoles(serverId, user);
+};
+
+type PresenceStatus = 'online' | 'idle' | 'dnd' | 'invisible';
+
+const VALID_PRESENCE_STATUSES = new Set<PresenceStatus>(['online', 'idle', 'dnd', 'invisible']);
+
+const normalizePresenceStatus = (value: unknown): PresenceStatus | null => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  if (!VALID_PRESENCE_STATUSES.has(normalized as PresenceStatus)) return null;
+  return normalized as PresenceStatus;
+};
+
+const getEffectivePresenceStatus = (presenceStatus: PresenceStatus, isOnline: boolean): 'online' | 'idle' | 'dnd' | 'offline' => {
+  if (!isOnline || presenceStatus === 'invisible') {
+    return 'offline';
+  }
+  return presenceStatus;
+};
+
+const serializeUserPresenceForViewer = (
+  user: { id: string; presence_status?: PresenceStatus | null },
+  viewerUserId: string | undefined,
+  onlineUserIds: Set<string>
+) => ({
+  presence_status: user.id === viewerUserId
+    ? ((user.presence_status || 'online') as PresenceStatus)
+    : getEffectivePresenceStatus(((user.presence_status || 'online') as PresenceStatus), onlineUserIds.has(user.id)),
+  effective_presence_status: getEffectivePresenceStatus(((user.presence_status || 'online') as PresenceStatus), onlineUserIds.has(user.id))
+});
+
+const serializeMemberForViewer = (
+  member: any,
+  viewerUserId: string | undefined,
+  onlineUserIds: Set<string>
+) => ({
+  ...member,
+  ...serializeUserPresenceForViewer(member, viewerUserId, onlineUserIds)
+});
+
+const broadcastSerializedUserUpdate = async (user: any) => {
+  const onlineUserIds = new Set(connectionManager.getOnlineUserIds());
+  for (const connection of connectionManager.getClients()) {
+    if (!connection.userId) {
+      continue;
+    }
+
+    connection.ws.send(JSON.stringify({
+      type: 'user_updated',
+      payload: { user: serializeMemberForViewer(user, connection.userId, onlineUserIds) }
+    }));
+  }
+};
+
+const buildPresenceUpdatePayload = async (targetUserId: string, viewerUserId?: string) => {
+  const user = await getResolvedUser(targetUserId);
+  if (!user) {
+    return null;
+  }
+
+  const onlineUserIds = new Set(connectionManager.getOnlineUserIds());
+  return {
+    user: serializeMemberForViewer(user, viewerUserId, onlineUserIds)
+  };
+};
+
+const broadcastPresenceUpdate = async (targetUserId: string) => {
+  for (const connection of connectionManager.getClients()) {
+    if (!connection.userId) {
+      continue;
+    }
+
+    const payload = await buildPresenceUpdatePayload(targetUserId, connection.userId);
+    if (!payload) {
+      continue;
+    }
+
+    connection.ws.send(JSON.stringify({
+      type: 'user_presence_updated',
+      payload
+    }));
+  }
+};
+
+const handleSetPresence = async (client: ClientConnection, payload: { status?: string }) => {
+  if (!client.userId) return;
+
+  const normalizedStatus = normalizePresenceStatus(payload?.status);
+  if (!normalizedStatus) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid presence status' } }));
+    return;
+  }
+
+  await updateUserPresenceStatus(client.userId, normalizedStatus);
+  const responsePayload = await buildPresenceUpdatePayload(client.userId, client.userId);
+  if (!responsePayload) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
+    return;
+  }
+
+  client.ws.send(JSON.stringify({
+    type: 'presence_updated',
+    payload: responsePayload
+  }));
+
+  await broadcastPresenceUpdate(client.userId);
+  await broadcastSerializedUserUpdate(responsePayload.user);
 };
 
 const hasResolvedRole = async (userId: string, roleKeys: string[]) => {
@@ -1545,6 +1653,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'update_server_role':
         await handleUpdateServerRole(client, payload);
         break;
+      case 'set_presence':
+        await handleSetPresence(client, payload);
+        break;
       case 'assign_member_roles':
         await handleAssignMemberRoles(client, payload);
         break;
@@ -1741,23 +1852,25 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
 
         const server = await getServer();
         const userWithUpdatedIp = await getResolvedUser(user.id);
+        const onlineUserIds = new Set(connectionManager.getOnlineUserIds());
         client.ws.send(JSON.stringify({
           type: 'authenticated',
-          payload: { user: userWithUpdatedIp || user, server }
+          payload: { user: serializeMemberForViewer(userWithUpdatedIp || user, user.id, onlineUserIds), server }
         }));
 
         // Send full member list to the newly authenticated user
         const allUsers = await getUsers();
         const hydratedUsers = server?.id ? await Promise.all(allUsers.map((member) => hydrateUserWithServerRoles(server.id, member))) : allUsers;
-        const onlineUserIds = connectionManager.getOnlineUserIds();
+        const onlineUserIdsList = connectionManager.getOnlineUserIds();
+        const onlineUserIdsSet = new Set(onlineUserIdsList);
         const memberIps = Object.fromEntries(
           allUsers.map((member) => [member.id, member.last_ip || connectionManager.getUserIp(member.id) || null])
         );
         client.ws.send(JSON.stringify({
           type: 'member_list',
           payload: {
-            members: hydratedUsers,
-            onlineUserIds,
+            members: hydratedUsers.map((member) => serializeMemberForViewer(member, user.id, onlineUserIdsSet)),
+            onlineUserIds: onlineUserIdsList,
             memberIps
           }
         }));
@@ -1768,10 +1881,7 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
 
         // Broadcast to others that this user is online, if they weren't already
         if (!connectionManager.isUserOnline(user.id, client)) {
-          connectionManager.broadcastToAuthenticated({
-            type: 'user_online',
-            payload: { user }
-          });
+          await broadcastPresenceUpdate(user.id);
         }
 
         // Send welcome message if new user
@@ -3069,10 +3179,7 @@ export const handleClientDisconnect = (client: ClientConnection) => {
 
   // Broadcast to others that this user is offline, only if they have no other active connections
   if (!connectionManager.isUserOnline(client.userId, client)) {
-    connectionManager.broadcastToAuthenticated({
-      type: 'user_offline',
-      payload: { userId: client.userId }
-    });
+    void broadcastPresenceUpdate(client.userId);
   }
 };
 
@@ -3406,10 +3513,7 @@ const handleSubmitAdminKey = async (client: ClientConnection, payload: { key: st
     }));
     
     // Broadcast user update to all authenticated clients
-    connectionManager.broadcastToAuthenticated({
-      type: 'user_updated',
-      payload: { user }
-    });
+    await broadcastSerializedUserUpdate(user);
   } else {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid admin key' } }));
   }
@@ -3903,10 +4007,7 @@ const handleAssignMemberRoles = async (
       return;
     }
 
-    connectionManager.broadcastToAuthenticated({
-      type: 'user_updated',
-      payload: { user: hydratedUser }
-    });
+    await broadcastSerializedUserUpdate(hydratedUser);
 
     client.ws.send(JSON.stringify({
       type: 'member_roles_updated',

@@ -1,6 +1,6 @@
 import type { Message, User } from '../models';
 
-export type MessageEmbedType = 'youtube' | 'twitch' | 'link';
+export type MessageEmbedType = 'youtube' | 'twitch' | 'spotify' | 'link';
 
 export interface MessageEmbed {
   type: MessageEmbedType;
@@ -83,6 +83,7 @@ const buildYouTubeEmbed = (url: URL): MessageEmbed | null => {
 const isValidTwitchChannel = (value: string) => /^[A-Za-z0-9_]{3,25}$/.test(value);
 const isValidTwitchVideoId = (value: string) => /^\d+$/.test(value);
 const isValidTwitchClip = (value: string) => /^[A-Za-z0-9_-]{3,}$/.test(value);
+const SPOTIFY_SUPPORTED_KINDS = new Set(['track', 'album', 'playlist', 'artist', 'episode', 'show']);
 
 const buildTwitchEmbed = (url: URL): MessageEmbed | null => {
   const host = normalizeHost(url.hostname);
@@ -153,6 +154,47 @@ const buildTwitchEmbed = (url: URL): MessageEmbed | null => {
   return null;
 };
 
+const buildSpotifyEmbed = (url: URL): MessageEmbed | null => {
+  const host = normalizeHost(url.hostname);
+  if (host !== 'spotify.com' && host !== 'open.spotify.com') {
+    return null;
+  }
+
+  const pathParts = url.pathname.split('/').filter(Boolean);
+  if (pathParts.length < 2) {
+    return null;
+  }
+
+  let kindIndex = 0;
+  if (
+    pathParts.length >= 3
+    && /^(?:[A-Za-z]{2}(?:-[A-Za-z]{2})?|intl-[A-Za-z]{2})$/.test(pathParts[0] || '')
+  ) {
+    kindIndex = 1;
+  }
+
+  const kind = pathParts[kindIndex] || '';
+  const id = pathParts[kindIndex + 1] || '';
+
+  if (!SPOTIFY_SUPPORTED_KINDS.has(kind) || !/^[A-Za-z0-9]+$/.test(id)) {
+    return null;
+  }
+
+  const canonicalUrl = `https://open.spotify.com/${kind}/${id}`;
+  const providerLabel = kind.charAt(0).toUpperCase() + kind.slice(1);
+
+  return {
+    type: 'spotify',
+    provider: 'Spotify',
+    url: canonicalUrl,
+    displayUrl: canonicalUrl,
+    title: `Spotify ${providerLabel}`,
+    description: null,
+    thumbnailUrl: null,
+    embedUrl: `https://open.spotify.com/embed/${kind}/${id}`
+  };
+};
+
 const buildGenericEmbed = (url: URL): MessageEmbed => {
   const providerHost = normalizeHost(url.hostname);
   const trimmedPath = `${url.pathname}${url.search}`;
@@ -185,6 +227,11 @@ const buildEmbedFromUrl = (urlString: string): MessageEmbed | null => {
     const twitch = buildTwitchEmbed(url);
     if (twitch) {
       return twitch;
+    }
+
+    const spotify = buildSpotifyEmbed(url);
+    if (spotify) {
+      return spotify;
     }
 
     return buildGenericEmbed(url);

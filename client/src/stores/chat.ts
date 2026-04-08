@@ -10,11 +10,14 @@ export interface User {
   username: string;
   avatar_url: string | null;
   avatar_mime_type?: string | null;
+  status?: PresenceStatus;
   role: string;
   role_ids?: string[];
   roles?: ServerRole[];
   created_at: string;
 }
+
+export type PresenceStatus = 'online' | 'idle' | 'dnd' | 'invisible';
 
 export interface Category {
   id: string;
@@ -56,7 +59,7 @@ export interface FolderChannelFile {
   updated_at: string;
 }
 
-export type MessageEmbedType = 'youtube' | 'twitch' | 'link';
+export type MessageEmbedType = 'youtube' | 'twitch' | 'spotify' | 'link';
 
 export interface MessageEmbed {
   type: MessageEmbedType;
@@ -390,6 +393,7 @@ export const useChatStore = defineStore('chat', () => {
   const localUsername = ref<string | null>(localStorage.getItem('username'));
   const users = ref<User[]>([]);
   const onlineUserIds = ref<Set<string>>(new Set());
+  const pendingPresenceStatus = ref<PresenceStatus>('online');
   const memberIps = ref<Record<string, string>>({});
   const moderationNotice = ref<ModerationNotice | null>(null);
   
@@ -507,6 +511,16 @@ export const useChatStore = defineStore('chat', () => {
     serverRoles.value = normalizeServerRoles(roles);
   };
 
+  const normalizePresenceStatus = (status: unknown): PresenceStatus => {
+    return status === 'idle' || status === 'dnd' || status === 'invisible' ? status : 'online';
+  };
+
+  const getNormalizedUserStatus = (user: any): PresenceStatus => {
+    return normalizePresenceStatus(
+      user?.presence_status ?? user?.effective_presence_status ?? user?.status
+    );
+  };
+
   const normalizeUser = (user: any): User => {
     const normalizedRoles = normalizeServerRoles(user?.roles);
     const normalizedRoleIds = Array.isArray(user?.role_ids)
@@ -517,10 +531,55 @@ export const useChatStore = defineStore('chat', () => {
       ...user,
       avatar_url: user?.avatar_url || null,
       avatar_mime_type: user?.avatar_mime_type || null,
+      status: getNormalizedUserStatus(user),
       role: typeof user?.role === 'string' && user.role.trim() ? user.role : 'user',
       role_ids: normalizedRoleIds,
       roles: normalizedRoles
     };
+  };
+
+  const isUserEffectivelyOnline = (user: User | null | undefined) => {
+    if (!user?.id || !onlineUserIds.value.has(user.id)) {
+      return false;
+    }
+
+    return normalizePresenceStatus(user.status) !== 'invisible';
+  };
+
+  const getUserPresenceStatus = (user: User | null | undefined): PresenceStatus => {
+    if (!user?.id) {
+      return 'invisible';
+    }
+
+    if (!onlineUserIds.value.has(user.id)) {
+      return 'invisible';
+    }
+
+    return normalizePresenceStatus(user.status);
+  };
+
+  const setPresenceStatus = (status: PresenceStatus) => {
+    const normalizedStatus = normalizePresenceStatus(status);
+    pendingPresenceStatus.value = normalizedStatus;
+
+    if (currentUser.value) {
+      currentUser.value = {
+        ...currentUser.value,
+        status: normalizedStatus
+      };
+
+      const existingIndex = users.value.findIndex((user) => user.id === currentUser.value?.id);
+      if (existingIndex >= 0) {
+        const nextUsers = [...users.value];
+        nextUsers[existingIndex] = {
+          ...nextUsers[existingIndex],
+          status: normalizedStatus
+        };
+        users.value = nextUsers;
+      }
+    }
+
+    send('set_presence', { status: normalizedStatus });
   };
 
   const getPrimaryServerRole = (user: User | null | undefined) => {
@@ -1548,6 +1607,7 @@ export const useChatStore = defineStore('chat', () => {
 
       case 'authenticated':
         currentUser.value = normalizeUser(payload.user);
+        pendingPresenceStatus.value = normalizePresenceStatus(currentUser.value.status);
         currentUserRole.value = currentUser.value.role || 'user';
         if (payload.user && payload.user.avatar_url !== readStoredAvatar()) {
           saveLocalAvatar(payload.user.avatar_url || null);
@@ -1614,6 +1674,14 @@ export const useChatStore = defineStore('chat', () => {
         users.value = Array.isArray(payload.members) ? payload.members.map((member: any) => normalizeUser(member)) : [];
         onlineUserIds.value = new Set(payload.onlineUserIds);
         memberIps.value = payload.memberIps || {};
+        if (currentUser.value) {
+          const refreshedCurrentUser = users.value.find((user) => user.id === currentUser.value?.id) || currentUser.value;
+          currentUser.value = {
+            ...refreshedCurrentUser,
+            status: normalizePresenceStatus(refreshedCurrentUser.status)
+          };
+          pendingPresenceStatus.value = normalizePresenceStatus(currentUser.value.status);
+        }
         break;
 
       case 'member_roles_updated': {
@@ -1627,7 +1695,34 @@ export const useChatStore = defineStore('chat', () => {
 
         if (currentUser.value?.id === updatedUser.id) {
           currentUser.value = updatedUser;
+          pendingPresenceStatus.value = normalizePresenceStatus(updatedUser.status);
           currentUserRole.value = updatedUser.role;
+        }
+        break;
+      }
+
+      case 'presence_updated':
+      case 'user_presence_updated': {
+        const updatedUser = normalizeUser(payload.user);
+        const existingIndex = users.value.findIndex((user) => user.id === updatedUser.id);
+        if (existingIndex >= 0) {
+          const nextUsers = [...users.value];
+          nextUsers.splice(existingIndex, 1, {
+            ...nextUsers[existingIndex],
+            ...updatedUser
+          });
+          users.value = nextUsers;
+        } else {
+          users.value = [...users.value, updatedUser];
+        }
+
+        if (currentUser.value?.id === updatedUser.id) {
+          currentUser.value = {
+            ...currentUser.value,
+            ...updatedUser
+          };
+          pendingPresenceStatus.value = normalizePresenceStatus(updatedUser.status);
+          currentUserRole.value = currentUser.value.role;
         }
         break;
       }
@@ -1676,22 +1771,35 @@ export const useChatStore = defineStore('chat', () => {
         onlineUserIds.value.add(payload.user.id);
         if (!users.value.find(u => u.id === payload.user.id)) {
           users.value.push(normalizeUser(payload.user));
-        }
-        break;
-        
-      case 'user_offline':
-        onlineUserIds.value.delete(payload.userId);
-        break;
-        
-      case 'user_updated':
-        const index = users.value.findIndex(u => u.id === payload.user.id);
-        if (index !== -1) {
-          users.value[index] = normalizeUser(payload.user);
         } else {
-          users.value.push(normalizeUser(payload.user));
+          const nextUser = normalizeUser(payload.user);
+          users.value = users.value.map((user) => user.id === nextUser.id ? { ...user, ...nextUser } : user);
         }
         if (currentUser.value?.id === payload.user.id) {
-          currentUser.value = normalizeUser(payload.user);
+          const nextUser = normalizeUser(payload.user);
+          currentUser.value = nextUser;
+          pendingPresenceStatus.value = normalizePresenceStatus(nextUser.status);
+        }
+        break;
+
+      case 'user_offline':
+        onlineUserIds.value.delete(payload.userId);
+        if (currentUser.value?.id === payload.userId) {
+          currentUser.value!.status = 'invisible';
+        }
+        break;
+
+      case 'user_updated':
+        const updatedUser = normalizeUser(payload.user);
+        const index = users.value.findIndex(u => u.id === updatedUser.id);
+        if (index !== -1) {
+          users.value[index] = updatedUser;
+        } else {
+          users.value.push(updatedUser);
+        }
+        if (currentUser.value?.id === updatedUser.id) {
+          currentUser.value = updatedUser;
+          pendingPresenceStatus.value = normalizePresenceStatus(currentUser.value.status);
           currentUserRole.value = currentUser.value.role;
         }
         break;
@@ -2493,6 +2601,7 @@ export const useChatStore = defineStore('chat', () => {
     localUsername,
     users,
     onlineUserIds,
+    pendingPresenceStatus,
     memberIps,
     moderationNotice,
     categories,
@@ -2528,6 +2637,9 @@ export const useChatStore = defineStore('chat', () => {
     updateServerRole,
     updateServerRoles,
     assignMemberRoles,
+    isUserEffectivelyOnline,
+    getUserPresenceStatus,
+    setPresenceStatus,
     getServerRoleByKey,
     getServerRoleColor,
     getPrimaryServerRole,
