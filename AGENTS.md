@@ -6,3 +6,4 @@
 - dont use python for anything
 - use dynamic imports on client/frontend side where possible
 - try to keep files under 1000 lines/efficent code split where makes sense
+- minimize code duplicates

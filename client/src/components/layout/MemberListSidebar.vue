@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useChatStore } from '../../stores/chat'
-import type { ModerationDeleteMode, ServerRole, User } from '../../stores/chat'
+ import { computed, onMounted, onUnmounted, ref } from 'vue'
+ import AppAvatar from '../common/AppAvatar.vue'
+ import { useChatStore, type PresenceStatus } from '../../stores/chat'
+ import type { ModerationDeleteMode, ServerRole, User } from '../../stores/chat'
 
 const chatStore = useChatStore()
-const getUserInitial = (user: User) => user.username.charAt(0).toUpperCase()
 
 const showModerationModal = ref(false)
 const moderationAction = ref<'kick' | 'ban'>('kick')
@@ -50,6 +50,21 @@ const getDisplayRoleName = (user: User) => {
 }
 
 const getDisplayRoleColor = (user: User) => getDisplayRole(user)?.color || chatStore.getServerRoleColor(user.role) || null
+
+const getPresenceStatusColorClass = (status: PresenceStatus) => {
+  switch (status) {
+    case 'idle':
+      return 'bg-amber-400'
+    case 'dnd':
+      return 'bg-red-500'
+    case 'invisible':
+      return 'bg-zinc-600'
+    default:
+      return 'bg-green-500'
+  }
+}
+
+const getUserPresenceStatus = (user: User | null | undefined) => chatStore.getUserPresenceStatus(user)
 
 const getRoleHeading = (user: User) => {
   const label = getDisplayRoleName(user)
@@ -191,8 +206,8 @@ const submitModeration = () => {
 
 const groupedMembers = computed(() => {
   const visibleUsers = chatStore.users.filter((u) => !isHiddenSystemMember(u))
-  const online = visibleUsers.filter((u) => chatStore.onlineUserIds.has(u.id))
-  const offline = visibleUsers.filter((u) => !chatStore.onlineUserIds.has(u.id))
+  const online = visibleUsers.filter((u) => chatStore.isUserEffectivelyOnline(u))
+  const offline = visibleUsers.filter((u) => !chatStore.isUserEffectivelyOnline(u))
 
   const onlineByRole: Record<string, typeof online> = {}
   online.forEach((u) => {
@@ -254,11 +269,14 @@ onUnmounted(() => {
             class="flex items-center px-2 py-1.5 hover:bg-zinc-900/80 rounded-lg cursor-pointer group transition-colors duration-200"
             @contextmenu="openContextMenu($event, user)"
           >
-            <div class="relative w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 shrink-0 flex items-center justify-center font-bold mr-3 text-sm overflow-hidden">
-              <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover rounded-full" />
-              <span v-else>{{ getUserInitial(user) }}</span>
-              <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-950 group-hover:border-zinc-900 bg-green-500 transition-colors"></div>
-            </div>
+            <AppAvatar
+              :src="user.avatar_url"
+              :fallback="user.username"
+              wrapper-class="relative w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 shrink-0 flex items-center justify-center font-bold mr-3 text-sm overflow-visible"
+              image-class="w-full h-full object-cover rounded-full"
+            >
+              <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-950 group-hover:border-zinc-900 transition-colors" :class="getPresenceStatusColorClass(getUserPresenceStatus(user))"></div>
+            </AppAvatar>
             <div class="flex-1 min-w-0">
               <div class="text-[13px] font-semibold truncate transition-colors group-hover:text-white" :style="{ color: getDisplayRoleColor(user) || '#d4d4d8' }">{{ user.username }}</div>
             </div>
@@ -277,11 +295,14 @@ onUnmounted(() => {
             class="flex items-center px-2 py-1.5 hover:bg-zinc-900/80 rounded-lg cursor-pointer group opacity-60 hover:opacity-100 transition-all duration-200"
             @contextmenu="openContextMenu($event, user)"
           >
-            <div class="relative w-8 h-8 rounded-full bg-zinc-800 shrink-0 flex items-center justify-center text-zinc-400 font-bold mr-3 text-sm overflow-hidden">
-              <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover rounded-full grayscale opacity-70 group-hover:opacity-100 transition-opacity" />
-              <span v-else>{{ getUserInitial(user) }}</span>
-              <div class="absolute bottom-0 right-0 w-3 h-3 bg-zinc-600 rounded-full border-2 border-zinc-950 group-hover:border-zinc-900 transition-colors"></div>
-            </div>
+            <AppAvatar
+              :src="user.avatar_url"
+              :fallback="user.username"
+              wrapper-class="relative w-8 h-8 rounded-full bg-zinc-800 shrink-0 flex items-center justify-center text-zinc-400 font-bold mr-3 text-sm overflow-visible"
+              image-class="w-full h-full object-cover rounded-full grayscale opacity-70 group-hover:opacity-100 transition-opacity"
+            >
+              <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-950 group-hover:border-zinc-900 transition-colors" :class="getPresenceStatusColorClass(getUserPresenceStatus(user))"></div>
+            </AppAvatar>
             <div class="flex-1 min-w-0">
               <div class="text-[13px] font-medium truncate transition-colors group-hover:text-zinc-300" :style="{ color: getDisplayRoleColor(user) ? `${getDisplayRoleColor(user)}b3` : '#71717a' }">{{ user.username }}</div>
             </div>

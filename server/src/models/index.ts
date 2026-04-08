@@ -511,6 +511,7 @@ export interface User {
   avatar_url: string | null;
   avatar_mime_type: string | null;
   last_ip: string | null;
+  presence_status: 'online' | 'idle' | 'dnd' | 'invisible';
   role: string;
   created_at: string;
 }
@@ -601,6 +602,13 @@ export const updateUserRole = async (id: string, role: string): Promise<void> =>
 
 export const updateUserLastIp = async (id: string, ipAddress: string | null): Promise<void> => {
   await dbRun('UPDATE users SET last_ip = ? WHERE id = ?', [ipAddress, id]);
+};
+
+export const updateUserPresenceStatus = async (
+  id: string,
+  presenceStatus: 'online' | 'idle' | 'dnd' | 'invisible'
+): Promise<void> => {
+  await dbRun('UPDATE users SET presence_status = ? WHERE id = ?', [presenceStatus, id]);
 };
 
 export const updateUserProfile = async (input: {
@@ -1187,8 +1195,10 @@ export const getMessageReplyReferences = async (messageIds: string[]): Promise<R
         u.id AS reply_user_join_id,
         u.username AS reply_username,
         u.avatar_url AS reply_avatar_url,
+        u.avatar_mime_type AS reply_avatar_mime_type,
         u.public_key AS reply_public_key,
         u.last_ip AS reply_last_ip,
+        u.presence_status AS reply_presence_status,
         u.role AS reply_role,
         u.created_at AS reply_user_created_at
       FROM messages m
@@ -1223,6 +1233,7 @@ export const getMessageReplyReferences = async (messageIds: string[]): Promise<R
         avatar_mime_type: row.reply_avatar_mime_type ?? null,
         public_key: row.reply_public_key,
         last_ip: row.reply_last_ip,
+        presence_status: row.reply_presence_status ?? 'offline',
         role: row.reply_role,
         created_at: row.reply_user_created_at
       },

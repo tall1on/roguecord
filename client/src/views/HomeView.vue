@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
 import { Archive, Code2, File, FileText, Film, Image, Music2, Reply, Trash2, X } from 'lucide-vue-next'
+import AppAvatar from '../components/common/AppAvatar.vue'
 import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, type MessageAttachment, type MessageReaction, type MessageReplyReference } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
@@ -686,10 +687,34 @@ const getTrustedEmbedIframeSrc = (embed: MessageEmbed): string | null => {
       return parsed.toString()
     }
 
+    if (embed.type === 'spotify') {
+      if (host !== 'spotify.com' && host !== 'open.spotify.com') {
+        return null
+      }
+
+      if (!parsed.pathname.startsWith('/embed/')) {
+        return null
+      }
+
+      return parsed.toString()
+    }
+
     return null
   } catch {
     return null
   }
+}
+
+const getEmbedContainerClass = (embed: MessageEmbed) => {
+  return embed.type === 'spotify'
+    ? 'max-w-[420px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]'
+    : 'max-w-[560px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]'
+}
+
+const getEmbedIframeClass = (embed: MessageEmbed) => {
+  return embed.type === 'spotify'
+    ? 'w-full h-[152px] border-b border-[#3f4147]'
+    : 'w-full aspect-video border-b border-[#3f4147]'
 }
 
 const sendMessage = () => {
@@ -1007,8 +1032,6 @@ const resolveMessageAvatarUrl = (message: Message) => {
   return user.avatar_url
 }
 
-const getMessageInitial = (message: Message) => message.user?.username.charAt(0).toUpperCase() || '?'
-
 const getMessageRoleColor = (message: Message) => {
   const roleKey = message.user?.role || 'all_users'
   return chatStore.getServerRoleColor(roleKey)
@@ -1185,10 +1208,12 @@ watch(
             class="flex items-start gap-3 hover:bg-zinc-900/40 py-1 px-2 -mx-2 rounded-lg transition-colors duration-100 group"
             @contextmenu.stop.prevent="openMessageContextMenu($event, entry.message)"
           >
-            <div class="w-10 h-10 rounded-full bg-indigo-500/20 text-indigo-200 shrink-0 flex items-center justify-center font-bold mt-0.5 overflow-hidden">
-              <img v-if="resolveMessageAvatarUrl(entry.message)" :src="resolveMessageAvatarUrl(entry.message) || ''" alt="Avatar" class="w-full h-full object-cover" />
-              <span v-else>{{ getMessageInitial(entry.message) }}</span>
-            </div>
+            <AppAvatar
+              :src="resolveMessageAvatarUrl(entry.message)"
+              :fallback="entry.message.user?.username || 'Unknown User'"
+              wrapper-class="w-10 h-10 rounded-full bg-indigo-500/20 text-indigo-200 shrink-0 flex items-center justify-center font-bold mt-0.5 overflow-visible"
+              image-class="w-full h-full object-cover rounded-full"
+            />
             <div class="flex-1 min-w-0">
               <div class="flex items-baseline gap-2 mb-[1px]">
                 <span
@@ -1265,12 +1290,12 @@ watch(
                 <div
                   v-for="(embed, embedIndex) in getMessageEmbeds(entry.message)"
                   :key="`${entry.message.id}-embed-${embedIndex}`"
-                  class="max-w-[560px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]"
+                  :class="getEmbedContainerClass(embed)"
                 >
                   <iframe
                     v-if="getTrustedEmbedIframeSrc(embed)"
                     :src="getTrustedEmbedIframeSrc(embed) || ''"
-                    class="w-full aspect-video border-b border-[#3f4147]"
+                    :class="getEmbedIframeClass(embed)"
                     loading="lazy"
                     referrerpolicy="strict-origin-when-cross-origin"
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
@@ -1656,10 +1681,13 @@ watch(
               </div>
             </div>
             <div v-show="!getUserScreenStream(user.id)" class="flex h-full min-h-0 flex-1 items-center justify-center px-6 py-8">
-              <div class="relative flex h-28 w-28 items-center justify-center overflow-hidden rounded-full bg-zinc-800 text-4xl font-bold text-zinc-400 transition-all duration-300 md:h-32 md:w-32" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-500 shadow-[0_0_20px_rgba(34,197,94,0.3)] bg-indigo-500/20 text-indigo-400' : 'shadow-sm'">
-                <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="h-full w-full object-cover" />
-                <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
-              </div>
+              <AppAvatar
+                :src="user.avatar_url"
+                :fallback="user.username"
+                wrapper-class="relative flex h-28 w-28 items-center justify-center overflow-visible rounded-full bg-zinc-800 text-4xl font-bold text-zinc-400 transition-all duration-300 md:h-32 md:w-32"
+                image-class="h-full w-full object-cover rounded-full"
+                :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-500 shadow-[0_0_20px_rgba(34,197,94,0.3)] bg-indigo-500/20 text-indigo-400' : 'shadow-sm'"
+              />
             </div>
           </div>
         </div>
