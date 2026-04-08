@@ -5,7 +5,7 @@ import { useWebRtcStore } from '../../../stores/webrtc'
 
 type SettingsSection = 'general' | 'audio' | 'connections' | 'identity' | 'server'
 
-const props = defineProps<{
+defineProps<{
   visible: boolean
   activeSection?: SettingsSection
   autoConnectLastServer: boolean
