@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp, Folder } from 'lucide-vue-next'
+import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp, Folder, ChevronDown, ChevronRight } from 'lucide-vue-next'
 import AppAvatar from '../common/AppAvatar.vue'
 import { useChatStore, type Channel } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
@@ -37,6 +37,125 @@ const draggedChannelId = ref<string | null>(null)
 const dragOverChannelId = ref<string | null>(null)
 const dragOverCategoryId = ref<string | null>(null)
 const dragOverUncategorized = ref(false)
+const collapsedCategoryIds = ref<string[]>([])
+
+const COLLAPSED_CATEGORY_STORAGE_KEY = 'roguecord:collapsed-categories'
+
+const getCategoryStorageKey = (serverId: string) => `${COLLAPSED_CATEGORY_STORAGE_KEY}:${serverId}`
+
+const loadCollapsedCategories = (serverId: string | null | undefined) => {
+  if (!serverId || typeof window === 'undefined') {
+    collapsedCategoryIds.value = []
+    return
+  }
+
+  try {
+    const storedValue = window.localStorage.getItem(getCategoryStorageKey(serverId))
+    if (!storedValue) {
+      collapsedCategoryIds.value = []
+      return
+    }
+
+    const parsedValue = JSON.parse(storedValue)
+    collapsedCategoryIds.value = Array.isArray(parsedValue)
+      ? parsedValue.filter((value): value is string => typeof value === 'string')
+      : []
+  } catch {
+    collapsedCategoryIds.value = []
+  }
+}
+
+const persistCollapsedCategories = (serverId: string | null | undefined, categoryIds: string[]) => {
+  if (!serverId || typeof window === 'undefined') {
+    return
+  }
+
+  if (categoryIds.length === 0) {
+    window.localStorage.removeItem(getCategoryStorageKey(serverId))
+    return
+  }
+
+  window.localStorage.setItem(getCategoryStorageKey(serverId), JSON.stringify(categoryIds))
+}
+
+const isCategoryCollapsed = (categoryId: string) => collapsedCategoryIds.value.includes(categoryId)
+
+const visibleCategoryIds = computed(() => {
+  const activeCategoryIds = new Set<string>()
+
+  if (chatStore.activeMainPanel.channelId) {
+    const activePanelChannel = chatStore.activeServerChannels.find((channel) => channel.id === chatStore.activeMainPanel.channelId)
+    if (activePanelChannel?.category_id) {
+      activeCategoryIds.add(activePanelChannel.category_id)
+    }
+  }
+
+  if (webrtcStore.activeVoiceChannelId) {
+    const activeVoiceChannel = chatStore.activeServerChannels.find((channel) => channel.id === webrtcStore.activeVoiceChannelId)
+    if (activeVoiceChannel?.category_id) {
+      activeCategoryIds.add(activeVoiceChannel.category_id)
+    }
+  }
+
+  return activeCategoryIds
+})
+
+const visibleCollapsedChannelIds = computed(() => {
+  const activeChannelIds = new Set<string>()
+
+  if (chatStore.activeMainPanel.channelId) {
+    activeChannelIds.add(chatStore.activeMainPanel.channelId)
+  }
+
+  if (webrtcStore.activeVoiceChannelId) {
+    activeChannelIds.add(webrtcStore.activeVoiceChannelId)
+  }
+
+  return activeChannelIds
+})
+
+const shouldShowCategoryChannels = (categoryId: string) => {
+  if (!isCategoryCollapsed(categoryId)) {
+    return true
+  }
+
+  return visibleCategoryIds.value.has(categoryId)
+}
+
+const shouldRenderChannelInCategory = (categoryId: string, channelId: string) => {
+  if (!isCategoryCollapsed(categoryId)) {
+    return true
+  }
+
+  return visibleCollapsedChannelIds.value.has(channelId)
+}
+
+const shouldShowVoiceParticipants = (channel: Channel) => {
+  if (channel.type !== 'voice') {
+    return false
+  }
+
+  const hasParticipants = !!webrtcStore.channelParticipants.get(channel.id)?.length
+  if (!hasParticipants) {
+    return false
+  }
+
+  if (!channel.category_id || !isCategoryCollapsed(channel.category_id)) {
+    return true
+  }
+
+  return visibleCollapsedChannelIds.value.has(channel.id)
+}
+
+const toggleCategoryCollapsed = (categoryId: string) => {
+  const activeServerId = chatStore.activeConnectionId
+  const nextCollapsedCategoryIds = isCategoryCollapsed(categoryId)
+    ? collapsedCategoryIds.value.filter((id) => id !== categoryId)
+    : [...collapsedCategoryIds.value, categoryId]
+
+  collapsedCategoryIds.value = nextCollapsedCategoryIds
+  persistCollapsedCategories(activeServerId, nextCollapsedCategoryIds)
+}
 
 const sortChannels = (channelList: Channel[]) => {
   return [...channelList].sort((a, b) => {
@@ -251,6 +370,22 @@ const channelRowClass = (channel: Channel) => {
 watch(() => chatStore.activeConnectionId, () => {
   resetDragState()
 })
+
+watch(() => chatStore.activeConnectionId, (serverId) => {
+  loadCollapsedCategories(serverId)
+}, { immediate: true })
+
+watch(() => chatStore.activeServerCategories, (categories) => {
+  const validCategoryIds = new Set(categories.map((category) => category.id))
+  const nextCollapsedCategoryIds = collapsedCategoryIds.value.filter((categoryId) => validCategoryIds.has(categoryId))
+
+  if (nextCollapsedCategoryIds.length === collapsedCategoryIds.value.length) {
+    return
+  }
+
+  collapsedCategoryIds.value = nextCollapsedCategoryIds
+  persistCollapsedCategories(chatStore.activeConnectionId, nextCollapsedCategoryIds)
+}, { deep: true })
 
 const formattedBandwidth = computed(() => {
   const bandwidthKbps = webrtcStore.bandwidth
@@ -511,6 +646,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
         >
           <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer"
             :draggable="isAdmin"
+            @click="toggleCategoryCollapsed(category.id)"
             @dragstart="handleCategoryHeaderDragStart(category.id)"
             @dragover="draggedChannelId ? handleCategoryDragOver($event, category.id) : handleCategoryHeaderDragOver($event, category.id)"
             @dragenter.prevent="draggedChannelId ? handleCategoryDragOver($event, category.id) : handleCategoryHeaderDragOver($event, category.id)"
@@ -518,7 +654,8 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
             @dragend="handleDragEnd"
             @contextmenu.stop.prevent="openCategoryContextMenu($event, category.id)">
             <div class="flex items-center text-xs font-bold text-zinc-500 group-hover:text-zinc-300 uppercase tracking-widest transition-colors">
-              <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+              <ChevronDown v-if="!isCategoryCollapsed(category.id)" class="w-3 h-3 mr-1" />
+              <ChevronRight v-else class="w-3 h-3 mr-1" />
               {{ category.name }}
             </div>
             <button v-if="isAdmin" class="text-zinc-500 hover:text-zinc-300 opacity-0 group-hover:opacity-100 transition-all font-bold" @click.stop="emit('open-create-channel', { categoryId: category.id })">
@@ -526,8 +663,10 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
             </button>
           </div>
 
-          <div v-for="channel in getCategoryChannels(category.id)" :key="channel.id">
+          <template v-if="shouldShowCategoryChannels(category.id)">
+            <div v-for="channel in getCategoryChannels(category.id)" :key="channel.id">
             <div
+              v-if="shouldRenderChannelInCategory(category.id, channel.id)"
               class="relative flex items-center px-2 py-1.5 rounded-lg cursor-pointer group mb-[2px] transition-colors"
               :class="channelRowClass(channel)"
               :draggable="isAdmin"
@@ -546,7 +685,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
               <span class="truncate font-medium">{{ channel.name }}</span>
             </div>
 
-            <div v-if="channel.type === 'voice' && webrtcStore.channelParticipants.get(channel.id)?.length" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
+            <div v-if="shouldShowVoiceParticipants(channel)" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
               <div v-for="user in webrtcStore.channelParticipants.get(channel.id)" :key="user.id" class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50">
                 <AppAvatar
                   :src="user.avatar_url"
@@ -566,7 +705,8 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
                 </div>
               </div>
             </div>
-          </div>
+            </div>
+          </template>
         </div>
 
         <div
