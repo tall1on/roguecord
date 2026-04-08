@@ -511,6 +511,16 @@ export const useChatStore = defineStore('chat', () => {
     serverRoles.value = normalizeServerRoles(roles);
   };
 
+  const normalizePresenceStatus = (status: unknown): PresenceStatus => {
+    return status === 'idle' || status === 'dnd' || status === 'invisible' ? status : 'online';
+  };
+
+  const getNormalizedUserStatus = (user: any): PresenceStatus => {
+    return normalizePresenceStatus(
+      user?.presence_status ?? user?.effective_presence_status ?? user?.status
+    );
+  };
+
   const normalizeUser = (user: any): User => {
     const normalizedRoles = normalizeServerRoles(user?.roles);
     const normalizedRoleIds = Array.isArray(user?.role_ids)
@@ -521,15 +531,11 @@ export const useChatStore = defineStore('chat', () => {
       ...user,
       avatar_url: user?.avatar_url || null,
       avatar_mime_type: user?.avatar_mime_type || null,
-      status: user?.status === 'idle' || user?.status === 'dnd' || user?.status === 'invisible' ? user.status : 'online',
+      status: getNormalizedUserStatus(user),
       role: typeof user?.role === 'string' && user.role.trim() ? user.role : 'user',
       role_ids: normalizedRoleIds,
       roles: normalizedRoles
     };
-  };
-
-  const normalizePresenceStatus = (status: unknown): PresenceStatus => {
-    return status === 'idle' || status === 'dnd' || status === 'invisible' ? status : 'online';
   };
 
   const isUserEffectivelyOnline = (user: User | null | undefined) => {
@@ -1691,6 +1697,32 @@ export const useChatStore = defineStore('chat', () => {
           currentUser.value = updatedUser;
           pendingPresenceStatus.value = normalizePresenceStatus(updatedUser.status);
           currentUserRole.value = updatedUser.role;
+        }
+        break;
+      }
+
+      case 'presence_updated':
+      case 'user_presence_updated': {
+        const updatedUser = normalizeUser(payload.user);
+        const existingIndex = users.value.findIndex((user) => user.id === updatedUser.id);
+        if (existingIndex >= 0) {
+          const nextUsers = [...users.value];
+          nextUsers.splice(existingIndex, 1, {
+            ...nextUsers[existingIndex],
+            ...updatedUser
+          });
+          users.value = nextUsers;
+        } else {
+          users.value = [...users.value, updatedUser];
+        }
+
+        if (currentUser.value?.id === updatedUser.id) {
+          currentUser.value = {
+            ...currentUser.value,
+            ...updatedUser
+          };
+          pendingPresenceStatus.value = normalizePresenceStatus(updatedUser.status);
+          currentUserRole.value = currentUser.value.role;
         }
         break;
       }
