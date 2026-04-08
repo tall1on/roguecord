@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import AppAvatar from '../common/AppAvatar.vue'
-import { useChatStore } from '../../stores/chat'
-import type { ModerationDeleteMode, ServerRole, User } from '../../stores/chat'
+ import { computed, onMounted, onUnmounted, ref } from 'vue'
+ import AppAvatar from '../common/AppAvatar.vue'
+ import { useChatStore, type PresenceStatus } from '../../stores/chat'
+ import type { ModerationDeleteMode, ServerRole, User } from '../../stores/chat'
 
 const chatStore = useChatStore()
 
@@ -50,6 +50,21 @@ const getDisplayRoleName = (user: User) => {
 }
 
 const getDisplayRoleColor = (user: User) => getDisplayRole(user)?.color || chatStore.getServerRoleColor(user.role) || null
+
+const getPresenceStatusColorClass = (status: PresenceStatus) => {
+  switch (status) {
+    case 'idle':
+      return 'bg-amber-400'
+    case 'dnd':
+      return 'bg-red-500'
+    case 'invisible':
+      return 'bg-zinc-600'
+    default:
+      return 'bg-green-500'
+  }
+}
+
+const getUserPresenceStatus = (user: User | null | undefined) => chatStore.getUserPresenceStatus(user)
 
 const getRoleHeading = (user: User) => {
   const label = getDisplayRoleName(user)
@@ -260,7 +275,7 @@ onUnmounted(() => {
               wrapper-class="relative w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 shrink-0 flex items-center justify-center font-bold mr-3 text-sm overflow-visible"
               image-class="w-full h-full object-cover rounded-full"
             >
-              <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-950 group-hover:border-zinc-900 bg-green-500 transition-colors"></div>
+              <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-950 group-hover:border-zinc-900 transition-colors" :class="getPresenceStatusColorClass(getUserPresenceStatus(user))"></div>
             </AppAvatar>
             <div class="flex-1 min-w-0">
               <div class="text-[13px] font-semibold truncate transition-colors group-hover:text-white" :style="{ color: getDisplayRoleColor(user) || '#d4d4d8' }">{{ user.username }}</div>
@@ -286,7 +301,7 @@ onUnmounted(() => {
               wrapper-class="relative w-8 h-8 rounded-full bg-zinc-800 shrink-0 flex items-center justify-center text-zinc-400 font-bold mr-3 text-sm overflow-visible"
               image-class="w-full h-full object-cover rounded-full grayscale opacity-70 group-hover:opacity-100 transition-opacity"
             >
-              <div class="absolute bottom-0 right-0 w-3 h-3 bg-zinc-600 rounded-full border-2 border-zinc-950 group-hover:border-zinc-900 transition-colors"></div>
+              <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-950 group-hover:border-zinc-900 transition-colors" :class="getPresenceStatusColorClass(getUserPresenceStatus(user))"></div>
             </AppAvatar>
             <div class="flex-1 min-w-0">
               <div class="text-[13px] font-medium truncate transition-colors group-hover:text-zinc-300" :style="{ color: getDisplayRoleColor(user) ? `${getDisplayRoleColor(user)}b3` : '#71717a' }">{{ user.username }}</div>
