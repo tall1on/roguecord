@@ -472,6 +472,10 @@ const getPresenceStatusLabel = (status: PresenceStatus) => {
 
 const getUserPresenceStatus = (user: User | null | undefined) => chatStore.getUserPresenceStatus(user)
 
+const getVoiceParticipantUser = (participant: User) => {
+  return chatStore.users.find((user) => user.id === participant.id) || participant
+}
+
 const openUserStatusMenu = (event: MouseEvent) => {
   if (!hasCurrentUser.value) {
     return
@@ -804,22 +808,22 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
               <span class="truncate font-medium">{{ channel.name }}</span>
             </div>
 
-            <div v-if="shouldShowVoiceParticipants(channel)" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
-              <div v-for="user in webrtcStore.channelParticipants.get(channel.id)" :key="user.id" class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50">
+              <div v-if="shouldShowVoiceParticipants(channel)" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
+              <div v-for="participant in webrtcStore.channelParticipants.get(channel.id)" :key="participant.id" class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50">
                 <AppAvatar
-                  :src="user.avatar_url"
-                  :fallback="user.username"
+                  :src="getVoiceParticipantUser(participant).avatar_url"
+                  :fallback="getVoiceParticipantUser(participant).username"
                   wrapper-class="relative w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 mr-2 flex items-center justify-center text-[10px] font-bold overflow-visible"
                   image-class="w-full h-full object-cover rounded-full"
-                  :class="isVoiceUserSpeaking(user.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''"
+                  :class="isVoiceUserSpeaking(participant.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''"
                 >
-                  <div class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border border-zinc-950" :class="getPresenceStatusColorClass(getUserPresenceStatus(user))"></div>
+                  <div class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border border-zinc-950" :class="getPresenceStatusColorClass(getUserPresenceStatus(getVoiceParticipantUser(participant)))"></div>
                 </AppAvatar>
-                <span class="truncate flex-1 font-medium">{{ user.username }}</span>
+                <span class="truncate flex-1 font-medium">{{ getVoiceParticipantUser(participant).username }}</span>
                 <div class="flex items-center gap-1 ml-2">
-                  <MicOff v-if="user.isMuted || user.isDeafened" class="w-3 h-3 text-red-400" />
-                  <MonitorUp v-if="isUserScreenSharing(user.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
-                  <div v-if="user.isDeafened" class="relative flex items-center justify-center">
+                  <MicOff v-if="participant.isMuted || participant.isDeafened" class="w-3 h-3 text-red-400" />
+                  <MonitorUp v-if="isUserScreenSharing(participant.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
+                  <div v-if="participant.isDeafened" class="relative flex items-center justify-center">
                     <Headphones class="w-3 h-3 text-red-400" />
                     <div class="absolute w-3.5 h-[1.5px] bg-red-400 rotate-45 rounded-full"></div>
                   </div>
@@ -866,21 +870,21 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
             </div>
 
             <div v-if="channel.type === 'voice' && webrtcStore.channelParticipants.get(channel.id)?.length" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
-              <div v-for="user in webrtcStore.channelParticipants.get(channel.id)" :key="user.id" class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50">
+              <div v-for="participant in webrtcStore.channelParticipants.get(channel.id)" :key="participant.id" class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50">
                 <AppAvatar
-                  :src="user.avatar_url"
-                  :fallback="user.username"
+                  :src="getVoiceParticipantUser(participant).avatar_url"
+                  :fallback="getVoiceParticipantUser(participant).username"
                   wrapper-class="relative w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 mr-2 flex items-center justify-center text-[10px] font-bold overflow-visible"
                   image-class="w-full h-full object-cover rounded-full"
-                  :class="isVoiceUserSpeaking(user.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''"
+                  :class="isVoiceUserSpeaking(participant.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''"
                 >
-                  <div class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border border-zinc-950" :class="getPresenceStatusColorClass(getUserPresenceStatus(user))"></div>
+                  <div class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border border-zinc-950" :class="getPresenceStatusColorClass(getUserPresenceStatus(getVoiceParticipantUser(participant)))"></div>
                 </AppAvatar>
-                <span class="truncate flex-1 font-medium">{{ user.username }}</span>
+                <span class="truncate flex-1 font-medium">{{ getVoiceParticipantUser(participant).username }}</span>
                 <div class="flex items-center gap-1 ml-2">
-                  <MicOff v-if="user.isMuted || user.isDeafened" class="w-3 h-3 text-red-400" />
-                  <MonitorUp v-if="isUserScreenSharing(user.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
-                  <div v-if="user.isDeafened" class="relative flex items-center justify-center">
+                  <MicOff v-if="participant.isMuted || participant.isDeafened" class="w-3 h-3 text-red-400" />
+                  <MonitorUp v-if="isUserScreenSharing(participant.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
+                  <div v-if="participant.isDeafened" class="relative flex items-center justify-center">
                     <Headphones class="w-3 h-3 text-red-400" />
                     <div class="absolute w-3.5 h-[1.5px] bg-red-400 rotate-45 rounded-full"></div>
                   </div>
