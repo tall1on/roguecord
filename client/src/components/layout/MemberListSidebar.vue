@@ -191,8 +191,8 @@ const submitModeration = () => {
 
 const groupedMembers = computed(() => {
   const visibleUsers = chatStore.users.filter((u) => !isHiddenSystemMember(u))
-  const online = visibleUsers.filter((u) => chatStore.onlineUserIds.has(u.id))
-  const offline = visibleUsers.filter((u) => !chatStore.onlineUserIds.has(u.id))
+  const online = visibleUsers.filter((u) => chatStore.isUserEffectivelyOnline(u))
+  const offline = visibleUsers.filter((u) => !chatStore.isUserEffectivelyOnline(u))
 
   const onlineByRole: Record<string, typeof online> = {}
   online.forEach((u) => {

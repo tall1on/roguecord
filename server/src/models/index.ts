@@ -511,6 +511,7 @@ export interface User {
   avatar_url: string | null;
   avatar_mime_type: string | null;
   last_ip: string | null;
+  presence_status: 'online' | 'idle' | 'dnd' | 'invisible';
   role: string;
   created_at: string;
 }
@@ -601,6 +602,13 @@ export const updateUserRole = async (id: string, role: string): Promise<void> =>
 
 export const updateUserLastIp = async (id: string, ipAddress: string | null): Promise<void> => {
   await dbRun('UPDATE users SET last_ip = ? WHERE id = ?', [ipAddress, id]);
+};
+
+export const updateUserPresenceStatus = async (
+  id: string,
+  presenceStatus: 'online' | 'idle' | 'dnd' | 'invisible'
+): Promise<void> => {
+  await dbRun('UPDATE users SET presence_status = ? WHERE id = ?', [presenceStatus, id]);
 };
 
 export const updateUserProfile = async (input: {
