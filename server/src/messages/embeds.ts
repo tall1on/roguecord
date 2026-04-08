@@ -166,7 +166,10 @@ const buildSpotifyEmbed = (url: URL): MessageEmbed | null => {
   }
 
   let kindIndex = 0;
-  if (pathParts.length >= 3 && /^[A-Za-z]{2}(?:-[A-Za-z]{2})?$/.test(pathParts[0] || '')) {
+  if (
+    pathParts.length >= 3
+    && /^(?:[A-Za-z]{2}(?:-[A-Za-z]{2})?|intl-[A-Za-z]{2})$/.test(pathParts[0] || '')
+  ) {
     kindIndex = 1;
   }
 
