@@ -1185,8 +1185,8 @@ watch(
             class="flex items-start gap-3 hover:bg-zinc-900/40 py-1 px-2 -mx-2 rounded-lg transition-colors duration-100 group"
             @contextmenu.stop.prevent="openMessageContextMenu($event, entry.message)"
           >
-            <div class="w-10 h-10 rounded-full bg-indigo-500/20 text-indigo-200 shrink-0 flex items-center justify-center font-bold mt-0.5 overflow-hidden">
-              <img v-if="resolveMessageAvatarUrl(entry.message)" :src="resolveMessageAvatarUrl(entry.message) || ''" alt="Avatar" class="w-full h-full object-cover" />
+            <div class="w-10 h-10 rounded-full bg-indigo-500/20 text-indigo-200 shrink-0 flex items-center justify-center font-bold mt-0.5 overflow-visible">
+              <img v-if="resolveMessageAvatarUrl(entry.message)" :src="resolveMessageAvatarUrl(entry.message) || ''" alt="Avatar" class="w-full h-full object-cover rounded-full" />
               <span v-else>{{ getMessageInitial(entry.message) }}</span>
             </div>
             <div class="flex-1 min-w-0">
@@ -1656,8 +1656,8 @@ watch(
               </div>
             </div>
             <div v-show="!getUserScreenStream(user.id)" class="flex h-full min-h-0 flex-1 items-center justify-center px-6 py-8">
-              <div class="relative flex h-28 w-28 items-center justify-center overflow-hidden rounded-full bg-zinc-800 text-4xl font-bold text-zinc-400 transition-all duration-300 md:h-32 md:w-32" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-500 shadow-[0_0_20px_rgba(34,197,94,0.3)] bg-indigo-500/20 text-indigo-400' : 'shadow-sm'">
-                <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="h-full w-full object-cover" />
+              <div class="relative flex h-28 w-28 items-center justify-center overflow-visible rounded-full bg-zinc-800 text-4xl font-bold text-zinc-400 transition-all duration-300 md:h-32 md:w-32" :class="getAvatarBadgeType(user.id, false) === 'speaking' ? 'ring-4 ring-green-500 shadow-[0_0_20px_rgba(34,197,94,0.3)] bg-indigo-500/20 text-indigo-400' : 'shadow-sm'">
+                <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="h-full w-full object-cover rounded-full" />
                 <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
               </div>
             </div>
