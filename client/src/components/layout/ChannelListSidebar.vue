@@ -462,7 +462,7 @@ const getPresenceStatusLabel = (status: PresenceStatus) => {
     case 'idle':
       return 'Idle'
     case 'dnd':
-      return 'Do Not Disturb'
+      return 'DND'
     case 'invisible':
       return 'Offline'
     default:
@@ -984,9 +984,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           wrapper-class="w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 relative shrink-0 flex items-center justify-center font-bold text-sm overflow-visible"
           image-class="w-full h-full object-cover rounded-full"
           :class="chatStore.currentUser && isVoiceUserSpeaking(chatStore.currentUser.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-900' : ''"
-        >
-          <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-900" :class="getPresenceStatusColorClass(currentPresenceStatus)"></div>
-        </AppAvatar>
+        />
         <div class="ml-2.5 flex-1 min-w-0">
           <div class="text-[13px] font-bold text-white truncate drop-shadow-sm">{{ userPanelName }}</div>
           <div class="text-[11px] font-medium text-zinc-400 flex items-center gap-1.5 truncate mt-0.5">
