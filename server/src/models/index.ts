@@ -1231,6 +1231,7 @@ export const getMessageReplyReferences = async (messageIds: string[]): Promise<R
         avatar_mime_type: row.reply_avatar_mime_type ?? null,
         public_key: row.reply_public_key,
         last_ip: row.reply_last_ip,
+        presence_status: row.reply_presence_status,
         role: row.reply_role,
         created_at: row.reply_user_created_at
       },
