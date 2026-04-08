@@ -1753,10 +1753,7 @@ export const useChatStore = defineStore('chat', () => {
       case 'user_offline':
         onlineUserIds.value.delete(payload.userId);
         if (currentUser.value?.id === payload.userId) {
-          currentUser.value = {
-            ...currentUser.value,
-            status: 'invisible'
-          };
+          currentUser.value!.status = 'invisible';
         }
         break;
 
