@@ -115,6 +115,7 @@ function initializeDatabase() {
         avatar_url TEXT,
         avatar_mime_type TEXT,
         last_ip TEXT,
+        presence_status TEXT NOT NULL DEFAULT 'online',
         role TEXT DEFAULT 'user',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
@@ -713,6 +714,7 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
     const hasAvatarUrl = columns.some((column) => column.name === 'avatar_url');
     const hasAvatarMimeType = columns.some((column) => column.name === 'avatar_mime_type');
     const hasLastIp = columns.some((column) => column.name === 'last_ip');
+    const hasPresenceStatus = columns.some((column) => column.name === 'presence_status');
     const hasRole = columns.some((column) => column.name === 'role');
     const hasCreatedAt = columns.some((column) => column.name === 'created_at');
 
@@ -720,6 +722,7 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
     if (!hasAvatarUrl) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_url TEXT');
     if (!hasAvatarMimeType) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_mime_type TEXT');
     if (!hasLastIp) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN last_ip TEXT');
+    if (!hasPresenceStatus) pendingAlterStatements.push("ALTER TABLE users ADD COLUMN presence_status TEXT NOT NULL DEFAULT 'online'");
     if (!hasRole) pendingAlterStatements.push("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'");
     if (!hasCreatedAt) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP');
 
@@ -738,6 +741,10 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
                 WHEN LOWER(COALESCE(avatar_url, '')) LIKE '%.jpg' OR LOWER(COALESCE(avatar_url, '')) LIKE '%.jpeg' THEN 'image/jpeg'
                 ELSE NULL
               END
+            END,
+            presence_status = CASE
+              WHEN LOWER(TRIM(COALESCE(presence_status, ''))) IN ('online', 'idle', 'dnd', 'invisible') THEN LOWER(TRIM(presence_status))
+              ELSE 'online'
             END,
             role = COALESCE(NULLIF(role, ''), 'user'),
             username = CASE

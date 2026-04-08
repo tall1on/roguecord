@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp, Folder, ChevronDown, ChevronRight } from 'lucide-vue-next'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp, Folder, ChevronDown, ChevronRight, Moon, MinusCircle, Circle, EyeOff } from 'lucide-vue-next'
 import AppAvatar from '../common/AppAvatar.vue'
-import { useChatStore, type Channel } from '../../stores/chat'
+import { useChatStore, type Channel, type PresenceStatus, type User } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 
 const props = defineProps<{
@@ -38,6 +38,30 @@ const dragOverChannelId = ref<string | null>(null)
 const dragOverCategoryId = ref<string | null>(null)
 const dragOverUncategorized = ref(false)
 const collapsedCategoryIds = ref<string[]>([])
+const userStatusMenuVisible = ref(false)
+const userStatusMenuX = ref(0)
+const userStatusMenuY = ref(0)
+const userStatusMenuRef = ref<HTMLElement | null>(null)
+
+const USER_STATUS_MENU_MARGIN = 8
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max)
+
+const updateUserStatusMenuPosition = () => {
+  if (!userStatusMenuVisible.value || !userStatusMenuRef.value || typeof window === 'undefined') {
+    return
+  }
+
+  const menuRect = userStatusMenuRef.value.getBoundingClientRect()
+  const viewportWidth = window.innerWidth
+  const viewportHeight = window.innerHeight
+
+  const maxX = Math.max(USER_STATUS_MENU_MARGIN, viewportWidth - menuRect.width - USER_STATUS_MENU_MARGIN)
+  const maxY = Math.max(USER_STATUS_MENU_MARGIN, viewportHeight - menuRect.height - USER_STATUS_MENU_MARGIN)
+
+  userStatusMenuX.value = clamp(userStatusMenuX.value, USER_STATUS_MENU_MARGIN, maxX)
+  userStatusMenuY.value = clamp(userStatusMenuY.value, USER_STATUS_MENU_MARGIN, maxY)
+}
 
 const COLLAPSED_CATEGORY_STORAGE_KEY = 'roguecord:collapsed-categories'
 
@@ -411,6 +435,92 @@ const activeServer = computed(() => {
 const userPanelName = computed(() => chatStore.currentUser?.username || chatStore.localUsername || 'Not connected')
 const hasCurrentUser = computed(() => !!chatStore.currentUser)
 const userPanelAvatarUrl = computed(() => chatStore.currentUser?.avatar_url || chatStore.getLocalAvatar())
+const currentPresenceStatus = computed<PresenceStatus>(() => chatStore.getUserPresenceStatus(chatStore.currentUser))
+
+const PRESENCE_OPTIONS: Array<{ value: PresenceStatus; label: string; icon: typeof Circle }> = [
+  { value: 'online', label: 'Online', icon: Circle },
+  { value: 'idle', label: 'Idle', icon: Moon },
+  { value: 'dnd', label: 'Do Not Disturb', icon: MinusCircle },
+  { value: 'invisible', label: 'Invisible', icon: EyeOff }
+]
+
+const getPresenceStatusColorClass = (status: PresenceStatus) => {
+  switch (status) {
+    case 'idle':
+      return 'bg-amber-400'
+    case 'dnd':
+      return 'bg-red-500'
+    case 'invisible':
+      return 'bg-zinc-600'
+    default:
+      return 'bg-green-500'
+  }
+}
+
+const getPresenceStatusLabel = (status: PresenceStatus) => {
+  switch (status) {
+    case 'idle':
+      return 'Idle'
+    case 'dnd':
+      return 'Do Not Disturb'
+    case 'invisible':
+      return 'Offline'
+    default:
+      return 'Online'
+  }
+}
+
+const getUserPresenceStatus = (user: User | null | undefined) => chatStore.getUserPresenceStatus(user)
+
+const openUserStatusMenu = (event: MouseEvent) => {
+  if (!hasCurrentUser.value) {
+    return
+  }
+
+  event.preventDefault()
+  event.stopPropagation()
+  userStatusMenuX.value = event.clientX
+  userStatusMenuY.value = event.clientY
+  contextMenuVisible.value = false
+  userStatusMenuVisible.value = true
+
+  nextTick(() => {
+    const menuElement = userStatusMenuRef.value
+    if (!menuElement || typeof window === 'undefined') {
+      return
+    }
+
+    const menuRect = menuElement.getBoundingClientRect()
+    const viewportWidth = window.innerWidth
+    const viewportHeight = window.innerHeight
+
+    const preferredX = event.clientX
+    const preferredY = event.clientY
+    const flippedX = event.clientX - menuRect.width
+    const flippedY = event.clientY - menuRect.height
+
+    userStatusMenuX.value = clamp(
+      preferredX + menuRect.width + USER_STATUS_MENU_MARGIN <= viewportWidth ? preferredX : flippedX,
+      USER_STATUS_MENU_MARGIN,
+      Math.max(USER_STATUS_MENU_MARGIN, viewportWidth - menuRect.width - USER_STATUS_MENU_MARGIN)
+    )
+
+    userStatusMenuY.value = clamp(
+      preferredY + menuRect.height + USER_STATUS_MENU_MARGIN <= viewportHeight ? preferredY : flippedY,
+      USER_STATUS_MENU_MARGIN,
+      Math.max(USER_STATUS_MENU_MARGIN, viewportHeight - menuRect.height - USER_STATUS_MENU_MARGIN)
+    )
+  })
+}
+
+const closeUserStatusMenu = () => {
+  userStatusMenuVisible.value = false
+}
+
+const selectPresenceStatus = (status: PresenceStatus) => {
+  chatStore.setPresenceStatus(status)
+  closeUserStatusMenu()
+}
 
 const handleClickOutside = (event: MouseEvent) => {
   if (showVoiceStats.value && voiceStatsContainerRef.value && !voiceStatsContainerRef.value.contains(event.target as Node)) {
@@ -425,6 +535,13 @@ const handleClickOutside = (event: MouseEvent) => {
       contextMenuCategoryId.value = null
     }
   }
+
+  if (userStatusMenuVisible.value) {
+    const target = event.target as HTMLElement | null
+    if (!target?.closest('.user-status-context-menu')) {
+      closeUserStatusMenu()
+    }
+  }
 }
 
 watch(() => webrtcStore.activeVoiceChannelId, (newVal) => {
@@ -435,10 +552,12 @@ watch(() => webrtcStore.activeVoiceChannelId, (newVal) => {
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
+  window.addEventListener('resize', updateUserStatusMenuPosition)
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
+  window.removeEventListener('resize', updateUserStatusMenuPosition)
 })
 
 const isChannelActive = (channel: Channel) => {
@@ -693,7 +812,9 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
                   wrapper-class="relative w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 mr-2 flex items-center justify-center text-[10px] font-bold overflow-visible"
                   image-class="w-full h-full object-cover rounded-full"
                   :class="isVoiceUserSpeaking(user.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''"
-                />
+                >
+                  <div class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border border-zinc-950" :class="getPresenceStatusColorClass(getUserPresenceStatus(user))"></div>
+                </AppAvatar>
                 <span class="truncate flex-1 font-medium">{{ user.username }}</span>
                 <div class="flex items-center gap-1 ml-2">
                   <MicOff v-if="user.isMuted || user.isDeafened" class="w-3 h-3 text-red-400" />
@@ -752,7 +873,9 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
                   wrapper-class="relative w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 mr-2 flex items-center justify-center text-[10px] font-bold overflow-visible"
                   image-class="w-full h-full object-cover rounded-full"
                   :class="isVoiceUserSpeaking(user.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''"
-                />
+                >
+                  <div class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border border-zinc-950" :class="getPresenceStatusColorClass(getUserPresenceStatus(user))"></div>
+                </AppAvatar>
                 <span class="truncate flex-1 font-medium">{{ user.username }}</span>
                 <div class="flex items-center gap-1 ml-2">
                   <MicOff v-if="user.isMuted || user.isDeafened" class="w-3 h-3 text-red-400" />
@@ -850,7 +973,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
     </div>
 
     <div class="h-[52px] bg-zinc-900 border-t border-white/5 px-2 flex items-center shrink-0">
-      <div class="flex items-center hover:bg-zinc-800/80 p-1.5 rounded-lg cursor-pointer flex-1 min-w-0 transition-colors">
+      <div class="flex items-center hover:bg-zinc-800/80 p-1.5 rounded-lg cursor-pointer flex-1 min-w-0 transition-colors" @contextmenu="openUserStatusMenu">
         <AppAvatar
           :src="userPanelAvatarUrl"
           :fallback="userPanelName"
@@ -858,13 +981,13 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           image-class="w-full h-full object-cover rounded-full"
           :class="chatStore.currentUser && isVoiceUserSpeaking(chatStore.currentUser.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-900' : ''"
         >
-          <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-900" :class="hasCurrentUser ? 'bg-green-500' : 'bg-zinc-600'"></div>
+          <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-900" :class="getPresenceStatusColorClass(currentPresenceStatus)"></div>
         </AppAvatar>
         <div class="ml-2.5 flex-1 min-w-0">
           <div class="text-[13px] font-bold text-white truncate drop-shadow-sm">{{ userPanelName }}</div>
           <div class="text-[11px] font-medium text-zinc-400 flex items-center gap-1.5 truncate mt-0.5">
-            <span class="w-1.5 h-1.5 rounded-full" :class="hasCurrentUser ? 'bg-green-500' : 'bg-zinc-600'"></span>
-            {{ hasCurrentUser ? 'Online' : 'Offline' }}
+            <span class="w-1.5 h-1.5 rounded-full" :class="getPresenceStatusColorClass(currentPresenceStatus)"></span>
+            {{ hasCurrentUser ? getPresenceStatusLabel(currentPresenceStatus) : 'Offline' }}
           </div>
         </div>
       </div>
@@ -881,6 +1004,22 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           <div v-if="webrtcStore.isDeafened" class="absolute w-5 h-[1.5px] bg-red-400 rotate-45 rounded-full"></div>
         </button>
       </div>
+    </div>
+
+    <div v-if="userStatusMenuVisible && hasCurrentUser" ref="userStatusMenuRef" class="user-status-context-menu fixed z-50 w-56 rounded-xl border border-white/10 bg-zinc-950 shadow-2xl py-1 backdrop-blur-md" :style="{ left: `${userStatusMenuX}px`, top: `${userStatusMenuY}px` }">
+      <button
+        v-for="option in PRESENCE_OPTIONS"
+        :key="option.value"
+        class="w-full px-3 py-2 text-left text-sm flex items-center justify-between gap-2 font-medium transition-colors hover:bg-zinc-900/80"
+        :class="currentPresenceStatus === option.value ? 'text-white' : 'text-zinc-300'"
+        @click="selectPresenceStatus(option.value)"
+      >
+        <span class="flex items-center gap-2">
+          <component :is="option.icon" class="w-4 h-4" />
+          {{ option.label }}
+        </span>
+        <span class="w-2.5 h-2.5 rounded-full" :class="getPresenceStatusColorClass(option.value)"></span>
+      </button>
     </div>
   </aside>
 </template>
