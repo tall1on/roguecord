@@ -1195,8 +1195,10 @@ export const getMessageReplyReferences = async (messageIds: string[]): Promise<R
         u.id AS reply_user_join_id,
         u.username AS reply_username,
         u.avatar_url AS reply_avatar_url,
+        u.avatar_mime_type AS reply_avatar_mime_type,
         u.public_key AS reply_public_key,
         u.last_ip AS reply_last_ip,
+        u.presence_status AS reply_presence_status,
         u.role AS reply_role,
         u.created_at AS reply_user_created_at
       FROM messages m
@@ -1231,7 +1233,7 @@ export const getMessageReplyReferences = async (messageIds: string[]): Promise<R
         avatar_mime_type: row.reply_avatar_mime_type ?? null,
         public_key: row.reply_public_key,
         last_ip: row.reply_last_ip,
-        presence_status: row.reply_presence_status,
+        presence_status: row.reply_presence_status ?? 'offline',
         role: row.reply_role,
         created_at: row.reply_user_created_at
       },
