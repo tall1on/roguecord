@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp, Folder } from 'lucide-vue-next'
+import AppAvatar from '../common/AppAvatar.vue'
 import { useChatStore, type Channel } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 
@@ -547,10 +548,13 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
 
             <div v-if="channel.type === 'voice' && webrtcStore.channelParticipants.get(channel.id)?.length" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
               <div v-for="user in webrtcStore.channelParticipants.get(channel.id)" :key="user.id" class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50">
-                <div class="relative w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 mr-2 flex items-center justify-center text-[10px] font-bold overflow-visible" :class="isVoiceUserSpeaking(user.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''">
-                  <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover rounded-full" />
-                  <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
-                </div>
+                <AppAvatar
+                  :src="user.avatar_url"
+                  :fallback="user.username"
+                  wrapper-class="relative w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 mr-2 flex items-center justify-center text-[10px] font-bold overflow-visible"
+                  image-class="w-full h-full object-cover rounded-full"
+                  :class="isVoiceUserSpeaking(user.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''"
+                />
                 <span class="truncate flex-1 font-medium">{{ user.username }}</span>
                 <div class="flex items-center gap-1 ml-2">
                   <MicOff v-if="user.isMuted || user.isDeafened" class="w-3 h-3 text-red-400" />
@@ -602,10 +606,13 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
 
             <div v-if="channel.type === 'voice' && webrtcStore.channelParticipants.get(channel.id)?.length" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
               <div v-for="user in webrtcStore.channelParticipants.get(channel.id)" :key="user.id" class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50">
-                <div class="relative w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 mr-2 flex items-center justify-center text-[10px] font-bold overflow-visible" :class="isVoiceUserSpeaking(user.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''">
-                  <img v-if="user.avatar_url" :src="user.avatar_url" alt="Avatar" class="w-full h-full object-cover rounded-full" />
-                  <span v-else>{{ user.username.charAt(0).toUpperCase() }}</span>
-                </div>
+                <AppAvatar
+                  :src="user.avatar_url"
+                  :fallback="user.username"
+                  wrapper-class="relative w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 mr-2 flex items-center justify-center text-[10px] font-bold overflow-visible"
+                  image-class="w-full h-full object-cover rounded-full"
+                  :class="isVoiceUserSpeaking(user.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-950' : ''"
+                />
                 <span class="truncate flex-1 font-medium">{{ user.username }}</span>
                 <div class="flex items-center gap-1 ml-2">
                   <MicOff v-if="user.isMuted || user.isDeafened" class="w-3 h-3 text-red-400" />
@@ -704,11 +711,15 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
 
     <div class="h-[52px] bg-zinc-900 border-t border-white/5 px-2 flex items-center shrink-0">
       <div class="flex items-center hover:bg-zinc-800/80 p-1.5 rounded-lg cursor-pointer flex-1 min-w-0 transition-colors">
-        <div class="w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 relative shrink-0 flex items-center justify-center font-bold text-sm overflow-visible" :class="chatStore.currentUser && isVoiceUserSpeaking(chatStore.currentUser.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-900' : ''">
-          <img v-if="userPanelAvatarUrl" :src="userPanelAvatarUrl" alt="Avatar" class="w-full h-full object-cover rounded-full" />
-          <span v-else>{{ userPanelName.charAt(0).toUpperCase() }}</span>
+        <AppAvatar
+          :src="userPanelAvatarUrl"
+          :fallback="userPanelName"
+          wrapper-class="w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 relative shrink-0 flex items-center justify-center font-bold text-sm overflow-visible"
+          image-class="w-full h-full object-cover rounded-full"
+          :class="chatStore.currentUser && isVoiceUserSpeaking(chatStore.currentUser.id) ? 'ring-2 ring-green-500 ring-offset-1 ring-offset-zinc-900' : ''"
+        >
           <div class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-zinc-900" :class="hasCurrentUser ? 'bg-green-500' : 'bg-zinc-600'"></div>
-        </div>
+        </AppAvatar>
         <div class="ml-2.5 flex-1 min-w-0">
           <div class="text-[13px] font-bold text-white truncate drop-shadow-sm">{{ userPanelName }}</div>
           <div class="text-[11px] font-medium text-zinc-400 flex items-center gap-1.5 truncate mt-0.5">
