@@ -687,10 +687,34 @@ const getTrustedEmbedIframeSrc = (embed: MessageEmbed): string | null => {
       return parsed.toString()
     }
 
+    if (embed.type === 'spotify') {
+      if (host !== 'spotify.com' && host !== 'open.spotify.com') {
+        return null
+      }
+
+      if (!parsed.pathname.startsWith('/embed/')) {
+        return null
+      }
+
+      return parsed.toString()
+    }
+
     return null
   } catch {
     return null
   }
+}
+
+const getEmbedContainerClass = (embed: MessageEmbed) => {
+  return embed.type === 'spotify'
+    ? 'max-w-[420px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]'
+    : 'max-w-[560px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]'
+}
+
+const getEmbedIframeClass = (embed: MessageEmbed) => {
+  return embed.type === 'spotify'
+    ? 'w-full h-[152px] border-b border-[#3f4147]'
+    : 'w-full aspect-video border-b border-[#3f4147]'
 }
 
 const sendMessage = () => {
@@ -1266,12 +1290,12 @@ watch(
                 <div
                   v-for="(embed, embedIndex) in getMessageEmbeds(entry.message)"
                   :key="`${entry.message.id}-embed-${embedIndex}`"
-                  class="max-w-[560px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]"
+                  :class="getEmbedContainerClass(embed)"
                 >
                   <iframe
                     v-if="getTrustedEmbedIframeSrc(embed)"
                     :src="getTrustedEmbedIframeSrc(embed) || ''"
-                    class="w-full aspect-video border-b border-[#3f4147]"
+                    :class="getEmbedIframeClass(embed)"
                     loading="lazy"
                     referrerpolicy="strict-origin-when-cross-origin"
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
