@@ -9,7 +9,6 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
   "type": "commonjs",
   "dependencies": {
     "@aws-sdk/client-s3": "3.1027.0",
