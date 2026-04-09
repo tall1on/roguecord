@@ -298,47 +298,6 @@ const getBaseEndpointWithoutBucketSubdomain = (endpoint: string, bucket: string)
   return parsedEndpoint.toString().replace(/\/$/, '');
 };
 
-const encodeS3ObjectKeySegments = (key: string) => key
-  .split('/')
-  .filter((segment) => segment.length > 0)
-  .map((segment) => encodeURIComponent(segment))
-  .join('/');
-
-export const buildDirectS3ObjectUrl = (config: S3StorageConfig, key: string) => {
-  const sanitizedKey = (key || '').trim().replace(/^\/+/, '');
-  if (!sanitizedKey) {
-    throw new Error('S3 object key is required');
-  }
-
-  const sanitized = sanitizeConfig(config);
-  const resolved = resolveS3ClientConfig(sanitized);
-  const encodedKey = encodeS3ObjectKeySegments(sanitizedKey);
-
-  if (resolved.provider === 'cloudflare_r2') {
-    if (!sanitized.providerUrl) {
-      throw new Error('Cloudflare R2 public URL is required');
-    }
-    return `${sanitized.providerUrl.replace(/\/$/, '')}/${encodedKey}`;
-  }
-
-  if (resolved.provider === 'hetzner') {
-    const baseEndpoint = getBaseEndpointWithoutBucketSubdomain(resolved.endpoint, resolved.bucket);
-    const baseUrl = new URL(baseEndpoint);
-    baseUrl.hostname = `${resolved.bucket}.${baseUrl.hostname}`;
-    return `${baseUrl.toString().replace(/\/$/, '')}/${encodedKey}`;
-  }
-
-  const directUrl = new URL(resolved.endpoint);
-  const directHost = directUrl.hostname.toLowerCase();
-  const bucketHostPrefix = `${resolved.bucket.toLowerCase()}.`;
-
-  if (directHost.startsWith(bucketHostPrefix)) {
-    return `${directUrl.toString().replace(/\/$/, '')}/${encodedKey}`;
-  }
-
-  return `${directUrl.toString().replace(/\/$/, '')}/${encodeURIComponent(resolved.bucket)}/${encodedKey}`;
-};
-
 const buildSignerRegionFallbacks = (primaryRegion: string) => {
   const candidates = [primaryRegion.trim(), 'us-east-1'];
   const unique = new Set<string>();
