@@ -70,6 +70,7 @@ import path from 'node:path';
 import { dataDir } from '../db';
 import {
   buildS3ManagedFilesPrefix,
+  buildDirectS3ObjectUrl,
   buildS3StorageKey,
   clearS3KeysByPrefix,
   deleteS3Keys,
@@ -508,8 +509,26 @@ const ensureChannelFilesDir = (channelId: string) => {
   return dir;
 };
 
-const buildStoredFileUrl = (storageProvider: 'data_dir' | 's3', channelId: string, storageName: string, storageKey: string | null) => {
+const buildStoredFileUrl = async (
+  storageProvider: 'data_dir' | 's3',
+  channelId: string,
+  storageName: string,
+  storageKey: string | null,
+  mimeType: string | null
+) => {
   if (storageProvider === 's3' && storageKey) {
+    const normalizedMimeType = (mimeType || '').trim().toLowerCase();
+    if (
+      normalizedMimeType.startsWith('audio/') ||
+      normalizedMimeType.startsWith('video/') ||
+      normalizedMimeType.startsWith('image/')
+    ) {
+      const persistedS3Config = await getPersistedS3Config();
+      if (persistedS3Config) {
+        return buildDirectS3ObjectUrl(persistedS3Config, storageKey);
+      }
+    }
+
     return `/files/s3/${encodeURIComponent(storageKey)}`;
   }
   return `/files/${encodeURIComponent(channelId)}/${encodeURIComponent(storageName)}`;
@@ -517,22 +536,34 @@ const buildStoredFileUrl = (storageProvider: 'data_dir' | 's3', channelId: strin
 
 const enrichMessageAttachmentsForClient = async <T extends { id: string; channel_id: string }>(messages: T[]) => {
   const attachmentMap = await getMessageAttachments(messages.map((message) => message.id));
-  return messages.map((message) => ({
+  return await Promise.all(messages.map(async (message) => ({
     ...message,
-    attachments: (attachmentMap[message.id] || []).map((attachment) => ({
+    attachments: await Promise.all((attachmentMap[message.id] || []).map(async (attachment) => ({
       ...attachment,
-      url: buildStoredFileUrl(attachment.storage_provider, message.channel_id, attachment.storage_name, attachment.storage_key)
-    })),
+      url: await buildStoredFileUrl(
+        attachment.storage_provider,
+        message.channel_id,
+        attachment.storage_name,
+        attachment.storage_key,
+        attachment.mime_type
+      )
+    }))),
     reply_to_message: (message as T & { reply_to_message?: any }).reply_to_message
       ? {
           ...(message as T & { reply_to_message: any }).reply_to_message,
-          attachments: (((message as T & { reply_to_message: any }).reply_to_message.attachments) || []).map((attachment: any) => ({
+          attachments: await Promise.all((((message as T & { reply_to_message: any }).reply_to_message.attachments) || []).map(async (attachment: any) => ({
             ...attachment,
-            url: buildStoredFileUrl(attachment.storage_provider, (message as T & { reply_to_message: any }).reply_to_message.channel_id, attachment.storage_name, attachment.storage_key)
-          }))
+            url: await buildStoredFileUrl(
+              attachment.storage_provider,
+              (message as T & { reply_to_message: any }).reply_to_message.channel_id,
+              attachment.storage_name,
+              attachment.storage_key,
+              attachment.mime_type ?? null
+            )
+          })))
         }
       : null
-  }));
+  })));
 };
 
 const resolveSafeStoredFilePath = (channelId: string, storageName: string) => {
@@ -2485,7 +2516,13 @@ const createMessageAttachmentRecord = async (input: {
 
   return {
     ...createdAttachment,
-    url: buildStoredFileUrl(input.storageProvider, input.channelId, input.storageName, input.storageKey)
+    url: await buildStoredFileUrl(
+      input.storageProvider,
+      input.channelId,
+      input.storageName,
+      input.storageKey,
+      input.mimeType
+    )
   };
 };
 
@@ -2745,7 +2782,13 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
 
     createdAttachments.push({
       ...createdAttachment,
-      url: buildStoredFileUrl(storageProvider, channel_id, storageName, storageKey)
+      url: await buildStoredFileUrl(
+        storageProvider,
+        channel_id,
+        storageName,
+        storageKey,
+        mimeType
+      )
     });
   }
 
