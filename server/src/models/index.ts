@@ -510,6 +510,8 @@ export interface User {
   public_key: string;
   avatar_url: string | null;
   avatar_mime_type: string | null;
+  status_emoji: string | null;
+  status_text: string | null;
   last_ip: string | null;
   presence_status: 'online' | 'idle' | 'dnd' | 'invisible';
   role: string;
@@ -520,12 +522,14 @@ export const createUser = async (
   username: string,
   public_key: string,
   avatar_url: string | null = null,
-  avatar_mime_type: string | null = null
+  avatar_mime_type: string | null = null,
+  status_emoji: string | null = null,
+  status_text: string | null = null
 ): Promise<User> => {
   const id = crypto.randomUUID();
   await dbRun(
-    'INSERT INTO users (id, username, public_key, avatar_url, avatar_mime_type) VALUES (?, ?, ?, ?, ?)',
-    [id, username, public_key, avatar_url, avatar_mime_type]
+    'INSERT INTO users (id, username, public_key, avatar_url, avatar_mime_type, status_emoji, status_text) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [id, username, public_key, avatar_url, avatar_mime_type, status_emoji, status_text]
   );
   return (await dbGet<User>('SELECT * FROM users WHERE id = ?', [id]))!;
 };
@@ -616,6 +620,8 @@ export const updateUserProfile = async (input: {
   username?: string;
   avatar_url?: string | null;
   avatar_mime_type?: string | null;
+  status_emoji?: string | null;
+  status_text?: string | null;
 }): Promise<void> => {
   const assignments: string[] = [];
   const params: any[] = [];
@@ -633,6 +639,16 @@ export const updateUserProfile = async (input: {
   if (Object.prototype.hasOwnProperty.call(input, 'avatar_mime_type')) {
     assignments.push('avatar_mime_type = ?');
     params.push(input.avatar_mime_type ?? null);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'status_emoji')) {
+    assignments.push('status_emoji = ?');
+    params.push(input.status_emoji ?? null);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'status_text')) {
+    assignments.push('status_text = ?');
+    params.push(input.status_text ?? null);
   }
 
   if (assignments.length === 0) {

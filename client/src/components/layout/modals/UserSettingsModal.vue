@@ -21,6 +21,8 @@ const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
 
 const editedUsername = ref(chatStore.localUsername || '')
+const editedStatusEmoji = ref(chatStore.localStatusEmoji || '')
+const editedStatusText = ref(chatStore.localStatusText || '')
 const adminKeyInput = ref('')
 const identityStatus = ref<string | null>(null)
 const identityError = ref<string | null>(null)
@@ -48,6 +50,11 @@ const saveUsernamePreference = () => {
   if (editedUsername.value.trim()) {
     chatStore.saveLocalUsername(editedUsername.value.trim())
   }
+}
+
+const saveStatusPreference = () => {
+  chatStore.saveLocalStatusEmoji(editedStatusEmoji.value || null)
+  chatStore.saveLocalStatusText(editedStatusText.value || null)
 }
 
 const resetAvatarMessages = () => {
@@ -262,6 +269,14 @@ watch(() => chatStore.localUsername, (value) => {
   editedUsername.value = value || ''
 })
 
+watch(() => chatStore.localStatusEmoji, (value) => {
+  editedStatusEmoji.value = value || ''
+})
+
+watch(() => chatStore.localStatusText, (value) => {
+  editedStatusText.value = value || ''
+})
+
 watch(() => chatStore.currentUser?.avatar_url, (value) => {
   avatarPreviewUrl.value = value ?? chatStore.getLocalAvatar()
 })
@@ -341,6 +356,18 @@ watch(() => chatStore.currentUser?.avatar_url, (value) => {
             <div class="flex gap-3">
               <input v-model="editedUsername" @keyup.enter="saveUsernamePreference" type="text" class="flex-1 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all font-medium" placeholder="Your local username" />
               <button @click="saveUsernamePreference" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 rounded-lg font-medium transition-colors duration-200 shadow-sm">Save</button>
+            </div>
+
+            <div class="mt-5 border-t border-white/5 pt-5 space-y-4">
+              <div>
+                <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">Status Emoji</label>
+                <div class="flex gap-3">
+                  <input v-model="editedStatusEmoji" @keyup.enter="saveStatusPreference" type="text" maxlength="16" class="w-24 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all text-center text-lg" placeholder="😀" />
+                  <input v-model="editedStatusText" @keyup.enter="saveStatusPreference" type="text" maxlength="120" class="flex-1 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all font-medium" placeholder="Set a short status message" />
+                  <button @click="saveStatusPreference" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 rounded-lg font-medium transition-colors duration-200 shadow-sm">Save</button>
+                </div>
+                <p class="text-xs text-zinc-500 mt-2">Saved locally and synced on the next connection, matching the existing profile preference flow.</p>
+              </div>
             </div>
           </div>
 

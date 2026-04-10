@@ -11,6 +11,8 @@ export interface User {
   username: string;
   avatar_url: string | null;
   avatar_mime_type?: string | null;
+  status_emoji?: string | null;
+  status_text?: string | null;
   status?: PresenceStatus;
   role: string;
   role_ids?: string[];
@@ -397,6 +399,8 @@ export const useChatStore = defineStore('chat', () => {
   const savedConnections = ref<SavedConnection[]>(readSavedConnections());
   const activeConnectionId = ref<string | null>(null);
   const localUsername = ref<string | null>(localStorage.getItem('username'));
+  const localStatusEmoji = ref<string | null>(localStorage.getItem('statusEmoji'));
+  const localStatusText = ref<string | null>(localStorage.getItem('statusText'));
   const users = ref<User[]>([]);
   const onlineUserIds = ref<Set<string>>(new Set());
   const pendingPresenceStatus = ref<PresenceStatus>('online');
@@ -532,11 +536,19 @@ export const useChatStore = defineStore('chat', () => {
     const normalizedRoleIds = Array.isArray(user?.role_ids)
       ? user.role_ids.filter((roleId: unknown): roleId is string => typeof roleId === 'string' && roleId.trim().length > 0)
       : [];
+    const statusEmoji = typeof user?.status_emoji === 'string' && user.status_emoji.trim().length > 0
+      ? user.status_emoji.trim()
+      : null;
+    const statusText = typeof user?.status_text === 'string' && user.status_text.trim().length > 0
+      ? user.status_text.trim()
+      : null;
 
     return {
       ...user,
       avatar_url: user?.avatar_url || null,
       avatar_mime_type: user?.avatar_mime_type || null,
+      status_emoji: statusEmoji,
+      status_text: statusText,
       status: getNormalizedUserStatus(user),
       role: typeof user?.role === 'string' && user.role.trim() ? user.role : 'user',
       role_ids: normalizedRoleIds,
@@ -758,6 +770,46 @@ export const useChatStore = defineStore('chat', () => {
   const saveLocalUsername = (username: string) => {
     localUsername.value = username;
     localStorage.setItem('username', username);
+  };
+
+  const saveLocalStatusEmoji = (statusEmoji: string | null) => {
+    const normalizedStatusEmoji = typeof statusEmoji === 'string' && statusEmoji.trim().length > 0
+      ? statusEmoji.trim()
+      : null;
+
+    localStatusEmoji.value = normalizedStatusEmoji;
+    if (normalizedStatusEmoji) {
+      localStorage.setItem('statusEmoji', normalizedStatusEmoji);
+    } else {
+      localStorage.removeItem('statusEmoji');
+    }
+
+    if (currentUser.value) {
+      currentUser.value = {
+        ...currentUser.value,
+        status_emoji: normalizedStatusEmoji
+      };
+    }
+  };
+
+  const saveLocalStatusText = (statusText: string | null) => {
+    const normalizedStatusText = typeof statusText === 'string' && statusText.trim().length > 0
+      ? statusText.trim()
+      : null;
+
+    localStatusText.value = normalizedStatusText;
+    if (normalizedStatusText) {
+      localStorage.setItem('statusText', normalizedStatusText);
+    } else {
+      localStorage.removeItem('statusText');
+    }
+
+    if (currentUser.value) {
+      currentUser.value = {
+        ...currentUser.value,
+        status_text: normalizedStatusText
+      };
+    }
   };
 
   const initializeStoredAvatar = async () => {
@@ -1637,6 +1689,8 @@ export const useChatStore = defineStore('chat', () => {
         if (payload.user && payload.user.avatar_url !== localAvatar.value) {
           void saveLocalAvatar(payload.user.avatar_url || null);
         }
+        saveLocalStatusEmoji(currentUser.value.status_emoji || null);
+        saveLocalStatusText(currentUser.value.status_text || null);
         if (payload.server) {
           applyServerState(payload.server);
         }
@@ -2076,7 +2130,13 @@ export const useChatStore = defineStore('chat', () => {
       if (localAvatar.value === null) {
         await initializeStoredAvatar();
       }
-      send('auth:request', { username, publicKey: publicKeyBase64, avatarUrl: localAvatar.value });
+      send('auth:request', {
+        username,
+        publicKey: publicKeyBase64,
+        avatarUrl: localAvatar.value,
+        statusEmoji: localStatusEmoji.value,
+        statusText: localStatusText.value
+      });
     } catch (e) {
       console.error("Authentication request failed", e);
     }
@@ -2629,6 +2689,8 @@ export const useChatStore = defineStore('chat', () => {
     activeConnectionId,
     hasStoredIdentity,
     localUsername,
+    localStatusEmoji,
+    localStatusText,
     users,
     onlineUserIds,
     pendingPresenceStatus,
@@ -2645,6 +2707,8 @@ export const useChatStore = defineStore('chat', () => {
     activeServerCategories,
     activeChannelMessages,
     saveLocalUsername,
+    saveLocalStatusEmoji,
+    saveLocalStatusText,
     saveLocalAvatar,
     getLocalAvatar,
     getStoredIdentityExport,

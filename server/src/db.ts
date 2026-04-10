@@ -114,6 +114,8 @@ function initializeDatabase() {
         public_key TEXT UNIQUE NOT NULL,
         avatar_url TEXT,
         avatar_mime_type TEXT,
+        status_emoji TEXT,
+        status_text TEXT,
         last_ip TEXT,
         presence_status TEXT NOT NULL DEFAULT 'online',
         role TEXT DEFAULT 'user',
@@ -713,6 +715,8 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
 
     const hasAvatarUrl = columns.some((column) => column.name === 'avatar_url');
     const hasAvatarMimeType = columns.some((column) => column.name === 'avatar_mime_type');
+    const hasStatusEmoji = columns.some((column) => column.name === 'status_emoji');
+    const hasStatusText = columns.some((column) => column.name === 'status_text');
     const hasLastIp = columns.some((column) => column.name === 'last_ip');
     const hasPresenceStatus = columns.some((column) => column.name === 'presence_status');
     const hasRole = columns.some((column) => column.name === 'role');
@@ -721,6 +725,8 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
     const pendingAlterStatements: string[] = [];
     if (!hasAvatarUrl) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_url TEXT');
     if (!hasAvatarMimeType) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_mime_type TEXT');
+    if (!hasStatusEmoji) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN status_emoji TEXT');
+    if (!hasStatusText) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN status_text TEXT');
     if (!hasLastIp) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN last_ip TEXT');
     if (!hasPresenceStatus) pendingAlterStatements.push("ALTER TABLE users ADD COLUMN presence_status TEXT NOT NULL DEFAULT 'online'");
     if (!hasRole) pendingAlterStatements.push("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'");
@@ -741,6 +747,11 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
                 WHEN LOWER(COALESCE(avatar_url, '')) LIKE '%.jpg' OR LOWER(COALESCE(avatar_url, '')) LIKE '%.jpeg' THEN 'image/jpeg'
                 ELSE NULL
               END
+            END,
+            status_emoji = NULLIF(TRIM(COALESCE(status_emoji, '')), ''),
+            status_text = CASE
+              WHEN TRIM(COALESCE(status_text, '')) = '' THEN NULL
+              ELSE SUBSTR(TRIM(status_text), 1, 128)
             END,
             presence_status = CASE
               WHEN LOWER(TRIM(COALESCE(presence_status, ''))) IN ('online', 'idle', 'dnd', 'invisible') THEN LOWER(TRIM(presence_status))
