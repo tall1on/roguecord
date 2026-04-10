@@ -1247,6 +1247,8 @@ export const getMessageReplyReferences = async (messageIds: string[]): Promise<R
         username: row.reply_username,
         avatar_url: row.reply_avatar_url,
         avatar_mime_type: row.reply_avatar_mime_type ?? null,
+        status_emoji: null,
+        status_text: null,
         public_key: row.reply_public_key,
         last_ip: row.reply_last_ip,
         presence_status: row.reply_presence_status ?? 'offline',
