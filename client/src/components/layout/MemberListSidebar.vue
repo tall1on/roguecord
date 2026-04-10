@@ -267,7 +267,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <aside v-if="chatStore.isConnected && chatStore.activeChannelId" class="w-60 bg-zinc-950 flex flex-col shrink-0 border-l border-white/5">
+  <aside v-if="chatStore.isConnected && chatStore.activeChannelId" class="w-70 bg-zinc-950 flex flex-col shrink-0 border-l border-white/5">
     <div class="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar">
       <div v-for="(members, role) in groupedMembers.onlineByRole" :key="role">
         <h3 class="text-xs font-bold uppercase tracking-widest mb-3 px-2" :style="{ color: members[0] ? getDisplayRoleColor(members[0]) || '#71717a' : '#71717a' }">
