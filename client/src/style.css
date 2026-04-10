@@ -135,32 +135,11 @@
   position: relative;
   z-index: 1;
   width: 100%;
-  color: transparent;
+  color: rgb(228 228 231);
   caret-color: rgb(228 228 231);
 }
 
 .message-input-native::placeholder {
-  color: transparent;
-}
-
-.message-input-twemoji-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  pointer-events: none;
-  font-size: 14px;
-  line-height: 1.25rem;
-}
-
-.message-input-twemoji-overlay--value {
-  color: rgb(228 228 231);
-}
-
-.message-input-twemoji-overlay--placeholder {
   color: rgb(113 113 122);
 }
 
