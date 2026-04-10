@@ -79,15 +79,15 @@ const handleAvatarSelected = (event: Event) => {
   }
 
   const lowerType = (file.type || '').toLowerCase()
-  if (lowerType !== 'image/png' && lowerType !== 'image/jpeg') {
-    avatarError.value = 'Profile picture must be a PNG or JPG image.'
+  if (lowerType !== 'image/png' && lowerType !== 'image/jpeg' && lowerType !== 'image/gif') {
+    avatarError.value = 'Profile picture must be a PNG, JPG, or GIF image.'
     avatarStatus.value = null
     target.value = ''
     return
   }
 
-  if (file.size > 2 * 1024 * 1024) {
-    avatarError.value = 'Profile picture must be 2MB or smaller.'
+  if (file.size > 10 * 1024 * 1024) {
+    avatarError.value = 'Profile picture must be 10MB or smaller.'
     avatarStatus.value = null
     target.value = ''
     return
@@ -103,8 +103,8 @@ const handleAvatarSelected = (event: Event) => {
       return
     }
 
-    if (!/^data:image\/(png|jpeg);base64,/i.test(result)) {
-      avatarError.value = 'Profile picture must be a PNG or JPG image.'
+    if (!/^data:image\/(png|jpeg|gif);base64,/i.test(result)) {
+      avatarError.value = 'Profile picture must be a PNG, JPG, or GIF image.'
       avatarStatus.value = null
       target.value = ''
       return
@@ -360,7 +360,7 @@ watch(() => chatStore.currentUser?.avatar_url, (value) => {
           <div class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm space-y-4">
             <div>
               <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">Profile Picture</label>
-              <p class="text-sm text-zinc-500">PNG and JPG images up to 2MB are synced to the server when you connect.</p>
+              <p class="text-sm text-zinc-500">PNG, JPG, and GIF images up to 10MB are synced to the server when you connect.</p>
             </div>
 
             <div class="flex items-center gap-4">
@@ -376,7 +376,7 @@ watch(() => chatStore.currentUser?.avatar_url, (value) => {
                 <button @click="clearAvatar" :disabled="!avatarPreviewUrl" class="bg-zinc-800 hover:bg-zinc-700 text-white px-5 py-2.5 rounded-lg font-medium transition-colors duration-200 border border-white/10 disabled:opacity-50 disabled:cursor-not-allowed">
                   Remove
                 </button>
-                <input ref="avatarInput" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" class="hidden" @change="handleAvatarSelected" />
+                <input ref="avatarInput" type="file" accept="image/png,image/jpeg,image/gif,.png,.jpg,.jpeg,.gif" class="hidden" @change="handleAvatarSelected" />
               </div>
             </div>
 
