@@ -1,7 +1,21 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import 'emoji-picker-element'
+
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useChatStore } from '../../../stores/chat'
 import { useWebRtcStore } from '../../../stores/webrtc'
+
+type EmojiPickerElement = HTMLElement & {
+  locale?: string
+  previewPosition?: 'none' | 'top' | 'bottom'
+  skinToneEmoji?: string
+}
+
+type EmojiPickerSelectionEvent = Event & {
+  detail?: {
+    unicode?: string
+  }
+}
 
 type SettingsSection = 'general' | 'audio' | 'connections' | 'identity' | 'server'
 
@@ -31,6 +45,9 @@ const avatarInput = ref<HTMLInputElement | null>(null)
 const avatarPreviewUrl = ref<string | null>(chatStore.getLocalAvatar())
 const avatarStatus = ref<string | null>(null)
 const avatarError = ref<string | null>(null)
+const statusEmojiPickerOpen = ref(false)
+const statusEmojiPickerRef = ref<HTMLElement | null>(null)
+const statusEmojiPickerElement = ref<EmojiPickerElement | null>(null)
 
 const currentIdentityFingerprint = computed(() => {
   const identity = chatStore.getStoredIdentityExport()
@@ -57,6 +74,50 @@ const saveStatusPreference = () => {
     statusEmoji: editedStatusEmoji.value || null,
     statusText: editedStatusText.value || null
   })
+}
+
+const toggleStatusEmojiPicker = () => {
+  statusEmojiPickerOpen.value = !statusEmojiPickerOpen.value
+}
+
+const closeStatusEmojiPicker = () => {
+  statusEmojiPickerOpen.value = false
+}
+
+const selectStatusEmoji = (emoji: string) => {
+  editedStatusEmoji.value = emoji
+  closeStatusEmojiPicker()
+}
+
+const handleStatusEmojiSelection = (event: EmojiPickerSelectionEvent) => {
+  const emoji = event.detail?.unicode
+  if (!emoji) {
+    return
+  }
+
+  selectStatusEmoji(emoji)
+}
+
+const clearStatusEmoji = () => {
+  editedStatusEmoji.value = ''
+  closeStatusEmojiPicker()
+}
+
+const handleDocumentPointerDown = (event: PointerEvent) => {
+  if (!statusEmojiPickerOpen.value) {
+    return
+  }
+
+  const target = event.target
+  if (!(target instanceof Node)) {
+    return
+  }
+
+  if (statusEmojiPickerRef.value?.contains(target)) {
+    return
+  }
+
+  closeStatusEmojiPicker()
 }
 
 const resetAvatarMessages = () => {
@@ -282,6 +343,19 @@ watch(() => chatStore.localStatusText, (value) => {
 watch(() => chatStore.currentUser?.avatar_url, (value) => {
   avatarPreviewUrl.value = value ?? chatStore.getLocalAvatar()
 })
+
+onMounted(() => {
+  document.addEventListener('pointerdown', handleDocumentPointerDown)
+
+  if (statusEmojiPickerElement.value) {
+    statusEmojiPickerElement.value.locale = 'en'
+    statusEmojiPickerElement.value.previewPosition = 'none'
+  }
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown)
+})
 </script>
 
 <template>
@@ -364,11 +438,46 @@ watch(() => chatStore.currentUser?.avatar_url, (value) => {
               <div>
                 <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">Status Emoji</label>
                 <div class="flex gap-3">
-                  <input v-model="editedStatusEmoji" @keyup.enter="saveStatusPreference" type="text" maxlength="16" class="w-24 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all text-center text-lg" placeholder="😀" />
+                  <div ref="statusEmojiPickerRef" class="relative shrink-0">
+                    <div class="flex gap-2">
+                      <button
+                        type="button"
+                        @click="toggleStatusEmojiPicker"
+                        class="w-14 h-[46px] bg-zinc-950 text-white rounded-lg border border-white/10 hover:border-indigo-500/40 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all text-xl flex items-center justify-center"
+                        :aria-expanded="statusEmojiPickerOpen"
+                        aria-haspopup="dialog"
+                        aria-label="Choose status emoji"
+                      >
+                        <span v-twemoji="editedStatusEmoji || '😀'" class="inline-flex items-center justify-center"></span>
+                      </button>
+                      <input v-model="editedStatusEmoji" @keyup.enter="saveStatusPreference" type="hidden" maxlength="16" class="w-24 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all text-center text-lg" placeholder="😀" />
+                    </div>
+
+                    <div v-if="statusEmojiPickerOpen" class="absolute left-0 top-full mt-2 w-[22rem] overflow-hidden rounded-xl border border-white/10 bg-zinc-900 shadow-2xl z-20">
+                      <div class="flex items-center justify-between mb-3">
+                        <span class="px-3 pt-3 text-xs font-bold uppercase tracking-widest text-zinc-400">Pick an emoji</span>
+                        <button
+                          type="button"
+                          @click="clearStatusEmoji"
+                          class="mr-3 mt-3 text-xs font-medium text-zinc-400 hover:text-white transition-colors"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                      <div class="px-3 pb-3">
+                        <p class="mb-3 text-xs text-zinc-500">Browse the full emoji set by category or keep typing manually in the input.</p>
+                        <emoji-picker
+                          ref="statusEmojiPickerElement"
+                          class="status-emoji-picker"
+                          @emoji-click="handleStatusEmojiSelection"
+                        />
+                      </div>
+                    </div>
+                  </div>
                   <input v-model="editedStatusText" @keyup.enter="saveStatusPreference" type="text" maxlength="120" class="flex-1 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all font-medium" placeholder="Set a short status message" />
                   <button @click="saveStatusPreference" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 rounded-lg font-medium transition-colors duration-200 shadow-sm">Save</button>
                 </div>
-                <p class="text-xs text-zinc-500 mt-2">Saved locally and synced on the next connection, matching the existing profile preference flow.</p>
+                <p class="text-xs text-zinc-500 mt-2">Use the picker for quick selection or type manually. Saved locally and synced on the next connection, matching the existing profile preference flow.</p>
               </div>
             </div>
           </div>
