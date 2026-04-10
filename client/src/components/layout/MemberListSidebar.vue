@@ -1,10 +1,8 @@
- <script setup lang="ts">
-  import { computed, onMounted, onUnmounted, ref } from 'vue'
-  import AppAvatar from '../common/AppAvatar.vue'
-  import FlagEmoji from '../common/FlagEmoji.vue'
-  import { useChatStore, type PresenceStatus } from '../../stores/chat'
-  import type { ModerationDeleteMode, ServerRole, User } from '../../stores/chat'
-  import { isFlagEmoji } from '../../utils/flagEmoji'
+<script setup lang="ts">
+ import { computed, onMounted, onUnmounted, ref } from 'vue'
+ import AppAvatar from '../common/AppAvatar.vue'
+ import { useChatStore, type PresenceStatus } from '../../stores/chat'
+ import type { ModerationDeleteMode, ServerRole, User } from '../../stores/chat'
 
 const chatStore = useChatStore()
 
@@ -77,10 +75,6 @@ const getUserStatusLine = (user: User) => {
   }
 
   return emoji || text || ''
-}
-
-const userHasFlagStatusEmoji = (user: User) => {
-  return isFlagEmoji(user.status_emoji)
 }
 
 const getRoleHeading = (user: User) => {
@@ -296,10 +290,7 @@ onUnmounted(() => {
             </AppAvatar>
             <div class="flex-1 min-w-0">
               <div class="text-[13px] font-semibold truncate transition-colors group-hover:text-white" :style="{ color: getDisplayRoleColor(user) || '#d4d4d8' }">{{ user.username }}</div>
-              <div v-if="getUserStatusLine(user)" class="text-[11px] text-zinc-500 truncate mt-0.5 transition-colors group-hover:text-zinc-400 flex items-center gap-1.5">
-                <FlagEmoji v-if="userHasFlagStatusEmoji(user)" :emoji="user.status_emoji || ''" :alt="user.status_emoji || 'Flag'" class="inline-block h-[1em] w-[1.333em] shrink-0 rounded-[2px] align-[-0.125em]" />
-                <span>{{ userHasFlagStatusEmoji(user) ? (user.status_text?.trim() || '') : getUserStatusLine(user) }}</span>
-              </div>
+              <div v-if="getUserStatusLine(user)" class="text-[11px] text-zinc-500 truncate mt-0.5 transition-colors group-hover:text-zinc-400">{{ getUserStatusLine(user) }}</div>
             </div>
           </div>
         </div>
@@ -326,10 +317,7 @@ onUnmounted(() => {
             </AppAvatar>
             <div class="flex-1 min-w-0">
               <div class="text-[13px] font-medium truncate transition-colors group-hover:text-zinc-300" :style="{ color: getDisplayRoleColor(user) ? `${getDisplayRoleColor(user)}b3` : '#71717a' }">{{ user.username }}</div>
-              <div v-if="getUserStatusLine(user)" class="text-[11px] text-zinc-600 truncate mt-0.5 transition-colors group-hover:text-zinc-500 flex items-center gap-1.5">
-                <FlagEmoji v-if="userHasFlagStatusEmoji(user)" :emoji="user.status_emoji || ''" :alt="user.status_emoji || 'Flag'" class="inline-block h-[1em] w-[1.333em] shrink-0 rounded-[2px] align-[-0.125em]" />
-                <span>{{ userHasFlagStatusEmoji(user) ? (user.status_text?.trim() || '') : getUserStatusLine(user) }}</span>
-              </div>
+              <div v-if="getUserStatusLine(user)" class="text-[11px] text-zinc-600 truncate mt-0.5 transition-colors group-hover:text-zinc-500">{{ getUserStatusLine(user) }}</div>
             </div>
           </div>
         </div>
