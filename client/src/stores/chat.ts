@@ -812,6 +812,20 @@ export const useChatStore = defineStore('chat', () => {
     }
   };
 
+  const saveStatusPreference = async (input: { statusEmoji: string | null; statusText: string | null }) => {
+    saveLocalStatusEmoji(input.statusEmoji);
+    saveLocalStatusText(input.statusText);
+
+    if (!ws.value || !isConnected.value) {
+      return;
+    }
+
+    send('set_status_profile', {
+      statusEmoji: localStatusEmoji.value,
+      statusText: localStatusText.value
+    });
+  };
+
   const initializeStoredAvatar = async () => {
     const indexedDbAvatar = await readStoredAvatarFromIndexedDb();
     if (indexedDbAvatar !== null) {
@@ -1806,6 +1820,32 @@ export const useChatStore = defineStore('chat', () => {
         break;
       }
 
+      case 'status_profile_updated': {
+        const updatedUser = normalizeUser(payload.user);
+        const existingIndex = users.value.findIndex((user) => user.id === updatedUser.id);
+        if (existingIndex >= 0) {
+          const nextUsers = [...users.value];
+          nextUsers.splice(existingIndex, 1, {
+            ...nextUsers[existingIndex],
+            ...updatedUser
+          });
+          users.value = nextUsers;
+        } else {
+          users.value = [...users.value, updatedUser];
+        }
+
+        if (currentUser.value?.id === updatedUser.id) {
+          currentUser.value = {
+            ...currentUser.value,
+            ...updatedUser
+          };
+          saveLocalStatusEmoji(updatedUser.status_emoji || null);
+          saveLocalStatusText(updatedUser.status_text || null);
+          currentUserRole.value = currentUser.value.role;
+        }
+        break;
+      }
+
       case 'member_removed': {
         const removedUserId = (payload.userId || payload.targetUserId) as string | undefined;
         if (!removedUserId) break;
@@ -2709,6 +2749,7 @@ export const useChatStore = defineStore('chat', () => {
     saveLocalUsername,
     saveLocalStatusEmoji,
     saveLocalStatusText,
+    saveStatusPreference,
     saveLocalAvatar,
     getLocalAvatar,
     getStoredIdentityExport,

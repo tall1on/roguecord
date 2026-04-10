@@ -696,6 +696,49 @@ const handleSetPresence = async (client: ClientConnection, payload: { status?: s
   await broadcastSerializedUserUpdate(responsePayload.user);
 };
 
+const handleSetStatusProfile = async (
+  client: ClientConnection,
+  payload: { statusEmoji?: string | null; statusText?: string | null }
+) => {
+  if (!client.userId) return;
+
+  const nextStatusEmoji = sanitizeStatusEmojiForProfile(payload?.statusEmoji);
+  const nextStatusText = sanitizeStatusTextForProfile(payload?.statusText);
+
+  await updateUserProfile({
+    id: client.userId,
+    status_emoji: nextStatusEmoji,
+    status_text: nextStatusText
+  });
+
+  const responsePayload = await buildPresenceUpdatePayload(client.userId, client.userId);
+  if (!responsePayload) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
+    return;
+  }
+
+  client.ws.send(JSON.stringify({
+    type: 'status_profile_updated',
+    payload: responsePayload
+  }));
+
+  for (const connection of connectionManager.getClients()) {
+    if (!connection.userId || connection.userId === client.userId) {
+      continue;
+    }
+
+    const viewerPayload = await buildPresenceUpdatePayload(client.userId, connection.userId);
+    if (!viewerPayload) {
+      continue;
+    }
+
+    connection.ws.send(JSON.stringify({
+      type: 'status_profile_updated',
+      payload: viewerPayload
+    }));
+  }
+};
+
 const hasResolvedRole = async (userId: string, roleKeys: string[]) => {
   const serverId = await getActiveServerId();
   const user = await getUserById(userId);
@@ -1628,6 +1671,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'folder_delete_file':
         await handleFolderDeleteFile(client, payload);
         break;
+      case 'set_status_profile':
+        await handleSetStatusProfile(client, payload);
+        break;
       case 'join_voice_channel':
         await handleJoinVoiceChannel(client, payload);
         break;
@@ -1669,6 +1715,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'set_presence':
         await handleSetPresence(client, payload);
+        break;
+      case 'set_status_profile':
+        await handleSetStatusProfile(client, payload);
         break;
       case 'assign_member_roles':
         await handleAssignMemberRoles(client, payload);
