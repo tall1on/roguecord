@@ -1,6 +1,16 @@
 import {defineConfig} from 'vite'
 import vue from '@vitejs/plugin-vue'
 
+const EMOJI_CACHE_CONTROL_HEADER = 'public, max-age=31536000, immutable'
+
+const addEmojiCacheHeader = (req: { url?: string }, res: { setHeader: (name: string, value: string) => void }, next: () => void) => {
+    if (req.url && /\.svg(?:\?.*)?$/i.test(req.url)) {
+        res.setHeader('Cache-Control', EMOJI_CACHE_CONTROL_HEADER)
+    }
+
+    next()
+}
+
 // https://vite.dev/config/
 export default defineConfig({
     clearScreen: false,
@@ -16,6 +26,15 @@ export default defineConfig({
         sourcemap: !!process.env.TAURI_DEBUG
     },
     plugins: [
-        vue()
+        vue(),
+        {
+            name: 'roguecord-emoji-cache-headers',
+            configureServer(server) {
+                server.middlewares.use('/svg', addEmojiCacheHeader)
+            },
+            configurePreviewServer(server) {
+                server.middlewares.use('/svg', addEmojiCacheHeader)
+            }
+        }
     ]
 })

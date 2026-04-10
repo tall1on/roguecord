@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { useWebRtcStore } from './webrtc';
+import { readStoredAvatar as readStoredAvatarFromIndexedDb, removeLegacyStoredAvatar, saveStoredAvatar } from '../utils/avatarStorage';
 import { cacheServerIcon, getCachedServerIcon, removeCachedServerIcon } from '../utils/serverIconCache';
 
 const NEW_NOTIFICATION_SOUND_DEBOUNCE_MS = 1000;
@@ -10,6 +11,8 @@ export interface User {
   username: string;
   avatar_url: string | null;
   avatar_mime_type?: string | null;
+  status_emoji?: string | null;
+  status_text?: string | null;
   status?: PresenceStatus;
   role: string;
   role_ids?: string[];
@@ -239,9 +242,13 @@ const arrayBufferToHex = (buffer: ArrayBuffer) => {
     .join('');
 };
 
-const AVATAR_STORAGE_KEY = 'avatarUrl';
-
-const readStoredAvatar = () => localStorage.getItem(AVATAR_STORAGE_KEY);
+const readLegacyStoredAvatar = () => {
+  try {
+    return localStorage.getItem('avatarUrl');
+  } catch {
+    return null;
+  }
+};
 
 const generateKeyPair = async () => {
   return await window.crypto.subtle.generateKey(
@@ -326,6 +333,7 @@ export const useChatStore = defineStore('chat', () => {
   const ws = ref<WebSocket | null>(null);
   const isConnected = ref(false);
   const currentUser = ref<User | null>(null);
+  const localAvatar = ref<string | null>(null);
   const currentUserRole = ref<string>('user');
   const server = ref<Server | null>(null);
   const serverRoles = ref<ServerRole[]>([]);
@@ -391,6 +399,8 @@ export const useChatStore = defineStore('chat', () => {
   const savedConnections = ref<SavedConnection[]>(readSavedConnections());
   const activeConnectionId = ref<string | null>(null);
   const localUsername = ref<string | null>(localStorage.getItem('username'));
+  const localStatusEmoji = ref<string | null>(localStorage.getItem('statusEmoji'));
+  const localStatusText = ref<string | null>(localStorage.getItem('statusText'));
   const users = ref<User[]>([]);
   const onlineUserIds = ref<Set<string>>(new Set());
   const pendingPresenceStatus = ref<PresenceStatus>('online');
@@ -526,11 +536,19 @@ export const useChatStore = defineStore('chat', () => {
     const normalizedRoleIds = Array.isArray(user?.role_ids)
       ? user.role_ids.filter((roleId: unknown): roleId is string => typeof roleId === 'string' && roleId.trim().length > 0)
       : [];
+    const statusEmoji = typeof user?.status_emoji === 'string' && user.status_emoji.trim().length > 0
+      ? user.status_emoji.trim()
+      : null;
+    const statusText = typeof user?.status_text === 'string' && user.status_text.trim().length > 0
+      ? user.status_text.trim()
+      : null;
 
     return {
       ...user,
       avatar_url: user?.avatar_url || null,
       avatar_mime_type: user?.avatar_mime_type || null,
+      status_emoji: statusEmoji,
+      status_text: statusText,
       status: getNormalizedUserStatus(user),
       role: typeof user?.role === 'string' && user.role.trim() ? user.role : 'user',
       role_ids: normalizedRoleIds,
@@ -754,12 +772,85 @@ export const useChatStore = defineStore('chat', () => {
     localStorage.setItem('username', username);
   };
 
-  const saveLocalAvatar = (avatarUrl: string | null) => {
-    if (avatarUrl) {
-      localStorage.setItem(AVATAR_STORAGE_KEY, avatarUrl);
+  const saveLocalStatusEmoji = (statusEmoji: string | null) => {
+    const normalizedStatusEmoji = typeof statusEmoji === 'string' && statusEmoji.trim().length > 0
+      ? statusEmoji.trim()
+      : null;
+
+    localStatusEmoji.value = normalizedStatusEmoji;
+    if (normalizedStatusEmoji) {
+      localStorage.setItem('statusEmoji', normalizedStatusEmoji);
     } else {
-      localStorage.removeItem(AVATAR_STORAGE_KEY);
+      localStorage.removeItem('statusEmoji');
     }
+
+    if (currentUser.value) {
+      currentUser.value = {
+        ...currentUser.value,
+        status_emoji: normalizedStatusEmoji
+      };
+    }
+  };
+
+  const saveLocalStatusText = (statusText: string | null) => {
+    const normalizedStatusText = typeof statusText === 'string' && statusText.trim().length > 0
+      ? statusText.trim()
+      : null;
+
+    localStatusText.value = normalizedStatusText;
+    if (normalizedStatusText) {
+      localStorage.setItem('statusText', normalizedStatusText);
+    } else {
+      localStorage.removeItem('statusText');
+    }
+
+    if (currentUser.value) {
+      currentUser.value = {
+        ...currentUser.value,
+        status_text: normalizedStatusText
+      };
+    }
+  };
+
+  const saveStatusPreference = async (input: { statusEmoji: string | null; statusText: string | null }) => {
+    saveLocalStatusEmoji(input.statusEmoji);
+    saveLocalStatusText(input.statusText);
+
+    if (!ws.value || !isConnected.value) {
+      return;
+    }
+
+    send('set_status_profile', {
+      statusEmoji: localStatusEmoji.value,
+      statusText: localStatusText.value
+    });
+  };
+
+  const initializeStoredAvatar = async () => {
+    const indexedDbAvatar = await readStoredAvatarFromIndexedDb();
+    if (indexedDbAvatar !== null) {
+      localAvatar.value = indexedDbAvatar;
+      removeLegacyStoredAvatar();
+      return indexedDbAvatar;
+    }
+
+    const legacyAvatar = readLegacyStoredAvatar();
+    if (legacyAvatar !== null) {
+      localAvatar.value = legacyAvatar;
+      await saveStoredAvatar(legacyAvatar);
+      removeLegacyStoredAvatar();
+      return legacyAvatar;
+    }
+
+    localAvatar.value = null;
+    removeLegacyStoredAvatar();
+    return null;
+  };
+
+  const saveLocalAvatar = async (avatarUrl: string | null) => {
+    localAvatar.value = avatarUrl;
+    await saveStoredAvatar(avatarUrl);
+    removeLegacyStoredAvatar();
 
     if (currentUser.value) {
       currentUser.value = {
@@ -769,7 +860,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   };
 
-  const getLocalAvatar = () => readStoredAvatar();
+  const getLocalAvatar = () => localAvatar.value;
 
   const DEFAULT_SERVER_PORT = '1337';
   const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
@@ -1609,9 +1700,11 @@ export const useChatStore = defineStore('chat', () => {
         currentUser.value = normalizeUser(payload.user);
         pendingPresenceStatus.value = normalizePresenceStatus(currentUser.value.status);
         currentUserRole.value = currentUser.value.role || 'user';
-        if (payload.user && payload.user.avatar_url !== readStoredAvatar()) {
-          saveLocalAvatar(payload.user.avatar_url || null);
+        if (payload.user && payload.user.avatar_url !== localAvatar.value) {
+          void saveLocalAvatar(payload.user.avatar_url || null);
         }
+        saveLocalStatusEmoji(currentUser.value.status_emoji || null);
+        saveLocalStatusText(currentUser.value.status_text || null);
         if (payload.server) {
           applyServerState(payload.server);
         }
@@ -1722,6 +1815,32 @@ export const useChatStore = defineStore('chat', () => {
             ...updatedUser
           };
           pendingPresenceStatus.value = normalizePresenceStatus(updatedUser.status);
+          currentUserRole.value = currentUser.value.role;
+        }
+        break;
+      }
+
+      case 'status_profile_updated': {
+        const updatedUser = normalizeUser(payload.user);
+        const existingIndex = users.value.findIndex((user) => user.id === updatedUser.id);
+        if (existingIndex >= 0) {
+          const nextUsers = [...users.value];
+          nextUsers.splice(existingIndex, 1, {
+            ...nextUsers[existingIndex],
+            ...updatedUser
+          });
+          users.value = nextUsers;
+        } else {
+          users.value = [...users.value, updatedUser];
+        }
+
+        if (currentUser.value?.id === updatedUser.id) {
+          currentUser.value = {
+            ...currentUser.value,
+            ...updatedUser
+          };
+          saveLocalStatusEmoji(updatedUser.status_emoji || null);
+          saveLocalStatusText(updatedUser.status_text || null);
           currentUserRole.value = currentUser.value.role;
         }
         break;
@@ -2048,7 +2167,16 @@ export const useChatStore = defineStore('chat', () => {
   const authenticate = async (username: string) => {
     try {
       const { publicKeyBase64 } = await getKeys();
-      send('auth:request', { username, publicKey: publicKeyBase64, avatarUrl: readStoredAvatar() });
+      if (localAvatar.value === null) {
+        await initializeStoredAvatar();
+      }
+      send('auth:request', {
+        username,
+        publicKey: publicKeyBase64,
+        avatarUrl: localAvatar.value,
+        statusEmoji: localStatusEmoji.value,
+        statusText: localStatusText.value
+      });
     } catch (e) {
       console.error("Authentication request failed", e);
     }
@@ -2586,6 +2714,8 @@ export const useChatStore = defineStore('chat', () => {
     return messages.value[activeChannelId.value] || [];
   });
 
+  void initializeStoredAvatar();
+
   return {
     isConnected,
     currentUser,
@@ -2599,6 +2729,8 @@ export const useChatStore = defineStore('chat', () => {
     activeConnectionId,
     hasStoredIdentity,
     localUsername,
+    localStatusEmoji,
+    localStatusText,
     users,
     onlineUserIds,
     pendingPresenceStatus,
@@ -2615,6 +2747,9 @@ export const useChatStore = defineStore('chat', () => {
     activeServerCategories,
     activeChannelMessages,
     saveLocalUsername,
+    saveLocalStatusEmoji,
+    saveLocalStatusText,
+    saveStatusPreference,
     saveLocalAvatar,
     getLocalAvatar,
     getStoredIdentityExport,

@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
-import { Archive, Code2, File, FileText, Film, Image, Music2, Reply, Trash2, X } from 'lucide-vue-next'
+import { Archive, Code2, File, FileText, Film, Folder, Image, Music2, Reply, Trash2, X } from 'lucide-vue-next'
+import { EmojiPicker } from 'vue3-twemoji-picker-final'
 import AppAvatar from '../components/common/AppAvatar.vue'
 import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, type MessageAttachment, type MessageReaction, type MessageReplyReference } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
 import { openExternalUrl } from '../utils/openExternalUrl'
+
+type TwemojiPickerSelection = {
+  i?: string
+}
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
@@ -16,13 +21,26 @@ const previousScrollHeight = ref(0)
 const isFetchingOlderMessages = ref(false)
 const folderFileInput = ref<HTMLInputElement | null>(null)
 const messageAttachmentInput = ref<HTMLInputElement | null>(null)
+const messageInputElement = ref<HTMLInputElement | null>(null)
 const isUploadingFolderFile = ref(false)
 const folderUploadError = ref<string | null>(null)
 const folderViewMode = ref<'list' | 'tiles'>('list')
 const pendingMessageAttachments = ref<File[]>([])
 const isSendingMessage = ref(false)
 const replyDraftMessage = ref<Message | null>(null)
+const messageEmojiPickerOpen = ref(false)
+const messageEmojiPickerRef = ref<HTMLElement | null>(null)
 const MESSAGE_REACTION_OPTIONS = ['👍', '❤️', '😂', '😮', '🎉'] as const
+const sharedEmojiPickerOptions = {
+  locals: 'en',
+  native: true,
+  hasGroupIcons: true,
+  hasSearch: true,
+  hasGroupNames: true,
+  stickyGroupNames: true,
+  hasSkinTones: true,
+  recentRecords: true
+} as const
 
 const TOP_SCROLL_THRESHOLD_PX = 120
 const BOTTOM_SCROLL_THRESHOLD_PX = 120
@@ -748,6 +766,48 @@ const onOpenMessageAttachmentPicker = () => {
   messageAttachmentInput.value?.click()
 }
 
+const closeMessageEmojiPicker = () => {
+  messageEmojiPickerOpen.value = false
+}
+
+const toggleMessageEmojiPicker = () => {
+  if (isReadOnlyRssChannel.value || isSendingMessage.value) {
+    return
+  }
+
+  messageEmojiPickerOpen.value = !messageEmojiPickerOpen.value
+}
+
+const insertEmojiIntoMessageDraft = async (emoji: string) => {
+  const input = messageInputElement.value
+  const currentValue = messageInput.value
+
+  if (!input) {
+    messageInput.value = `${currentValue}${emoji}`
+    return
+  }
+
+  const selectionStart = input.selectionStart ?? currentValue.length
+  const selectionEnd = input.selectionEnd ?? currentValue.length
+  messageInput.value = `${currentValue.slice(0, selectionStart)}${emoji}${currentValue.slice(selectionEnd)}`
+
+  await nextTick()
+
+  const caretPosition = selectionStart + emoji.length
+  input.focus()
+  input.setSelectionRange(caretPosition, caretPosition)
+}
+
+const handleMessageEmojiSelection = (selection: TwemojiPickerSelection) => {
+  const emoji = selection.i
+  if (!emoji) {
+    return
+  }
+
+  void insertEmojiIntoMessageDraft(emoji)
+  closeMessageEmojiPicker()
+}
+
 const appendPendingMessageAttachments = (files: FileList | File[]) => {
   const nextFiles = Array.from(files)
   if (nextFiles.length === 0) return
@@ -774,6 +834,47 @@ const onMessageInputPaste = (event: ClipboardEvent) => {
   event.preventDefault()
   appendPendingMessageAttachments(files)
 }
+
+const handleDocumentPointerDown = (event: PointerEvent) => {
+  if (!messageEmojiPickerOpen.value) {
+    return
+  }
+
+  const target = event.target
+  if (!(target instanceof Node)) {
+    return
+  }
+
+  if (messageEmojiPickerRef.value?.contains(target)) {
+    return
+  }
+
+  closeMessageEmojiPicker()
+}
+
+watch(activeTextChannel, () => {
+  closeMessageEmojiPicker()
+})
+
+watch(isSendingMessage, (value) => {
+  if (value) {
+    closeMessageEmojiPicker()
+  }
+})
+
+watch(isReadOnlyRssChannel, (value) => {
+  if (value) {
+    closeMessageEmojiPicker()
+  }
+})
+
+onMounted(() => {
+  document.addEventListener('pointerdown', handleDocumentPointerDown)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown)
+})
 
 const submitMessage = async () => {
   if (isReadOnlyRssChannel.value || !activeTextChannel.value || isSendingMessage.value) {
@@ -1336,7 +1437,7 @@ watch(
                       : 'border-white/10 bg-zinc-900/70 text-zinc-300 hover:bg-zinc-800/80'"
                     @click="toggleMessageReaction(entry.message, reaction.emoji)"
                   >
-                  <span>{{ reaction.emoji }}</span>
+                  <span v-twemoji="reaction.emoji" class="inline-flex items-center"></span>
                   <span>{{ reaction.count }}</span>
                 </button>
               </div>
@@ -1368,7 +1469,7 @@ watch(
                 role="menuitem"
                 @click="toggleReactionFromContextMenu(emoji)"
               >
-                {{ emoji }}
+                <span v-twemoji="emoji" class="inline-flex items-center justify-center"></span>
               </button>
             </div>
           </div>
@@ -1454,15 +1555,50 @@ watch(
           <button type="button" class="w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-700 shrink-0 transition-colors disabled:opacity-50" :disabled="isReadOnlyRssChannel || isSendingMessage" @click="onOpenMessageAttachmentPicker">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
           </button>
-          <input 
-            v-model="messageInput"
-            @paste="onMessageInputPaste"
-            @keyup.enter="sendMessage"
-            type="text" 
-            :placeholder="messagePlaceholder"
-            :disabled="isReadOnlyRssChannel || isSendingMessage"
-            class="bg-transparent border-none outline-none flex-1 text-zinc-200 placeholder-zinc-500 text-[14px]"
-          />
+          <div class="message-input-shell">
+            <input 
+              ref="messageInputElement"
+              v-model="messageInput"
+              @paste="onMessageInputPaste"
+              @keyup.enter="sendMessage"
+              type="text" 
+              :placeholder="messagePlaceholder"
+              :disabled="isReadOnlyRssChannel || isSendingMessage"
+              class="message-input-native bg-transparent border-none outline-none flex-1 text-[14px]"
+            />
+          </div>
+          <div ref="messageEmojiPickerRef" class="relative shrink-0">
+            <button
+              type="button"
+              class="w-8 h-8 rounded-full bg-zinc-800/80 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-700 transition-colors disabled:opacity-50"
+              :disabled="isReadOnlyRssChannel || isSendingMessage"
+              :aria-expanded="messageEmojiPickerOpen"
+              aria-haspopup="dialog"
+              aria-label="Open emoji picker"
+              @click="toggleMessageEmojiPicker"
+            >
+              <span v-twemoji="'😊'" class="text-base leading-none inline-flex items-center"></span>
+            </button>
+
+            <div v-if="messageEmojiPickerOpen" class="absolute bottom-full right-0 mb-3 w-[22rem] overflow-hidden rounded-xl border border-white/10 bg-zinc-900 shadow-2xl z-20">
+              <div class="flex items-center justify-between px-3 pt-3">
+                <span class="text-xs font-bold uppercase tracking-widest text-zinc-400">Pick an emoji</span>
+                <button
+                  type="button"
+                  class="text-xs font-medium text-zinc-400 hover:text-white transition-colors"
+                  @click="closeMessageEmojiPicker"
+                >
+                  Close
+                </button>
+              </div>
+              <div class="px-3 pb-3 pt-2">
+                <p class="mb-3 text-xs text-zinc-500">Browse the full emoji set by category and insert directly into your current draft.</p>
+                <div class="emoji-picker-panel">
+                  <EmojiPicker :options="sharedEmojiPickerOptions" @select="handleMessageEmojiSelection" />
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
         <p v-if="isReadOnlyRssChannel" class="mt-2 text-xs text-gray-400">
           RSS feed channels are read-only for normal users.
@@ -1473,7 +1609,7 @@ watch(
     <template v-else-if="activeFolderChannel">
       <header class="h-14 border-b border-white/5 flex items-center justify-between px-6 shadow-sm shrink-0 bg-zinc-950/80 backdrop-blur-md relative z-10">
         <h2 class="font-bold text-white flex items-center text-[15px]">
-          <span class="text-zinc-500 text-lg mr-1.5 font-medium">📁</span>
+          <span v-twemoji="'📁'" class="text-zinc-500 text-lg mr-1.5 font-medium inline-flex items-center"></span>
           {{ activeFolderChannel.name }}
         </h2>
         <div class="flex items-center gap-2">
@@ -1618,7 +1754,7 @@ watch(
     <template v-else-if="activeVoiceChannel">
       <header class="h-14 border-b border-white/5 flex items-center px-6 shadow-sm shrink-0 bg-zinc-950">
         <h2 class="font-bold text-white flex items-center">
-          <span class="text-zinc-500 text-xl mr-2">🔊</span>
+          <span v-twemoji="'🔊'" class="text-zinc-500 text-xl mr-2 inline-flex items-center"></span>
           {{ activeVoiceChannel.name }}
         </h2>
       </header>
@@ -1826,3 +1962,47 @@ watch(
   max-width: 90vw;
 }
 </style>
+
+<style scoped>
+.screen-stream-wrapper:fullscreen,
+.screen-stream-wrapper:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+  border-radius: 0 !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.screen-stream-wrapper:fullscreen .screen-stream-video,
+.screen-stream-wrapper:-webkit-full-screen .screen-stream-video {
+  width: 100%;
+  height: 100%;
+  max-width: 100vw;
+  max-height: 100vh;
+  border-radius: 0 !important;
+  object-fit: contain;
+}
+
+.screen-stream-overlay {
+  pointer-events: none;
+}
+
+.screen-stream-control,
+.screen-stream-overlay span {
+  pointer-events: auto;
+}
+
+.screen-stream-wrapper:fullscreen .screen-stream-overlay,
+.screen-stream-wrapper:-webkit-full-screen .screen-stream-overlay {
+  opacity: 1;
+  bottom: 32px;
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 90vw;
+}
+</style>
+
