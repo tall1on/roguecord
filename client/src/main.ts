@@ -13,8 +13,6 @@ app.use(router)
 installTwemojiDirective(app)
 app.mount('#app')
 
-window.setTimeout(() => {
-  window.requestAnimationFrame(() => {
-    startEmojiPrewarm()
-  })
-}, 0)
+window.requestAnimationFrame(() => {
+  startEmojiPrewarm()
+})
