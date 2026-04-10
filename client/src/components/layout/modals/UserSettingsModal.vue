@@ -1,20 +1,12 @@
 <script setup lang="ts">
-import 'emoji-picker-element'
-
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+// @ts-ignore
+import { EmojiPicker } from 'vue3-twemoji-picker-final'
 import { useChatStore } from '../../../stores/chat'
 import { useWebRtcStore } from '../../../stores/webrtc'
 
-type EmojiPickerElement = HTMLElement & {
-  locale?: string
-  previewPosition?: 'none' | 'top' | 'bottom'
-  skinToneEmoji?: string
-}
-
-type EmojiPickerSelectionEvent = Event & {
-  detail?: {
-    unicode?: string
-  }
+type TwemojiPickerSelection = {
+  i?: string
 }
 
 type SettingsSection = 'general' | 'audio' | 'connections' | 'identity' | 'server'
@@ -47,7 +39,17 @@ const avatarStatus = ref<string | null>(null)
 const avatarError = ref<string | null>(null)
 const statusEmojiPickerOpen = ref(false)
 const statusEmojiPickerRef = ref<HTMLElement | null>(null)
-const statusEmojiPickerElement = ref<EmojiPickerElement | null>(null)
+const sharedEmojiPickerOptions = {
+  imgSrc: 'https://fastly.jsdelivr.net/gh/limin04551/vue3-twemoji-picker/public/img/',
+  locals: 'en',
+  native: true,
+  hasGroupIcons: true,
+  hasSearch: true,
+  hasGroupNames: true,
+  stickyGroupNames: true,
+  hasSkinTones: true,
+  recentRecords: true
+} as const
 
 const currentIdentityFingerprint = computed(() => {
   const identity = chatStore.getStoredIdentityExport()
@@ -89,8 +91,8 @@ const selectStatusEmoji = (emoji: string) => {
   closeStatusEmojiPicker()
 }
 
-const handleStatusEmojiSelection = (event: EmojiPickerSelectionEvent) => {
-  const emoji = event.detail?.unicode
+const handleStatusEmojiSelection = (selection: TwemojiPickerSelection) => {
+  const emoji = selection.i
   if (!emoji) {
     return
   }
@@ -346,11 +348,6 @@ watch(() => chatStore.currentUser?.avatar_url, (value) => {
 
 onMounted(() => {
   document.addEventListener('pointerdown', handleDocumentPointerDown)
-
-  if (statusEmojiPickerElement.value) {
-    statusEmojiPickerElement.value.locale = 'en'
-    statusEmojiPickerElement.value.previewPosition = 'none'
-  }
 })
 
 onBeforeUnmount(() => {
@@ -466,11 +463,9 @@ onBeforeUnmount(() => {
                       </div>
                       <div class="px-3 pb-3">
                         <p class="mb-3 text-xs text-zinc-500">Browse the full emoji set by category or keep typing manually in the input.</p>
-                        <emoji-picker
-                          ref="statusEmojiPickerElement"
-                          class="status-emoji-picker"
-                          @emoji-click="handleStatusEmojiSelection"
-                        />
+                        <div class="emoji-picker-panel">
+                          <EmojiPicker :options="sharedEmojiPickerOptions" @select="handleStatusEmojiSelection" />
+                        </div>
                       </div>
                     </div>
                   </div>
