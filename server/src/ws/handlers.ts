@@ -244,6 +244,20 @@ const sanitizeUsernameForProfile = (value: unknown) => {
   return normalized.slice(0, 64);
 };
 
+const sanitizeStatusEmojiForProfile = (value: unknown) => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  return normalized.slice(0, 32);
+};
+
+const sanitizeStatusTextForProfile = (value: unknown) => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  if (!normalized) return null;
+  return normalized.slice(0, 128);
+};
+
 const buildS3ServerIconPrefix = (prefix: string | null | undefined, serverId: string) => {
   const marker = '__server_icon_marker__';
   const keyWithMarker = buildS3StorageKey(prefix, `server-icons/${serverId}`, marker);
@@ -1698,7 +1712,7 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
   }
 };
 
-const handleAuthRequest = async (client: ClientConnection, payload: { username: string, publicKey: string, avatarUrl?: string | null }) => {
+const handleAuthRequest = async (client: ClientConnection, payload: { username: string, publicKey: string, avatarUrl?: string | null, statusEmoji?: string | null, statusText?: string | null }) => {
   const { username, publicKey } = payload;
   if (!username || !publicKey) return;
 
@@ -1744,8 +1758,17 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
 
   let user = await getUserByPublicKey(publicKey);
   let isNewUser = false;
+  const nextStatusEmoji = payload.statusEmoji === undefined ? undefined : sanitizeStatusEmojiForProfile(payload.statusEmoji);
+  const nextStatusText = payload.statusText === undefined ? undefined : sanitizeStatusTextForProfile(payload.statusText);
   if (!user) {
-    user = await createUser(username, publicKey, normalizedAvatar?.dataUrl ?? null, normalizedAvatar?.mimeType ?? null);
+    user = await createUser(
+      username,
+      publicKey,
+      normalizedAvatar?.dataUrl ?? null,
+      normalizedAvatar?.mimeType ?? null,
+      nextStatusEmoji ?? null,
+      nextStatusText ?? null
+    );
     isNewUser = true;
   } else {
     const nextUsername = sanitizeUsernameForProfile(username);
@@ -1756,12 +1779,16 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
       (user.avatar_url || null) !== nextAvatarUrl ||
       (user.avatar_mime_type || null) !== nextAvatarMimeType
     );
+    const shouldUpdateStatusEmoji = payload.statusEmoji !== undefined && (user.status_emoji || null) !== (nextStatusEmoji ?? null);
+    const shouldUpdateStatusText = payload.statusText !== undefined && (user.status_text || null) !== (nextStatusText ?? null);
 
-    if (shouldUpdateUsername || shouldUpdateAvatar) {
+    if (shouldUpdateUsername || shouldUpdateAvatar || shouldUpdateStatusEmoji || shouldUpdateStatusText) {
       await updateUserProfile({
         id: user.id,
         ...(shouldUpdateUsername ? { username: nextUsername! } : {}),
-        ...(shouldUpdateAvatar ? { avatar_url: nextAvatarUrl, avatar_mime_type: nextAvatarMimeType } : {})
+        ...(shouldUpdateAvatar ? { avatar_url: nextAvatarUrl, avatar_mime_type: nextAvatarMimeType } : {}),
+        ...(shouldUpdateStatusEmoji ? { status_emoji: nextStatusEmoji ?? null } : {}),
+        ...(shouldUpdateStatusText ? { status_text: nextStatusText ?? null } : {})
       });
       user = (await getUserById(user.id)) || user;
     }
