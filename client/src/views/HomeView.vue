@@ -7,7 +7,6 @@ import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, 
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
 import { openExternalUrl } from '../utils/openExternalUrl'
-import { parseTwemojiWithin } from '../directives/twemoji'
 
 type TwemojiPickerSelection = {
   i?: string
@@ -31,7 +30,6 @@ const isSendingMessage = ref(false)
 const replyDraftMessage = ref<Message | null>(null)
 const messageEmojiPickerOpen = ref(false)
 const messageEmojiPickerRef = ref<HTMLElement | null>(null)
-const messageInputTwemojiOverlay = ref<HTMLElement | null>(null)
 const MESSAGE_REACTION_OPTIONS = ['👍', '❤️', '😂', '😮', '🎉'] as const
 const sharedEmojiPickerOptions = {
   locals: 'en',
@@ -854,22 +852,8 @@ const handleDocumentPointerDown = (event: PointerEvent) => {
   closeMessageEmojiPicker()
 }
 
-const renderMessageInputTwemojiOverlay = async () => {
-  const overlay = messageInputTwemojiOverlay.value
-  if (!overlay) {
-    return
-  }
-
-  overlay.textContent = messageInput.value || messagePlaceholder.value || ''
-  await parseTwemojiWithin(overlay, { forceWithinRoot: true })
-}
-
 watch(activeTextChannel, () => {
   closeMessageEmojiPicker()
-})
-
-watch([messageInput, messagePlaceholder], () => {
-  void renderMessageInputTwemojiOverlay()
 })
 
 watch(isSendingMessage, (value) => {
@@ -886,8 +870,6 @@ watch(isReadOnlyRssChannel, (value) => {
 
 onMounted(() => {
   document.addEventListener('pointerdown', handleDocumentPointerDown)
-
-  void renderMessageInputTwemojiOverlay()
 })
 
 onBeforeUnmount(() => {
@@ -1574,12 +1556,6 @@ watch(
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
           </button>
           <div class="message-input-shell">
-            <div
-              ref="messageInputTwemojiOverlay"
-              class="message-input-twemoji-overlay"
-              :class="messageInput ? 'message-input-twemoji-overlay--value' : 'message-input-twemoji-overlay--placeholder'"
-              aria-hidden="true"
-            ></div>
             <input 
               ref="messageInputElement"
               v-model="messageInput"
