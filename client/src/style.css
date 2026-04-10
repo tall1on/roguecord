@@ -2,6 +2,53 @@
 @tailwind components;
 @tailwind utilities;
 
+.status-emoji-picker {
+  --background: #18181b;
+  --border-color: rgba(255, 255, 255, 0.08);
+  --button-active-background: rgba(99, 102, 241, 0.2);
+  --button-hover-background: rgba(255, 255, 255, 0.06);
+  --category-emoji-padding: 0.45rem;
+  --category-emoji-size: 1.2rem;
+  --emoji-padding: 0.45rem;
+  --emoji-size: 1.2rem;
+  --indicator-color: #818cf8;
+  --input-border-color: rgba(255, 255, 255, 0.08);
+  --input-font-color: #ffffff;
+  --input-placeholder-color: rgba(255, 255, 255, 0.45);
+  --input-background: #09090b;
+  --outline-color: rgba(99, 102, 241, 0.45);
+  --shadow: none;
+  --text-color: #ffffff;
+  width: 100%;
+  height: 26rem;
+}
+
+.status-emoji-picker::part(search),
+.status-emoji-picker::part(category-navigation),
+.status-emoji-picker::part(category-button),
+.status-emoji-picker::part(category-button-active),
+.status-emoji-picker::part(emoji-button),
+.status-emoji-picker::part(emoji-button-active),
+.status-emoji-picker::part(preview) {
+  border-radius: 0.75rem;
+}
+
+.rc-twemoji {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  margin: 0 0.05em 0 0.1em;
+  vertical-align: -0.12em;
+}
+
+.rc-twemoji:first-child {
+  margin-left: 0;
+}
+
+.rc-twemoji:last-child {
+  margin-right: 0;
+}
+
 html,
 body,
 #app {

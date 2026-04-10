@@ -290,7 +290,7 @@ onUnmounted(() => {
             </AppAvatar>
             <div class="flex-1 min-w-0">
               <div class="text-[13px] font-semibold truncate transition-colors group-hover:text-white" :style="{ color: getDisplayRoleColor(user) || '#d4d4d8' }">{{ user.username }}</div>
-              <div v-if="getUserStatusLine(user)" class="text-[11px] text-zinc-500 truncate mt-0.5 transition-colors group-hover:text-zinc-400">{{ getUserStatusLine(user) }}</div>
+              <div v-if="getUserStatusLine(user)" v-twemoji="getUserStatusLine(user)" class="text-[11px] text-zinc-500 truncate mt-0.5 transition-colors group-hover:text-zinc-400"></div>
             </div>
           </div>
         </div>
@@ -317,7 +317,7 @@ onUnmounted(() => {
             </AppAvatar>
             <div class="flex-1 min-w-0">
               <div class="text-[13px] font-medium truncate transition-colors group-hover:text-zinc-300" :style="{ color: getDisplayRoleColor(user) ? `${getDisplayRoleColor(user)}b3` : '#71717a' }">{{ user.username }}</div>
-              <div v-if="getUserStatusLine(user)" class="text-[11px] text-zinc-600 truncate mt-0.5 transition-colors group-hover:text-zinc-500">{{ getUserStatusLine(user) }}</div>
+              <div v-if="getUserStatusLine(user)" v-twemoji="getUserStatusLine(user)" class="text-[11px] text-zinc-600 truncate mt-0.5 transition-colors group-hover:text-zinc-500"></div>
             </div>
           </div>
         </div>
