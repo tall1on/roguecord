@@ -53,8 +53,10 @@ const saveUsernamePreference = () => {
 }
 
 const saveStatusPreference = () => {
-  chatStore.saveLocalStatusEmoji(editedStatusEmoji.value || null)
-  chatStore.saveLocalStatusText(editedStatusText.value || null)
+  void chatStore.saveStatusPreference({
+    statusEmoji: editedStatusEmoji.value || null,
+    statusText: editedStatusText.value || null
+  })
 }
 
 const resetAvatarMessages = () => {
