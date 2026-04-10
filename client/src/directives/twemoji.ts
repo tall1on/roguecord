@@ -8,6 +8,15 @@ type TwemojiParser = {
 type TwemojiDirectiveOptions = {
   className?: string
   tag?: string
+  base?: string
+  folder?: string
+  ext?: string
+}
+
+type TwemojiParseRootOptions = TwemojiDirectiveOptions & {
+  forceWithinRoot?: boolean
+  selector?: string
+  shadowRoots?: Array<ShadowRoot | null | undefined>
 }
 
 type TwemojiElement = HTMLElement & {
@@ -23,9 +32,16 @@ type TwemojiRootElement = HTMLElement & {
   __roguecordTwemojiInstalled?: boolean
 }
 
+type TwemojiParseContainer = ParentNode & {
+  querySelectorAll<E extends Element = Element>(selectors: string): NodeListOf<E>
+}
+
 const DEFAULT_OPTIONS: Required<TwemojiDirectiveOptions> = {
   className: 'rc-twemoji',
-  tag: 'img'
+  tag: 'img',
+  base: '',
+  folder: 'svg',
+  ext: '.svg'
 }
 
 const GLOBAL_IGNORE_SELECTOR = 'img, svg, canvas, textarea, input, select, option, [contenteditable="true"], [data-no-twemoji]'
@@ -79,10 +95,85 @@ const getOptions = (binding: DirectiveBinding<string | TwemojiDirectiveOptions |
 }
 
 const getParseOptions = (options: Required<TwemojiDirectiveOptions>) => ({
+  base: options.base,
   className: options.className,
-  folder: 'svg',
-  ext: '.svg'
+  folder: options.folder,
+  ext: options.ext
 })
+
+export const parseTwemojiWithin = async (
+  root: HTMLElement,
+  options: TwemojiParseRootOptions = {}
+) => {
+  const twemoji = await loadTwemoji()
+  if (!twemoji) {
+    return
+  }
+
+  const normalizedOptions: Required<TwemojiDirectiveOptions> = {
+    ...DEFAULT_OPTIONS,
+    ...options
+  }
+
+  const parseContainer = (container: TwemojiParseContainer, includeRoot = false) => {
+    const targets = new Set<HTMLElement>()
+
+    if (options.selector) {
+      if (includeRoot && root.matches(options.selector)) {
+        targets.add(root)
+      }
+
+      const selectorTargets = Array.from(container.querySelectorAll<HTMLElement>(options.selector))
+
+      for (const element of selectorTargets) {
+        if (options.forceWithinRoot || !shouldSkipGlobalTwemoji(element)) {
+          targets.add(element)
+        }
+      }
+    } else {
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
+      let currentNode = walker.nextNode()
+
+      while (currentNode) {
+        const parentElement = currentNode.parentElement
+        if (
+          parentElement &&
+          (options.forceWithinRoot || !shouldSkipGlobalTwemoji(parentElement))
+        ) {
+          targets.add(parentElement)
+        }
+        currentNode = walker.nextNode()
+      }
+    }
+
+    for (const element of targets) {
+      twemoji.parse(element, getParseOptions(normalizedOptions))
+    }
+  }
+
+  parseContainer(root, true)
+
+  for (const shadowRoot of options.shadowRoots || []) {
+    if (!shadowRoot) {
+      continue
+    }
+
+    parseContainer(shadowRoot)
+  }
+}
+
+export const parseTwemojiTextIntoElement = async (
+  element: HTMLElement,
+  text: string,
+  options: TwemojiDirectiveOptions = {}
+) => {
+  const normalizedOptions: Required<TwemojiDirectiveOptions> = {
+    ...DEFAULT_OPTIONS,
+    ...options
+  }
+
+  await renderTwemoji(element as TwemojiElement, text, normalizedOptions)
+}
 
 const renderTwemoji = async (element: TwemojiElement, text: string, options: Required<TwemojiDirectiveOptions>) => {
   const twemoji = await loadTwemoji()

@@ -1,24 +1,17 @@
 <script setup lang="ts">
-import 'emoji-picker-element'
-
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
 import { Archive, Code2, File, FileText, Film, Image, Music2, Reply, Trash2, X } from 'lucide-vue-next'
+// @ts-ignore
+import { EmojiPicker } from 'vue3-twemoji-picker-final'
 import AppAvatar from '../components/common/AppAvatar.vue'
 import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, type MessageAttachment, type MessageReaction, type MessageReplyReference } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
 import { openExternalUrl } from '../utils/openExternalUrl'
+import { parseTwemojiWithin } from '../directives/twemoji'
 
-type EmojiPickerElement = HTMLElement & {
-  locale?: string
-  previewPosition?: 'none' | 'top' | 'bottom'
-  skinToneEmoji?: string
-}
-
-type EmojiPickerSelectionEvent = Event & {
-  detail?: {
-    unicode?: string
-  }
+type TwemojiPickerSelection = {
+  i?: string
 }
 
 const chatStore = useChatStore()
@@ -39,8 +32,18 @@ const isSendingMessage = ref(false)
 const replyDraftMessage = ref<Message | null>(null)
 const messageEmojiPickerOpen = ref(false)
 const messageEmojiPickerRef = ref<HTMLElement | null>(null)
-const messageEmojiPickerElement = ref<EmojiPickerElement | null>(null)
+const messageInputTwemojiOverlay = ref<HTMLElement | null>(null)
 const MESSAGE_REACTION_OPTIONS = ['👍', '❤️', '😂', '😮', '🎉'] as const
+const sharedEmojiPickerOptions = {
+  locals: 'en',
+  native: true,
+  hasGroupIcons: true,
+  hasSearch: true,
+  hasGroupNames: true,
+  stickyGroupNames: true,
+  hasSkinTones: true,
+  recentRecords: true
+} as const
 
 const TOP_SCROLL_THRESHOLD_PX = 120
 const BOTTOM_SCROLL_THRESHOLD_PX = 120
@@ -798,8 +801,8 @@ const insertEmojiIntoMessageDraft = async (emoji: string) => {
   input.setSelectionRange(caretPosition, caretPosition)
 }
 
-const handleMessageEmojiSelection = (event: EmojiPickerSelectionEvent) => {
-  const emoji = event.detail?.unicode
+const handleMessageEmojiSelection = (selection: TwemojiPickerSelection) => {
+  const emoji = selection.i
   if (!emoji) {
     return
   }
@@ -852,8 +855,22 @@ const handleDocumentPointerDown = (event: PointerEvent) => {
   closeMessageEmojiPicker()
 }
 
+const renderMessageInputTwemojiOverlay = async () => {
+  const overlay = messageInputTwemojiOverlay.value
+  if (!overlay) {
+    return
+  }
+
+  overlay.textContent = messageInput.value || messagePlaceholder.value || ''
+  await parseTwemojiWithin(overlay, { forceWithinRoot: true })
+}
+
 watch(activeTextChannel, () => {
   closeMessageEmojiPicker()
+})
+
+watch([messageInput, messagePlaceholder], () => {
+  void renderMessageInputTwemojiOverlay()
 })
 
 watch(isSendingMessage, (value) => {
@@ -871,11 +888,7 @@ watch(isReadOnlyRssChannel, (value) => {
 onMounted(() => {
   document.addEventListener('pointerdown', handleDocumentPointerDown)
 
-  if (messageEmojiPickerElement.value) {
-    messageEmojiPickerElement.value.locale = 'en'
-    messageEmojiPickerElement.value.previewPosition = 'none'
-    messageEmojiPickerElement.value.skinToneEmoji = '👍'
-  }
+  void renderMessageInputTwemojiOverlay()
 })
 
 onBeforeUnmount(() => {
@@ -1561,16 +1574,24 @@ watch(
           <button type="button" class="w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-700 shrink-0 transition-colors disabled:opacity-50" :disabled="isReadOnlyRssChannel || isSendingMessage" @click="onOpenMessageAttachmentPicker">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
           </button>
-          <input 
-            ref="messageInputElement"
-            v-model="messageInput"
-            @paste="onMessageInputPaste"
-            @keyup.enter="sendMessage"
-            type="text" 
-            :placeholder="messagePlaceholder"
-            :disabled="isReadOnlyRssChannel || isSendingMessage"
-            class="bg-transparent border-none outline-none flex-1 text-zinc-200 placeholder-zinc-500 text-[14px]"
-          />
+          <div class="message-input-shell">
+            <div
+              ref="messageInputTwemojiOverlay"
+              class="message-input-twemoji-overlay"
+              :class="messageInput ? 'message-input-twemoji-overlay--value' : 'message-input-twemoji-overlay--placeholder'"
+              aria-hidden="true"
+            ></div>
+            <input 
+              ref="messageInputElement"
+              v-model="messageInput"
+              @paste="onMessageInputPaste"
+              @keyup.enter="sendMessage"
+              type="text" 
+              :placeholder="messagePlaceholder"
+              :disabled="isReadOnlyRssChannel || isSendingMessage"
+              class="message-input-native bg-transparent border-none outline-none flex-1 text-[14px]"
+            />
+          </div>
           <div ref="messageEmojiPickerRef" class="relative shrink-0">
             <button
               type="button"
@@ -1597,11 +1618,9 @@ watch(
               </div>
               <div class="px-3 pb-3 pt-2">
                 <p class="mb-3 text-xs text-zinc-500">Browse the full emoji set by category and insert directly into your current draft.</p>
-                <emoji-picker
-                  ref="messageEmojiPickerElement"
-                  class="status-emoji-picker"
-                  @emoji-click="handleMessageEmojiSelection"
-                />
+                <div class="emoji-picker-panel">
+                  <EmojiPicker :options="sharedEmojiPickerOptions" @select="handleMessageEmojiSelection" />
+                </div>
               </div>
             </div>
           </div>
@@ -1968,3 +1987,47 @@ watch(
   max-width: 90vw;
 }
 </style>
+
+<style scoped>
+.screen-stream-wrapper:fullscreen,
+.screen-stream-wrapper:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+  border-radius: 0 !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.screen-stream-wrapper:fullscreen .screen-stream-video,
+.screen-stream-wrapper:-webkit-full-screen .screen-stream-video {
+  width: 100%;
+  height: 100%;
+  max-width: 100vw;
+  max-height: 100vh;
+  border-radius: 0 !important;
+  object-fit: contain;
+}
+
+.screen-stream-overlay {
+  pointer-events: none;
+}
+
+.screen-stream-control,
+.screen-stream-overlay span {
+  pointer-events: auto;
+}
+
+.screen-stream-wrapper:fullscreen .screen-stream-overlay,
+.screen-stream-wrapper:-webkit-full-screen .screen-stream-overlay {
+  opacity: 1;
+  bottom: 32px;
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 90vw;
+}
+</style>
+

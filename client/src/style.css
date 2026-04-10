@@ -33,6 +33,25 @@
   border-radius: 0.75rem;
 }
 
+.status-emoji-picker {
+  --twemoji-size-category: 0.875rem;
+  --twemoji-size-emoji: 1.2rem;
+}
+
+.rc-picker-twemoji-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  line-height: 1;
+}
+
+.status-emoji-picker .rc-twemoji--picker {
+  margin: 0;
+  vertical-align: middle;
+}
+
 .rc-twemoji {
   display: inline-block;
   width: 1em;
@@ -47,6 +66,45 @@
 
 .rc-twemoji:last-child {
   margin-right: 0;
+}
+
+.message-input-shell {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.message-input-native {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  color: transparent;
+  caret-color: rgb(228 228 231);
+}
+
+.message-input-native::placeholder {
+  color: transparent;
+}
+
+.message-input-twemoji-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  font-size: 14px;
+  line-height: 1.25rem;
+}
+
+.message-input-twemoji-overlay--value {
+  color: rgb(228 228 231);
+}
+
+.message-input-twemoji-overlay--placeholder {
+  color: rgb(113 113 122);
 }
 
 html,
