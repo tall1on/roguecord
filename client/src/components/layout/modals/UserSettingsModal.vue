@@ -1,7 +1,12 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { EmojiPicker } from 'vue3-twemoji-picker-final'
 import { useChatStore } from '../../../stores/chat'
 import { useWebRtcStore } from '../../../stores/webrtc'
+
+type TwemojiPickerSelection = {
+  i?: string
+}
 
 type SettingsSection = 'general' | 'audio' | 'connections' | 'identity' | 'server'
 
@@ -21,6 +26,8 @@ const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
 
 const editedUsername = ref(chatStore.localUsername || '')
+const editedStatusEmoji = ref(chatStore.localStatusEmoji || '')
+const editedStatusText = ref(chatStore.localStatusText || '')
 const adminKeyInput = ref('')
 const identityStatus = ref<string | null>(null)
 const identityError = ref<string | null>(null)
@@ -29,6 +36,19 @@ const avatarInput = ref<HTMLInputElement | null>(null)
 const avatarPreviewUrl = ref<string | null>(chatStore.getLocalAvatar())
 const avatarStatus = ref<string | null>(null)
 const avatarError = ref<string | null>(null)
+const statusEmojiPickerOpen = ref(false)
+const statusEmojiPickerRef = ref<HTMLElement | null>(null)
+const sharedEmojiPickerOptions = {
+  imgSrc: 'https://fastly.jsdelivr.net/gh/limin04551/vue3-twemoji-picker/public/img/',
+  locals: 'en',
+  native: true,
+  hasGroupIcons: true,
+  hasSearch: true,
+  hasGroupNames: true,
+  stickyGroupNames: true,
+  hasSkinTones: true,
+  recentRecords: true
+} as const
 
 const currentIdentityFingerprint = computed(() => {
   const identity = chatStore.getStoredIdentityExport()
@@ -50,6 +70,57 @@ const saveUsernamePreference = () => {
   }
 }
 
+const saveStatusPreference = () => {
+  void chatStore.saveStatusPreference({
+    statusEmoji: editedStatusEmoji.value || null,
+    statusText: editedStatusText.value || null
+  })
+}
+
+const toggleStatusEmojiPicker = () => {
+  statusEmojiPickerOpen.value = !statusEmojiPickerOpen.value
+}
+
+const closeStatusEmojiPicker = () => {
+  statusEmojiPickerOpen.value = false
+}
+
+const selectStatusEmoji = (emoji: string) => {
+  editedStatusEmoji.value = emoji
+  closeStatusEmojiPicker()
+}
+
+const handleStatusEmojiSelection = (selection: TwemojiPickerSelection) => {
+  const emoji = selection.i
+  if (!emoji) {
+    return
+  }
+
+  selectStatusEmoji(emoji)
+}
+
+const clearStatusEmoji = () => {
+  editedStatusEmoji.value = ''
+  closeStatusEmojiPicker()
+}
+
+const handleDocumentPointerDown = (event: PointerEvent) => {
+  if (!statusEmojiPickerOpen.value) {
+    return
+  }
+
+  const target = event.target
+  if (!(target instanceof Node)) {
+    return
+  }
+
+  if (statusEmojiPickerRef.value?.contains(target)) {
+    return
+  }
+
+  closeStatusEmojiPicker()
+}
+
 const resetAvatarMessages = () => {
   avatarStatus.value = null
   avatarError.value = null
@@ -61,7 +132,7 @@ const promptAvatarSelection = () => {
 }
 
 const clearAvatar = () => {
-  chatStore.saveLocalAvatar(null)
+  void chatStore.saveLocalAvatar(null)
   avatarPreviewUrl.value = null
   avatarStatus.value = 'Profile picture removed. It will be cleared on the next connection.'
   avatarError.value = null
@@ -79,15 +150,15 @@ const handleAvatarSelected = (event: Event) => {
   }
 
   const lowerType = (file.type || '').toLowerCase()
-  if (lowerType !== 'image/png' && lowerType !== 'image/jpeg') {
-    avatarError.value = 'Profile picture must be a PNG or JPG image.'
+  if (lowerType !== 'image/png' && lowerType !== 'image/jpeg' && lowerType !== 'image/gif') {
+    avatarError.value = 'Profile picture must be a PNG, JPG, or GIF image.'
     avatarStatus.value = null
     target.value = ''
     return
   }
 
-  if (file.size > 2 * 1024 * 1024) {
-    avatarError.value = 'Profile picture must be 2MB or smaller.'
+  if (file.size > 10 * 1024 * 1024) {
+    avatarError.value = 'Profile picture must be 10MB or smaller.'
     avatarStatus.value = null
     target.value = ''
     return
@@ -103,14 +174,14 @@ const handleAvatarSelected = (event: Event) => {
       return
     }
 
-    if (!/^data:image\/(png|jpeg);base64,/i.test(result)) {
-      avatarError.value = 'Profile picture must be a PNG or JPG image.'
+    if (!/^data:image\/(png|jpeg|gif);base64,/i.test(result)) {
+      avatarError.value = 'Profile picture must be a PNG, JPG, or GIF image.'
       avatarStatus.value = null
       target.value = ''
       return
     }
 
-    chatStore.saveLocalAvatar(result)
+    void chatStore.saveLocalAvatar(result)
     avatarPreviewUrl.value = result
     avatarStatus.value = 'Profile picture saved locally. It will sync to the server on the next connection.'
     avatarError.value = null
@@ -262,8 +333,24 @@ watch(() => chatStore.localUsername, (value) => {
   editedUsername.value = value || ''
 })
 
+watch(() => chatStore.localStatusEmoji, (value) => {
+  editedStatusEmoji.value = value || ''
+})
+
+watch(() => chatStore.localStatusText, (value) => {
+  editedStatusText.value = value || ''
+})
+
 watch(() => chatStore.currentUser?.avatar_url, (value) => {
   avatarPreviewUrl.value = value ?? chatStore.getLocalAvatar()
+})
+
+onMounted(() => {
+  document.addEventListener('pointerdown', handleDocumentPointerDown)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown)
 })
 </script>
 
@@ -342,6 +429,51 @@ watch(() => chatStore.currentUser?.avatar_url, (value) => {
               <input v-model="editedUsername" @keyup.enter="saveUsernamePreference" type="text" class="flex-1 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all font-medium" placeholder="Your local username" />
               <button @click="saveUsernamePreference" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 rounded-lg font-medium transition-colors duration-200 shadow-sm">Save</button>
             </div>
+
+            <div class="mt-5 border-t border-white/5 pt-5 space-y-4">
+              <div>
+                <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">Status Emoji</label>
+                <div class="flex gap-3">
+                  <div ref="statusEmojiPickerRef" class="relative shrink-0">
+                    <div class="flex gap-2">
+                      <button
+                        type="button"
+                        @click="toggleStatusEmojiPicker"
+                        class="w-14 h-[46px] bg-zinc-950 text-white rounded-lg border border-white/10 hover:border-indigo-500/40 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all text-xl flex items-center justify-center"
+                        :aria-expanded="statusEmojiPickerOpen"
+                        aria-haspopup="dialog"
+                        aria-label="Choose status emoji"
+                      >
+                        <span v-twemoji="editedStatusEmoji || '😀'" class="inline-flex items-center justify-center"></span>
+                      </button>
+                      <input v-model="editedStatusEmoji" @keyup.enter="saveStatusPreference" type="hidden" maxlength="16" class="w-24 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all text-center text-lg" placeholder="😀" />
+                    </div>
+
+                    <div v-if="statusEmojiPickerOpen" class="absolute left-0 top-full mt-2 w-[22rem] overflow-hidden rounded-xl border border-white/10 bg-zinc-900 shadow-2xl z-20">
+                      <div class="flex items-center justify-between mb-3">
+                        <span class="px-3 pt-3 text-xs font-bold uppercase tracking-widest text-zinc-400">Pick an emoji</span>
+                        <button
+                          type="button"
+                          @click="clearStatusEmoji"
+                          class="mr-3 mt-3 text-xs font-medium text-zinc-400 hover:text-white transition-colors"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                      <div class="px-3 pb-3">
+                        <p class="mb-3 text-xs text-zinc-500">Browse the full emoji set by category or keep typing manually in the input.</p>
+                        <div class="emoji-picker-panel">
+                          <EmojiPicker :options="sharedEmojiPickerOptions" @select="handleStatusEmojiSelection" />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <input v-model="editedStatusText" @keyup.enter="saveStatusPreference" type="text" maxlength="120" class="flex-1 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all font-medium" placeholder="Set a short status message" />
+                  <button @click="saveStatusPreference" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 rounded-lg font-medium transition-colors duration-200 shadow-sm">Save</button>
+                </div>
+                <p class="text-xs text-zinc-500 mt-2">Use the picker for quick selection or type manually. Saved locally and synced on the next connection, matching the existing profile preference flow.</p>
+              </div>
+            </div>
           </div>
 
           <div class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm">
@@ -360,7 +492,7 @@ watch(() => chatStore.currentUser?.avatar_url, (value) => {
           <div class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm space-y-4">
             <div>
               <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">Profile Picture</label>
-              <p class="text-sm text-zinc-500">PNG and JPG images up to 2MB are synced to the server when you connect.</p>
+              <p class="text-sm text-zinc-500">PNG, JPG, and GIF images up to 10MB are synced to the server when you connect.</p>
             </div>
 
             <div class="flex items-center gap-4">
@@ -376,7 +508,7 @@ watch(() => chatStore.currentUser?.avatar_url, (value) => {
                 <button @click="clearAvatar" :disabled="!avatarPreviewUrl" class="bg-zinc-800 hover:bg-zinc-700 text-white px-5 py-2.5 rounded-lg font-medium transition-colors duration-200 border border-white/10 disabled:opacity-50 disabled:cursor-not-allowed">
                   Remove
                 </button>
-                <input ref="avatarInput" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" class="hidden" @change="handleAvatarSelected" />
+                <input ref="avatarInput" type="file" accept="image/png,image/jpeg,image/gif,.png,.jpg,.jpeg,.gif" class="hidden" @change="handleAvatarSelected" />
               </div>
             </div>
 

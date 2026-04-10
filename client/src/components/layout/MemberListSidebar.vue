@@ -66,6 +66,17 @@ const getPresenceStatusColorClass = (status: PresenceStatus) => {
 
 const getUserPresenceStatus = (user: User | null | undefined) => chatStore.getUserPresenceStatus(user)
 
+const getUserStatusLine = (user: User) => {
+  const emoji = user.status_emoji?.trim() || ''
+  const text = user.status_text?.trim() || ''
+
+  if (emoji && text) {
+    return `${emoji} ${text}`
+  }
+
+  return emoji || text || ''
+}
+
 const getRoleHeading = (user: User) => {
   const label = getDisplayRoleName(user)
   return label.endsWith('s') ? label : `${label}s`
@@ -256,7 +267,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <aside v-if="chatStore.isConnected && chatStore.activeChannelId" class="w-60 bg-zinc-950 flex flex-col shrink-0 border-l border-white/5">
+  <aside v-if="chatStore.isConnected && chatStore.activeChannelId" class="w-70 bg-zinc-950 flex flex-col shrink-0 border-l border-white/5">
     <div class="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar">
       <div v-for="(members, role) in groupedMembers.onlineByRole" :key="role">
         <h3 class="text-xs font-bold uppercase tracking-widest mb-3 px-2" :style="{ color: members[0] ? getDisplayRoleColor(members[0]) || '#71717a' : '#71717a' }">
@@ -279,6 +290,7 @@ onUnmounted(() => {
             </AppAvatar>
             <div class="flex-1 min-w-0">
               <div class="text-[13px] font-semibold truncate transition-colors group-hover:text-white" :style="{ color: getDisplayRoleColor(user) || '#d4d4d8' }">{{ user.username }}</div>
+              <div v-if="getUserStatusLine(user)" v-twemoji="getUserStatusLine(user)" class="text-[11px] text-zinc-500 truncate mt-0.5 transition-colors group-hover:text-zinc-400"></div>
             </div>
           </div>
         </div>
@@ -305,6 +317,7 @@ onUnmounted(() => {
             </AppAvatar>
             <div class="flex-1 min-w-0">
               <div class="text-[13px] font-medium truncate transition-colors group-hover:text-zinc-300" :style="{ color: getDisplayRoleColor(user) ? `${getDisplayRoleColor(user)}b3` : '#71717a' }">{{ user.username }}</div>
+              <div v-if="getUserStatusLine(user)" v-twemoji="getUserStatusLine(user)" class="text-[11px] text-zinc-600 truncate mt-0.5 transition-colors group-hover:text-zinc-500"></div>
             </div>
           </div>
         </div>

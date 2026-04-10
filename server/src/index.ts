@@ -20,6 +20,9 @@ const PORT = process.env.PORT ? ~~process.env.PORT : 1337;
 const HOST = process.env.LISTEN_IP || '0.0.0.0';
 const serverIconsRootDir = path.resolve(dataDir, 'server-icons');
 const filesRootDir = path.resolve(dataDir, 'files');
+const emojiAssetsRootDir = path.resolve(process.cwd(), 'client', 'public', 'svg');
+const DEFAULT_FILE_CACHE_CONTROL = 'public, max-age=300';
+const EMOJI_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 
 const getIconContentType = (filePath: string) => {
     const ext = path.extname(filePath).toLowerCase();
@@ -102,12 +105,23 @@ const handleStreamingResponseError = (res: http.ServerResponse, error: unknown, 
 
 const MEDIA_RANGE_HEADER = 'bytes';
 
-const buildBaseFileHeaders = (contentType: string, contentLength: number) => ({
+const buildBaseFileHeaders = (contentType: string, contentLength: number, cacheControl = DEFAULT_FILE_CACHE_CONTROL) => ({
     'Content-Type': contentType,
     'Content-Length': contentLength,
     'Accept-Ranges': MEDIA_RANGE_HEADER,
-    'Cache-Control': 'public, max-age=300'
+    'Cache-Control': cacheControl
 });
+
+const getCacheControlForPath = (filePath: string) => {
+    const normalizedRoot = path.resolve(emojiAssetsRootDir);
+    const normalizedFilePath = path.resolve(filePath);
+    const relativePath = path.relative(normalizedRoot, normalizedFilePath);
+    if (!relativePath.startsWith('..') && !path.isAbsolute(relativePath) && path.extname(normalizedFilePath).toLowerCase() === '.svg') {
+        return EMOJI_CACHE_CONTROL;
+    }
+
+    return DEFAULT_FILE_CACHE_CONTROL;
+};
 
 const parseSingleRangeHeader = (rangeHeader: string | undefined, size: number) => {
     if (!rangeHeader) {
@@ -178,9 +192,10 @@ const streamLocalFile = async (req: http.IncomingMessage, res: http.ServerRespon
     const stats = await fs.promises.stat(filePath);
     const parsedRange = parseSingleRangeHeader(req.headers.range, stats.size);
     const contentType = getFileContentType(filePath, fallbackContentType);
+    const cacheControl = getCacheControlForPath(filePath);
 
     if (parsedRange && 'malformed' in parsedRange) {
-        res.writeHead(200, buildBaseFileHeaders(contentType, stats.size));
+        res.writeHead(200, buildBaseFileHeaders(contentType, stats.size, cacheControl));
         await pipeline(fs.createReadStream(filePath), res);
         return;
     }
@@ -191,13 +206,13 @@ const streamLocalFile = async (req: http.IncomingMessage, res: http.ServerRespon
     }
 
     if (!parsedRange) {
-        res.writeHead(200, buildBaseFileHeaders(contentType, stats.size));
+        res.writeHead(200, buildBaseFileHeaders(contentType, stats.size, cacheControl));
         await pipeline(fs.createReadStream(filePath), res);
         return;
     }
 
     res.writeHead(206, {
-        ...buildBaseFileHeaders(contentType, parsedRange.length),
+        ...buildBaseFileHeaders(contentType, parsedRange.length, cacheControl),
         'Content-Range': `bytes ${parsedRange.start}-${parsedRange.end}/${stats.size}`
     });
     await pipeline(fs.createReadStream(filePath, { start: parsedRange.start, end: parsedRange.end }), res);
@@ -386,13 +401,43 @@ async function startServer() {
             }
         }
 
+        if (req.method === 'GET' && requestUrl.pathname.startsWith('/svg/')) {
+            try {
+                const relativePath = decodeURIComponent(requestUrl.pathname.slice('/svg/'.length));
+                const normalizedSegments = relativePath.split('/').filter(Boolean);
+                if (normalizedSegments.length !== 1) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const fileName = normalizedSegments[0] || '';
+                if (!/^[0-9a-f-]+\.svg$/i.test(fileName)) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const emojiFilePath = path.resolve(emojiAssetsRootDir, fileName);
+                const relativeEmojiPath = path.relative(emojiAssetsRootDir, emojiFilePath);
+                if (relativeEmojiPath.startsWith('..') || path.isAbsolute(relativeEmojiPath) || !fs.existsSync(emojiFilePath)) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                await streamLocalFile(req, res, emojiFilePath, 'image/svg+xml');
+                return;
+            } catch (error) {
+                handleStreamingResponseError(res, error, 'Failed to serve emoji asset:');
+                return;
+            }
+        }
+
         // Basic HTTP handler
         res.writeHead(200, {'Content-Type': 'text/plain'});
         res.end('RogueCord Server Running\n');
     });
 
     // Set up WebSocket server attached to the HTTP server
-    const wss = new WebSocketServer({server, maxPayload: 16 * 1024 * 1024});
+    const wss = new WebSocketServer({server, maxPayload: 18 * 1024 * 1024});
 
     const interval = setInterval(() => {
         for (const client of connectionManager.getClients()) {

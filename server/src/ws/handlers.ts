@@ -111,7 +111,7 @@ type StorageSettingsInput = {
 const filesRootDir = path.join(dataDir, 'files');
 const MAX_FOLDER_FILE_SIZE_BYTES = MAX_UPLOAD_FILE_SIZE_BYTES;
 const MAX_SERVER_ICON_SIZE_BYTES = 2 * 1024 * 1024;
-const MAX_USER_AVATAR_SIZE_BYTES = 2 * 1024 * 1024;
+const MAX_USER_AVATAR_SIZE_BYTES = 10 * 1024 * 1024;
 const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
   'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx',
   'html', 'htm', 'php', 'phtml',
@@ -186,17 +186,17 @@ const buildServerIconStorageName = (extension: string) => {
   return `icon.${safeExtension}`;
 };
 
-const parseUserAvatarDataUrl = (value: unknown): { dataUrl: string; mimeType: 'image/png' | 'image/jpeg' } | null => {
+const parseUserAvatarDataUrl = (value: unknown): { dataUrl: string; mimeType: 'image/png' | 'image/jpeg' | 'image/gif' } | null => {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
-  const match = trimmed.match(/^data:(image\/(png|jpeg|jpg));base64,([a-z0-9+/=\r\n]+)$/i);
+  const match = trimmed.match(/^data:(image\/(png|jpeg|jpg|gif));base64,([a-z0-9+/=\r\n]+)$/i);
   if (!match) return null;
 
-  const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : (match[1].toLowerCase() as 'image/png' | 'image/jpeg');
+  const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : (match[1].toLowerCase() as 'image/png' | 'image/jpeg' | 'image/gif');
   const buffer = Buffer.from(match[3] || '', 'base64');
   if (!buffer.length) return null;
   if (buffer.length > MAX_USER_AVATAR_SIZE_BYTES) {
-    throw new Error('Profile picture exceeds 2MB size limit.');
+    throw new Error('Profile picture exceeds 10MB size limit.');
   }
 
   return {
@@ -242,6 +242,20 @@ const sanitizeUsernameForProfile = (value: unknown) => {
   const normalized = value.trim().replace(/\s+/g, ' ');
   if (!normalized) return null;
   return normalized.slice(0, 64);
+};
+
+const sanitizeStatusEmojiForProfile = (value: unknown) => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  return normalized.slice(0, 32);
+};
+
+const sanitizeStatusTextForProfile = (value: unknown) => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  if (!normalized) return null;
+  return normalized.slice(0, 128);
 };
 
 const buildS3ServerIconPrefix = (prefix: string | null | undefined, serverId: string) => {
@@ -680,6 +694,49 @@ const handleSetPresence = async (client: ClientConnection, payload: { status?: s
 
   await broadcastPresenceUpdate(client.userId);
   await broadcastSerializedUserUpdate(responsePayload.user);
+};
+
+const handleSetStatusProfile = async (
+  client: ClientConnection,
+  payload: { statusEmoji?: string | null; statusText?: string | null }
+) => {
+  if (!client.userId) return;
+
+  const nextStatusEmoji = sanitizeStatusEmojiForProfile(payload?.statusEmoji);
+  const nextStatusText = sanitizeStatusTextForProfile(payload?.statusText);
+
+  await updateUserProfile({
+    id: client.userId,
+    status_emoji: nextStatusEmoji,
+    status_text: nextStatusText
+  });
+
+  const responsePayload = await buildPresenceUpdatePayload(client.userId, client.userId);
+  if (!responsePayload) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'User not found' } }));
+    return;
+  }
+
+  client.ws.send(JSON.stringify({
+    type: 'status_profile_updated',
+    payload: responsePayload
+  }));
+
+  for (const connection of connectionManager.getClients()) {
+    if (!connection.userId || connection.userId === client.userId) {
+      continue;
+    }
+
+    const viewerPayload = await buildPresenceUpdatePayload(client.userId, connection.userId);
+    if (!viewerPayload) {
+      continue;
+    }
+
+    connection.ws.send(JSON.stringify({
+      type: 'status_profile_updated',
+      payload: viewerPayload
+    }));
+  }
 };
 
 const hasResolvedRole = async (userId: string, roleKeys: string[]) => {
@@ -1614,6 +1671,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'folder_delete_file':
         await handleFolderDeleteFile(client, payload);
         break;
+      case 'set_status_profile':
+        await handleSetStatusProfile(client, payload);
+        break;
       case 'join_voice_channel':
         await handleJoinVoiceChannel(client, payload);
         break;
@@ -1655,6 +1715,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'set_presence':
         await handleSetPresence(client, payload);
+        break;
+      case 'set_status_profile':
+        await handleSetStatusProfile(client, payload);
         break;
       case 'assign_member_roles':
         await handleAssignMemberRoles(client, payload);
@@ -1698,11 +1761,11 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
   }
 };
 
-const handleAuthRequest = async (client: ClientConnection, payload: { username: string, publicKey: string, avatarUrl?: string | null }) => {
+const handleAuthRequest = async (client: ClientConnection, payload: { username: string, publicKey: string, avatarUrl?: string | null, statusEmoji?: string | null, statusText?: string | null }) => {
   const { username, publicKey } = payload;
   if (!username || !publicKey) return;
 
-  let normalizedAvatar: { dataUrl: string; mimeType: 'image/png' | 'image/jpeg' } | null = null;
+  let normalizedAvatar: { dataUrl: string; mimeType: 'image/png' | 'image/jpeg' | 'image/gif' } | null = null;
   try {
     normalizedAvatar = payload.avatarUrl == null || payload.avatarUrl === ''
       ? null
@@ -1718,7 +1781,7 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
   if (payload.avatarUrl && !normalizedAvatar) {
     client.ws.send(JSON.stringify({
       type: 'error',
-      payload: { message: 'Profile picture must be a PNG or JPG image data URL.' }
+      payload: { message: 'Profile picture must be a PNG, JPG, or GIF image data URL.' }
     }));
     return;
   }
@@ -1744,8 +1807,17 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
 
   let user = await getUserByPublicKey(publicKey);
   let isNewUser = false;
+  const nextStatusEmoji = payload.statusEmoji === undefined ? undefined : sanitizeStatusEmojiForProfile(payload.statusEmoji);
+  const nextStatusText = payload.statusText === undefined ? undefined : sanitizeStatusTextForProfile(payload.statusText);
   if (!user) {
-    user = await createUser(username, publicKey, normalizedAvatar?.dataUrl ?? null, normalizedAvatar?.mimeType ?? null);
+    user = await createUser(
+      username,
+      publicKey,
+      normalizedAvatar?.dataUrl ?? null,
+      normalizedAvatar?.mimeType ?? null,
+      nextStatusEmoji ?? null,
+      nextStatusText ?? null
+    );
     isNewUser = true;
   } else {
     const nextUsername = sanitizeUsernameForProfile(username);
@@ -1756,12 +1828,16 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
       (user.avatar_url || null) !== nextAvatarUrl ||
       (user.avatar_mime_type || null) !== nextAvatarMimeType
     );
+    const shouldUpdateStatusEmoji = payload.statusEmoji !== undefined && (user.status_emoji || null) !== (nextStatusEmoji ?? null);
+    const shouldUpdateStatusText = payload.statusText !== undefined && (user.status_text || null) !== (nextStatusText ?? null);
 
-    if (shouldUpdateUsername || shouldUpdateAvatar) {
+    if (shouldUpdateUsername || shouldUpdateAvatar || shouldUpdateStatusEmoji || shouldUpdateStatusText) {
       await updateUserProfile({
         id: user.id,
         ...(shouldUpdateUsername ? { username: nextUsername! } : {}),
-        ...(shouldUpdateAvatar ? { avatar_url: nextAvatarUrl, avatar_mime_type: nextAvatarMimeType } : {})
+        ...(shouldUpdateAvatar ? { avatar_url: nextAvatarUrl, avatar_mime_type: nextAvatarMimeType } : {}),
+        ...(shouldUpdateStatusEmoji ? { status_emoji: nextStatusEmoji ?? null } : {}),
+        ...(shouldUpdateStatusText ? { status_text: nextStatusText ?? null } : {})
       });
       user = (await getUserById(user.id)) || user;
     }
