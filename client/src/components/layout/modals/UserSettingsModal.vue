@@ -1,9 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import FlagEmoji from '../../common/FlagEmoji.vue'
 import { useChatStore } from '../../../stores/chat'
 import { useWebRtcStore } from '../../../stores/webrtc'
-import { isFlagEmoji } from '../../../utils/flagEmoji'
 
 type SettingsSection = 'general' | 'audio' | 'connections' | 'identity' | 'server'
 
@@ -33,8 +31,6 @@ const avatarInput = ref<HTMLInputElement | null>(null)
 const avatarPreviewUrl = ref<string | null>(chatStore.getLocalAvatar())
 const avatarStatus = ref<string | null>(null)
 const avatarError = ref<string | null>(null)
-
-const statusEmojiPreviewIsFlag = computed(() => isFlagEmoji(editedStatusEmoji.value))
 
 const currentIdentityFingerprint = computed(() => {
   const identity = chatStore.getStoredIdentityExport()
@@ -366,10 +362,7 @@ watch(() => chatStore.currentUser?.avatar_url, (value) => {
               <div>
                 <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">Status Emoji</label>
                 <div class="flex gap-3">
-                  <div class="relative w-24">
-                    <input v-model="editedStatusEmoji" @keyup.enter="saveStatusPreference" type="text" maxlength="16" class="w-full bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all text-center text-lg pr-8" placeholder="😀" />
-                    <FlagEmoji v-if="statusEmojiPreviewIsFlag" :emoji="editedStatusEmoji" :alt="editedStatusEmoji || 'Flag emoji preview'" class="pointer-events-none absolute right-2 top-1/2 h-4 w-[1.25rem] -translate-y-1/2 rounded-[2px]" />
-                  </div>
+                  <input v-model="editedStatusEmoji" @keyup.enter="saveStatusPreference" type="text" maxlength="16" class="w-24 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all text-center text-lg" placeholder="😀" />
                   <input v-model="editedStatusText" @keyup.enter="saveStatusPreference" type="text" maxlength="120" class="flex-1 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all font-medium" placeholder="Set a short status message" />
                   <button @click="saveStatusPreference" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 rounded-lg font-medium transition-colors duration-200 shadow-sm">Save</button>
                 </div>

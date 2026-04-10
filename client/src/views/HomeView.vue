@@ -2,12 +2,10 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
 import { Archive, Code2, File, FileText, Film, Image, Music2, Reply, Trash2, X } from 'lucide-vue-next'
 import AppAvatar from '../components/common/AppAvatar.vue'
-import FlagEmoji from '../components/common/FlagEmoji.vue'
 import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, type MessageAttachment, type MessageReaction, type MessageReplyReference } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
 import { openExternalUrl } from '../utils/openExternalUrl'
-import { isFlagEmoji } from '../utils/flagEmoji'
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
@@ -317,8 +315,6 @@ const toggleReactionFromContextMenu = (emoji: string) => {
   toggleMessageReaction(message, emoji)
   closeMessageContextMenu()
 }
-
-const reactionEmojiIsFlag = (emoji: string) => isFlagEmoji(emoji)
 
 const getMessageReactions = (message: Message): MessageReaction[] => {
   return Array.isArray(message.reactions) ? message.reactions : []
@@ -1340,8 +1336,7 @@ watch(
                       : 'border-white/10 bg-zinc-900/70 text-zinc-300 hover:bg-zinc-800/80'"
                     @click="toggleMessageReaction(entry.message, reaction.emoji)"
                   >
-                  <FlagEmoji v-if="reactionEmojiIsFlag(reaction.emoji)" :emoji="reaction.emoji" :alt="reaction.emoji" class="h-[1em] w-[1.333em] rounded-[2px] shrink-0" />
-                  <span v-else>{{ reaction.emoji }}</span>
+                  <span>{{ reaction.emoji }}</span>
                   <span>{{ reaction.count }}</span>
                 </button>
               </div>
