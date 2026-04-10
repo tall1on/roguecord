@@ -11,6 +11,28 @@ type ServerIconCacheRecord = Record<string, CachedServerIconEntry>;
 
 const isBrowser = typeof window !== 'undefined';
 
+const normalizeCacheableServerIconUrl = (sourceUrl: string) => {
+  if (!isBrowser) {
+    return sourceUrl;
+  }
+
+  try {
+    const parsedUrl = new URL(sourceUrl, window.location.origin);
+    if (parsedUrl.origin === window.location.origin) {
+      return parsedUrl.toString();
+    }
+
+    const serverIconPathMatch = parsedUrl.pathname.match(/^\/server-icons\/.+/i);
+    if (serverIconPathMatch) {
+      return new URL(`${serverIconPathMatch[0]}${parsedUrl.search}`, window.location.origin).toString();
+    }
+
+    return sourceUrl;
+  } catch {
+    return sourceUrl;
+  }
+};
+
 const readServerIconCache = (): ServerIconCacheRecord => {
   if (!isBrowser) {
     return {};
@@ -90,10 +112,12 @@ export const cacheServerIcon = async (connectionId: string | null | undefined, s
     return null;
   }
 
+  const normalizedSourceUrl = normalizeCacheableServerIconUrl(sourceUrl);
+
   try {
-    const response = await fetch(sourceUrl, {
+    const response = await fetch(normalizedSourceUrl, {
       cache: 'force-cache',
-      mode: 'cors'
+      mode: 'same-origin'
     });
 
     if (!response.ok) {
@@ -102,7 +126,7 @@ export const cacheServerIcon = async (connectionId: string | null | undefined, s
 
     const dataUrl = await fileToDataUrl(await response.blob());
     const nextEntry: CachedServerIconEntry = {
-      sourceUrl,
+      sourceUrl: normalizedSourceUrl,
       dataUrl,
       updatedAt: Date.now()
     };
