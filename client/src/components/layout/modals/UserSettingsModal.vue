@@ -61,7 +61,7 @@ const promptAvatarSelection = () => {
 }
 
 const clearAvatar = () => {
-  chatStore.saveLocalAvatar(null)
+  void chatStore.saveLocalAvatar(null)
   avatarPreviewUrl.value = null
   avatarStatus.value = 'Profile picture removed. It will be cleared on the next connection.'
   avatarError.value = null
@@ -110,7 +110,7 @@ const handleAvatarSelected = (event: Event) => {
       return
     }
 
-    chatStore.saveLocalAvatar(result)
+    void chatStore.saveLocalAvatar(result)
     avatarPreviewUrl.value = result
     avatarStatus.value = 'Profile picture saved locally. It will sync to the server on the next connection.'
     avatarError.value = null
