@@ -510,6 +510,9 @@ export interface User {
   public_key: string;
   avatar_url: string | null;
   avatar_mime_type: string | null;
+  avatar_storage_provider: 'data_dir' | 's3' | null;
+  avatar_storage_key: string | null;
+  avatar_storage_name: string | null;
   status_emoji: string | null;
   status_text: string | null;
   last_ip: string | null;
@@ -523,13 +526,16 @@ export const createUser = async (
   public_key: string,
   avatar_url: string | null = null,
   avatar_mime_type: string | null = null,
+  avatar_storage_provider: 'data_dir' | 's3' | null = null,
+  avatar_storage_key: string | null = null,
+  avatar_storage_name: string | null = null,
   status_emoji: string | null = null,
-  status_text: string | null = null
+  status_text: string | null = null,
+  id: string = crypto.randomUUID()
 ): Promise<User> => {
-  const id = crypto.randomUUID();
   await dbRun(
-    'INSERT INTO users (id, username, public_key, avatar_url, avatar_mime_type, status_emoji, status_text) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [id, username, public_key, avatar_url, avatar_mime_type, status_emoji, status_text]
+    'INSERT INTO users (id, username, public_key, avatar_url, avatar_mime_type, avatar_storage_provider, avatar_storage_key, avatar_storage_name, status_emoji, status_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [id, username, public_key, avatar_url, avatar_mime_type, avatar_storage_provider, avatar_storage_key, avatar_storage_name, status_emoji, status_text]
   );
   return (await dbGet<User>('SELECT * FROM users WHERE id = ?', [id]))!;
 };
@@ -548,6 +554,17 @@ export const getUserByPublicKey = async (publicKey: string): Promise<User | unde
 
 export const getUsers = async (): Promise<User[]> => {
   return dbAll<User>('SELECT * FROM users');
+};
+
+export const getUsersWithLegacyDataUrlAvatars = async (): Promise<User[]> => {
+  return dbAll<User>(
+    `
+      SELECT *
+      FROM users
+      WHERE LOWER(COALESCE(avatar_url, '')) LIKE 'data:%'
+      ORDER BY created_at ASC, id ASC
+    `
+  );
 };
 
 export const hasAdminUser = async (): Promise<boolean> => {
@@ -620,6 +637,9 @@ export const updateUserProfile = async (input: {
   username?: string;
   avatar_url?: string | null;
   avatar_mime_type?: string | null;
+  avatar_storage_provider?: 'data_dir' | 's3' | null;
+  avatar_storage_key?: string | null;
+  avatar_storage_name?: string | null;
   status_emoji?: string | null;
   status_text?: string | null;
 }): Promise<void> => {
@@ -639,6 +659,21 @@ export const updateUserProfile = async (input: {
   if (Object.prototype.hasOwnProperty.call(input, 'avatar_mime_type')) {
     assignments.push('avatar_mime_type = ?');
     params.push(input.avatar_mime_type ?? null);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'avatar_storage_provider')) {
+    assignments.push('avatar_storage_provider = ?');
+    params.push(input.avatar_storage_provider ?? null);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'avatar_storage_key')) {
+    assignments.push('avatar_storage_key = ?');
+    params.push(input.avatar_storage_key ?? null);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'avatar_storage_name')) {
+    assignments.push('avatar_storage_name = ?');
+    params.push(input.avatar_storage_name ?? null);
   }
 
   if (Object.prototype.hasOwnProperty.call(input, 'status_emoji')) {
@@ -1212,6 +1247,9 @@ export const getMessageReplyReferences = async (messageIds: string[]): Promise<R
         u.username AS reply_username,
         u.avatar_url AS reply_avatar_url,
         u.avatar_mime_type AS reply_avatar_mime_type,
+        u.avatar_storage_provider AS reply_avatar_storage_provider,
+        u.avatar_storage_key AS reply_avatar_storage_key,
+        u.avatar_storage_name AS reply_avatar_storage_name,
         u.public_key AS reply_public_key,
         u.last_ip AS reply_last_ip,
         u.presence_status AS reply_presence_status,
@@ -1247,6 +1285,9 @@ export const getMessageReplyReferences = async (messageIds: string[]): Promise<R
         username: row.reply_username,
         avatar_url: row.reply_avatar_url,
         avatar_mime_type: row.reply_avatar_mime_type ?? null,
+        avatar_storage_provider: row.reply_avatar_storage_provider === 's3' || row.reply_avatar_storage_provider === 'data_dir' ? row.reply_avatar_storage_provider : null,
+        avatar_storage_key: row.reply_avatar_storage_key ?? null,
+        avatar_storage_name: row.reply_avatar_storage_name ?? null,
         status_emoji: null,
         status_text: null,
         public_key: row.reply_public_key,

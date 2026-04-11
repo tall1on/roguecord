@@ -33,7 +33,7 @@ const identityStatus = ref<string | null>(null)
 const identityError = ref<string | null>(null)
 const identityImportInput = ref<HTMLInputElement | null>(null)
 const avatarInput = ref<HTMLInputElement | null>(null)
-const avatarPreviewUrl = ref<string | null>(chatStore.getLocalAvatar())
+const avatarPreviewUrl = ref<string | null>(chatStore.currentUser?.avatar_url ?? null)
 const avatarStatus = ref<string | null>(null)
 const avatarError = ref<string | null>(null)
 const statusEmojiPickerOpen = ref(false)
@@ -133,7 +133,7 @@ const promptAvatarSelection = () => {
 const clearAvatar = () => {
   void chatStore.saveLocalAvatar(null)
   avatarPreviewUrl.value = null
-  avatarStatus.value = 'Profile picture removed. It will be cleared on the next connection.'
+  avatarStatus.value = 'Profile picture will be removed when you save your profile changes.'
   avatarError.value = null
   if (avatarInput.value) {
     avatarInput.value.value = ''
@@ -182,7 +182,7 @@ const handleAvatarSelected = (event: Event) => {
 
     void chatStore.saveLocalAvatar(result)
     avatarPreviewUrl.value = result
-    avatarStatus.value = 'Profile picture saved locally. It will sync to the server on the next connection.'
+    avatarStatus.value = 'Profile picture selected. Save your profile changes to upload it to the server.'
     avatarError.value = null
     target.value = ''
   }
@@ -341,7 +341,7 @@ watch(() => chatStore.localStatusText, (value) => {
 })
 
 watch(() => chatStore.currentUser?.avatar_url, (value) => {
-  avatarPreviewUrl.value = value ?? chatStore.getLocalAvatar()
+  avatarPreviewUrl.value = chatStore.getLocalAvatar() ?? value ?? null
 })
 
 onMounted(() => {

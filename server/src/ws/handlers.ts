@@ -94,6 +94,14 @@ import {
   getPendingUpload,
   sanitizeUploadFileName
 } from '../uploads';
+import {
+  buildUserAvatarClientUrl,
+  cleanupStaleS3UserAvatars,
+  cleanupUserAvatarReference,
+  parseUserAvatarDataUrl,
+  storeUserAvatar,
+  type ParsedUserAvatarDataUrl
+} from '../storage/userAvatarStorage';
 
 type StorageSettingsProvider = 'generic_s3' | 'cloudflare_r2';
 
@@ -185,25 +193,6 @@ const buildServerIconStorageName = (extension: string) => {
     throw new Error('Invalid icon extension');
   }
   return `icon.${safeExtension}`;
-};
-
-const parseUserAvatarDataUrl = (value: unknown): { dataUrl: string; mimeType: 'image/png' | 'image/jpeg' | 'image/gif' } | null => {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  const match = trimmed.match(/^data:(image\/(png|jpeg|jpg|gif));base64,([a-z0-9+/=\r\n]+)$/i);
-  if (!match) return null;
-
-  const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : (match[1].toLowerCase() as 'image/png' | 'image/jpeg' | 'image/gif');
-  const buffer = Buffer.from(match[3] || '', 'base64');
-  if (!buffer.length) return null;
-  if (buffer.length > MAX_USER_AVATAR_SIZE_BYTES) {
-    throw new Error('Profile picture exceeds 10MB size limit.');
-  }
-
-  return {
-    dataUrl: `data:${mimeType};base64,${buffer.toString('base64')}`,
-    mimeType
-  };
 };
 
 const normalizeRoleName = (value: unknown) => {
@@ -623,9 +612,80 @@ const getActiveServerId = async () => {
 const getResolvedUser = async (userId: string) => {
   const user = await getUserById(userId);
   if (!user) return null;
+  const persistedS3Config = await getPersistedS3Config();
+  const avatar_url = await buildUserAvatarClientUrl({
+    userId: user.id,
+    avatarUrl: user.avatar_url,
+    avatarStorageProvider: user.avatar_storage_provider,
+    avatarStorageKey: user.avatar_storage_key,
+    avatarStorageName: user.avatar_storage_name,
+    avatarMimeType: user.avatar_mime_type,
+    persistedS3Config
+  });
+  const resolvedUser = { ...user, avatar_url };
   const serverId = await getActiveServerId();
-  if (!serverId) return { ...user, role_ids: [], roles: [] };
-  return hydrateUserWithServerRoles(serverId, user);
+  if (!serverId) return { ...resolvedUser, role_ids: [], roles: [] };
+  return hydrateUserWithServerRoles(serverId, resolvedUser as any);
+};
+
+const persistUserAvatar = async (input: {
+  userId: string;
+  parsedAvatar: ParsedUserAvatarDataUrl | null;
+  existingUser: {
+    avatar_url: string | null;
+    avatar_storage_provider: 'data_dir' | 's3' | null;
+    avatar_storage_key: string | null;
+    avatar_storage_name: string | null;
+  };
+}) => {
+  const runtimeStorage = await getStorageRuntimeConfig();
+  const persistedS3Config = await getPersistedS3Config();
+
+  if (!input.parsedAvatar) {
+    await cleanupUserAvatarReference({
+      userId: input.userId,
+      avatarUrl: input.existingUser.avatar_url,
+      avatarStorageProvider: input.existingUser.avatar_storage_provider,
+      avatarStorageKey: input.existingUser.avatar_storage_key,
+      avatarStorageName: input.existingUser.avatar_storage_name,
+      persistedS3Config
+    });
+    return {
+      avatar_url: null,
+      avatar_mime_type: null,
+      avatar_storage_provider: null,
+      avatar_storage_key: null,
+      avatar_storage_name: null
+    };
+  }
+
+  const stored = await storeUserAvatar({
+    userId: input.userId,
+    parsedAvatar: input.parsedAvatar,
+    storageType: runtimeStorage.storageType,
+    s3Config: runtimeStorage.s3Config
+  });
+
+  await cleanupUserAvatarReference({
+    userId: input.userId,
+    avatarUrl: input.existingUser.avatar_url,
+    avatarStorageProvider: input.existingUser.avatar_storage_provider,
+    avatarStorageKey: input.existingUser.avatar_storage_key,
+    avatarStorageName: input.existingUser.avatar_storage_name,
+    persistedS3Config
+  });
+
+  if (stored.storageProvider === 's3' && runtimeStorage.s3Config) {
+    await cleanupStaleS3UserAvatars({ userId: input.userId, s3Config: runtimeStorage.s3Config, activeKey: stored.storageKey });
+  }
+
+  return {
+    avatar_url: null,
+    avatar_mime_type: stored.mimeType,
+    avatar_storage_provider: stored.storageProvider,
+    avatar_storage_key: stored.storageKey,
+    avatar_storage_name: stored.storageName
+  };
 };
 
 type PresenceStatus = 'online' | 'idle' | 'dnd' | 'invisible';
@@ -1804,11 +1864,11 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
   const { username, publicKey } = payload;
   if (!username || !publicKey) return;
 
-  let normalizedAvatar: { dataUrl: string; mimeType: 'image/png' | 'image/jpeg' | 'image/gif' } | null = null;
+  let normalizedAvatar: ParsedUserAvatarDataUrl | null = null;
   try {
     normalizedAvatar = payload.avatarUrl == null || payload.avatarUrl === ''
       ? null
-      : parseUserAvatarDataUrl(payload.avatarUrl);
+      : parseUserAvatarDataUrl(payload.avatarUrl, MAX_USER_AVATAR_SIZE_BYTES);
   } catch (error) {
     client.ws.send(JSON.stringify({
       type: 'error',
@@ -1849,32 +1909,52 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
   const nextStatusEmoji = payload.statusEmoji === undefined ? undefined : sanitizeStatusEmojiForProfile(payload.statusEmoji);
   const nextStatusText = payload.statusText === undefined ? undefined : sanitizeStatusTextForProfile(payload.statusText);
   if (!user) {
+    const newUserId = crypto.randomUUID();
+    const avatarFields = normalizedAvatar
+      ? await persistUserAvatar({
+          userId: newUserId,
+          parsedAvatar: normalizedAvatar,
+          existingUser: { avatar_url: null, avatar_storage_provider: null, avatar_storage_key: null, avatar_storage_name: null }
+        })
+      : {
+          avatar_url: null,
+          avatar_mime_type: null,
+          avatar_storage_provider: null,
+          avatar_storage_key: null,
+          avatar_storage_name: null
+        };
     user = await createUser(
       username,
       publicKey,
-      normalizedAvatar?.dataUrl ?? null,
-      normalizedAvatar?.mimeType ?? null,
+      avatarFields.avatar_url,
+      avatarFields.avatar_mime_type,
+      avatarFields.avatar_storage_provider,
+      avatarFields.avatar_storage_key,
+      avatarFields.avatar_storage_name,
       nextStatusEmoji ?? null,
-      nextStatusText ?? null
+      nextStatusText ?? null,
+      newUserId
     );
     isNewUser = true;
   } else {
     const nextUsername = sanitizeUsernameForProfile(username);
-    const nextAvatarUrl = normalizedAvatar?.dataUrl ?? null;
-    const nextAvatarMimeType = normalizedAvatar?.mimeType ?? null;
     const shouldUpdateUsername = Boolean(nextUsername && nextUsername !== user.username);
-    const shouldUpdateAvatar = payload.avatarUrl !== undefined && (
-      (user.avatar_url || null) !== nextAvatarUrl ||
-      (user.avatar_mime_type || null) !== nextAvatarMimeType
-    );
+    const shouldUpdateAvatar = payload.avatarUrl !== undefined;
     const shouldUpdateStatusEmoji = payload.statusEmoji !== undefined && (user.status_emoji || null) !== (nextStatusEmoji ?? null);
     const shouldUpdateStatusText = payload.statusText !== undefined && (user.status_text || null) !== (nextStatusText ?? null);
 
     if (shouldUpdateUsername || shouldUpdateAvatar || shouldUpdateStatusEmoji || shouldUpdateStatusText) {
+      const avatarFields = shouldUpdateAvatar
+        ? await persistUserAvatar({
+            userId: user.id,
+            parsedAvatar: normalizedAvatar ?? null,
+            existingUser: user
+          })
+        : {};
       await updateUserProfile({
         id: user.id,
         ...(shouldUpdateUsername ? { username: nextUsername! } : {}),
-        ...(shouldUpdateAvatar ? { avatar_url: nextAvatarUrl, avatar_mime_type: nextAvatarMimeType } : {}),
+        ...(shouldUpdateAvatar ? avatarFields : {}),
         ...(shouldUpdateStatusEmoji ? { status_emoji: nextStatusEmoji ?? null } : {}),
         ...(shouldUpdateStatusText ? { status_text: nextStatusText ?? null } : {})
       });
@@ -3333,7 +3413,7 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
     type: 'user_joined_voice',
     payload: { 
       channel_id, 
-      user: { id: user.id, username: user.username, avatar_url: user.avatar_url, isMuted: peer.isMuted, isDeafened: peer.isDeafened } 
+      user: { id: user.id, username: user.username, avatar_url: (await getResolvedUser(user.id))?.avatar_url || user.avatar_url, isMuted: peer.isMuted, isDeafened: peer.isDeafened } 
     }
   });
 
@@ -3341,7 +3421,7 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
   for (const [userId, p] of room.peers.entries()) {
     const u = await getUserById(userId);
     if (u) {
-      users.push({ id: u.id, username: u.username, avatar_url: u.avatar_url, isMuted: p.isMuted, isDeafened: p.isDeafened });
+      users.push({ id: u.id, username: u.username, avatar_url: (await getResolvedUser(u.id))?.avatar_url || u.avatar_url, isMuted: p.isMuted, isDeafened: p.isDeafened });
     }
   }
 
