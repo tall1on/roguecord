@@ -37,9 +37,9 @@ const sharedEmojiPickerOptions = {
   locals: 'en',
   native: true,
   hasGroupIcons: true,
-  hasSearch: true,
-  hasGroupNames: true,
-  stickyGroupNames: true,
+  hasSearch: false,
+  hasGroupNames: false,
+  stickyGroupNames: false,
   hasSkinTones: true,
   recentRecords: true
 } as const
@@ -680,7 +680,51 @@ const getMessageEmbeds = (message: Message): MessageEmbed[] => {
 
 const SUPPRESSED_LINK_EMBED_TYPES = new Set<MessageEmbed['type']>(['spotify', 'youtube'])
 
-const EMBED_TYPES_WITHOUT_FALLBACK_LINK = new Set<MessageEmbed['type']>(['spotify', 'youtube', 'twitch'])
+const EMBED_TYPES_WITHOUT_FALLBACK_LINK = new Set<MessageEmbed['type']>(['spotify', 'youtube', 'twitch', 'x'])
+
+const getXPostMeta = (embed: MessageEmbed) => {
+  if (embed.type !== 'x') {
+    return null
+  }
+
+  try {
+    const parsed = new URL(embed.url)
+    const pathParts = parsed.pathname.split('/').filter(Boolean)
+    if (pathParts.length < 3 || pathParts[1]?.toLowerCase() !== 'status') {
+      return null
+    }
+
+    const username = pathParts[0] || ''
+    const postId = pathParts[2] || ''
+    if (!username || !postId) {
+      return null
+    }
+
+    return {
+      username: embed.authorUsername || username,
+      postId,
+      authorName: embed.authorName || null
+    }
+  } catch {
+    return null
+  }
+}
+
+const getXEmbedMediaSrc = (embed: MessageEmbed) => {
+  if (embed.type !== 'x') {
+    return null
+  }
+
+  if (embed.mediaType === 'image' && embed.mediaUrl) {
+    return embed.mediaUrl
+  }
+
+  if (embed.mediaThumbnailUrl) {
+    return embed.mediaThumbnailUrl
+  }
+
+  return embed.thumbnailUrl || null
+}
 
 const getSuppressedEmbedUrls = (message: Message): Set<string> => {
   const suppressedUrls = new Set<string>()
@@ -763,9 +807,15 @@ const getTrustedEmbedIframeSrc = (embed: MessageEmbed): string | null => {
 }
 
 const getEmbedContainerClass = (embed: MessageEmbed) => {
-  return embed.type === 'spotify'
-    ? 'max-w-[420px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]'
-    : 'max-w-[560px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]'
+  if (embed.type === 'spotify') {
+    return 'max-w-[420px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]'
+  }
+
+  if (embed.type === 'x') {
+    return 'max-w-[560px] overflow-hidden rounded-xl border border-[#3f4147] bg-[#111214]'
+  }
+
+  return 'max-w-[560px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]'
 }
 
 const getEmbedIframeClass = (embed: MessageEmbed) => {
@@ -1456,6 +1506,51 @@ watch(
                     allowfullscreen
                     sandbox="allow-same-origin allow-scripts allow-popups allow-presentation"
                   />
+
+                  <a
+                    v-else-if="embed.type === 'x'"
+                    :href="embed.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="block p-4 hover:bg-[#17181c] transition-colors"
+                  >
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0 flex-1">
+                        <p class="text-xs uppercase tracking-wide text-sky-400">{{ embed.provider }}</p>
+                        <p class="mt-1 text-sm font-semibold text-white truncate">{{ getXPostMeta(embed)?.authorName || embed.title }}</p>
+                        <p v-if="getXPostMeta(embed)" class="mt-1 text-xs text-zinc-400 break-all">
+                          @{{ getXPostMeta(embed)?.username }} · Post {{ getXPostMeta(embed)?.postId }}
+                        </p>
+                        <p v-if="embed.description" class="mt-3 text-sm leading-6 text-zinc-200 whitespace-pre-wrap break-words">{{ embed.description }}</p>
+                        <img
+                          v-if="getXEmbedMediaSrc(embed) && embed.mediaType === 'image'"
+                          :src="getXEmbedMediaSrc(embed) || ''"
+                          alt="X post media"
+                          class="mt-3 max-h-[420px] w-full rounded-xl object-cover"
+                          loading="lazy"
+                        />
+                        <div
+                          v-else-if="getXEmbedMediaSrc(embed) && embed.mediaType === 'video'"
+                          class="mt-3 overflow-hidden rounded-xl border border-[#3f4147] bg-black"
+                        >
+                          <img
+                            :src="getXEmbedMediaSrc(embed) || ''"
+                            alt="X post video preview"
+                            class="max-h-[420px] w-full object-cover"
+                            loading="lazy"
+                          />
+                          <div class="flex items-center justify-between gap-3 border-t border-[#3f4147] px-3 py-2 text-xs text-zinc-300">
+                            <span>Video preview</span>
+                            <span class="rounded-full border border-[#4a4d55] px-2 py-1 uppercase tracking-wide">Open on X</span>
+                          </div>
+                        </div>
+                        <p class="mt-2 text-xs text-blue-300 truncate">{{ embed.displayUrl }}</p>
+                      </div>
+                      <div class="shrink-0 rounded-full border border-[#3f4147] px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-zinc-300">
+                        Open
+                      </div>
+                    </div>
+                  </a>
 
                   <a
                     v-if="shouldShowEmbedFallbackLink(embed)"

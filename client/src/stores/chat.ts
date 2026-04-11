@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { useWebRtcStore } from './webrtc';
-import { readStoredAvatar as readStoredAvatarFromIndexedDb, removeLegacyStoredAvatar, saveStoredAvatar } from '../utils/avatarStorage';
+import { readStoredAvatar, removeLegacyStoredAvatar, saveStoredAvatar } from '../utils/avatarStorage';
 import { cacheServerIcon, getCachedServerIcon, removeCachedServerIcon } from '../utils/serverIconCache';
 
 const NEW_NOTIFICATION_SOUND_DEBOUNCE_MS = 1000;
@@ -62,7 +62,7 @@ export interface FolderChannelFile {
   updated_at: string;
 }
 
-export type MessageEmbedType = 'youtube' | 'twitch' | 'spotify' | 'link';
+export type MessageEmbedType = 'youtube' | 'twitch' | 'spotify' | 'x' | 'link';
 
 export interface MessageEmbed {
   type: MessageEmbedType;
@@ -73,6 +73,12 @@ export interface MessageEmbed {
   description: string | null;
   thumbnailUrl: string | null;
   embedUrl: string | null;
+  authorName?: string | null;
+  authorUsername?: string | null;
+  publishedAt?: string | null;
+  mediaType?: 'image' | 'video' | null;
+  mediaUrl?: string | null;
+  mediaThumbnailUrl?: string | null;
 }
 
 export interface MessageReaction {
@@ -243,8 +249,12 @@ const arrayBufferToHex = (buffer: ArrayBuffer) => {
 };
 
 const readLegacyStoredAvatar = () => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
   try {
-    return localStorage.getItem('avatarUrl');
+    return window.localStorage.getItem('avatarUrl');
   } catch {
     return null;
   }
@@ -416,6 +426,64 @@ export const useChatStore = defineStore('chat', () => {
   
   const activeChannelId = ref<string | null>(null);
   const activeMainPanel = ref<ActiveMainPanel>({ type: 'text', channelId: null });
+
+  const getLastActiveChannelStorageKey = (serverAddress: string) => `lastActiveChannel:${serverAddress}`;
+
+  const getSavedActiveChannelId = (serverAddress: string | null | undefined): string | null => {
+    if (!serverAddress) {
+      return null;
+    }
+
+    const storedChannelId = localStorage.getItem(getLastActiveChannelStorageKey(serverAddress));
+    return storedChannelId && storedChannelId.trim() ? storedChannelId : null;
+  };
+
+  const getActiveConnectionAddress = (): string | null => {
+    if (!activeConnectionId.value) {
+      return null;
+    }
+
+    return savedConnections.value.find((connection) => connection.id === activeConnectionId.value)?.address || null;
+  };
+
+  const persistActiveChannelId = (channelId: string | null, serverAddress: string | null = getActiveConnectionAddress()) => {
+    if (!serverAddress) {
+      return;
+    }
+
+    const storageKey = getLastActiveChannelStorageKey(serverAddress);
+
+    if (channelId && channelId.trim()) {
+      localStorage.setItem(storageKey, channelId);
+      return;
+    }
+
+    localStorage.removeItem(storageKey);
+  };
+
+  const getValidSavedActiveTextChannel = (availableChannels: Channel[], serverAddress: string | null = getActiveConnectionAddress()): Channel | null => {
+    const savedChannelId = getSavedActiveChannelId(serverAddress);
+    if (!savedChannelId) {
+      return null;
+    }
+
+    return availableChannels.find((channel: Channel) => channel.id === savedChannelId && (channel.type === 'text' || channel.type === 'rss')) || null;
+  };
+
+  const activateChannel = (channel: Channel | null) => {
+    if (channel && (channel.type === 'text' || channel.type === 'rss')) {
+      activeChannelId.value = channel.id;
+      activeMainPanel.value = { type: 'text', channelId: channel.id };
+      persistActiveChannelId(channel.id);
+      clearChannelUnread(channel.id);
+      getMessages(channel.id);
+      return;
+    }
+
+    activeChannelId.value = null;
+    activeMainPanel.value = { type: 'text', channelId: null };
+    persistActiveChannelId(null);
+  };
   
   let pingInterval: number | null = null;
   let pongTimeout: number | null = null;
@@ -827,19 +895,19 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const initializeStoredAvatar = async () => {
-    const indexedDbAvatar = await readStoredAvatarFromIndexedDb();
-    if (indexedDbAvatar !== null) {
-      localAvatar.value = indexedDbAvatar;
+    const storedAvatar = await readStoredAvatar();
+    if (storedAvatar !== null) {
+      localAvatar.value = storedAvatar;
       removeLegacyStoredAvatar();
-      return indexedDbAvatar;
+      return storedAvatar;
     }
 
-    const legacyAvatar = readLegacyStoredAvatar();
-    if (legacyAvatar !== null) {
-      localAvatar.value = legacyAvatar;
-      await saveStoredAvatar(legacyAvatar);
+    const legacyStoredAvatar = readLegacyStoredAvatar();
+    if (legacyStoredAvatar !== null) {
+      localAvatar.value = legacyStoredAvatar;
+      await saveStoredAvatar(legacyStoredAvatar);
       removeLegacyStoredAvatar();
-      return legacyAvatar;
+      return legacyStoredAvatar;
     }
 
     localAvatar.value = null;
@@ -851,16 +919,19 @@ export const useChatStore = defineStore('chat', () => {
     localAvatar.value = avatarUrl;
     await saveStoredAvatar(avatarUrl);
     removeLegacyStoredAvatar();
-
-    if (currentUser.value) {
-      currentUser.value = {
-        ...currentUser.value,
-        avatar_url: avatarUrl
-      };
-    }
   };
 
   const getLocalAvatar = () => localAvatar.value;
+
+  const getAuthAvatarDataUrl = () => {
+    if (typeof localAvatar.value !== 'string') {
+      return null;
+    }
+
+    return /^data:image\/(png|jpeg|gif);base64,/i.test(localAvatar.value)
+      ? localAvatar.value
+      : null;
+  };
 
   const DEFAULT_SERVER_PORT = '1337';
   const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
@@ -1700,9 +1771,7 @@ export const useChatStore = defineStore('chat', () => {
         currentUser.value = normalizeUser(payload.user);
         pendingPresenceStatus.value = normalizePresenceStatus(currentUser.value.status);
         currentUserRole.value = currentUser.value.role || 'user';
-        if (payload.user && payload.user.avatar_url !== localAvatar.value) {
-          void saveLocalAvatar(payload.user.avatar_url || null);
-        }
+        removeLegacyStoredAvatar();
         saveLocalStatusEmoji(currentUser.value.status_emoji || null);
         saveLocalStatusText(currentUser.value.status_text || null);
         if (payload.server) {
@@ -1931,11 +2000,17 @@ export const useChatStore = defineStore('chat', () => {
         pruneUnreadChannels(payload.channels || []);
         
         if (!activeChannelId.value) {
-          setFallbackActiveTextChannel(payload.channels || []);
+          const restoredChannel = getValidSavedActiveTextChannel(payload.channels || []);
+          if (restoredChannel) {
+            activateChannel(restoredChannel);
+          } else {
+            setFallbackActiveTextChannel(payload.channels || []);
+          }
         } else {
           const activeChannel = (payload.channels || []).find((c: Channel) => c.id === activeChannelId.value);
           if (activeChannel && (activeChannel.type === 'text' || activeChannel.type === 'rss')) {
             // Re-fetch messages for active channel in case we missed any while disconnected
+            persistActiveChannelId(activeChannel.id);
             getMessages(activeChannelId.value);
           } else {
             setFallbackActiveTextChannel(payload.channels || []);
@@ -2170,10 +2245,11 @@ export const useChatStore = defineStore('chat', () => {
       if (localAvatar.value === null) {
         await initializeStoredAvatar();
       }
+      const authAvatarUrl = getAuthAvatarDataUrl();
       send('auth:request', {
         username,
         publicKey: publicKeyBase64,
-        avatarUrl: localAvatar.value,
+        avatarUrl: authAvatarUrl,
         statusEmoji: localStatusEmoji.value,
         statusText: localStatusText.value
       });
@@ -2188,15 +2264,7 @@ export const useChatStore = defineStore('chat', () => {
 
   const setFallbackActiveTextChannel = (availableChannels: Channel[]) => {
     const firstTextChannel = availableChannels.find((c: Channel) => c.type === 'text' || c.type === 'rss');
-    if (firstTextChannel) {
-      activeChannelId.value = firstTextChannel.id;
-      activeMainPanel.value = { type: 'text', channelId: firstTextChannel.id };
-      clearChannelUnread(firstTextChannel.id);
-      getMessages(firstTextChannel.id);
-    } else {
-      activeChannelId.value = null;
-      activeMainPanel.value = { type: 'text', channelId: null };
-    }
+    activateChannel(firstTextChannel || null);
   };
 
   const createChannel = (category_id: string | null, name: string, type: 'text' | 'voice' | 'rss' | 'folder', feed_url?: string) => {
@@ -2655,17 +2723,15 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const setActiveChannel = (channel_id: string) => {
-    activeChannelId.value = channel_id;
     const channel = channels.value.find((c) => c.id === channel_id);
     if (channel?.type === 'folder') {
+      activeChannelId.value = channel_id;
       activeMainPanel.value = { type: 'folder', channelId: channel_id };
       requestFolderFiles(channel_id);
       return;
     }
 
-    activeMainPanel.value = { type: 'text', channelId: channel_id };
-    clearChannelUnread(channel_id);
-    getMessages(channel_id);
+    activateChannel(channel && (channel.type === 'text' || channel.type === 'rss') ? channel : null);
   };
 
   const requestFolderFiles = (channel_id: string) => {

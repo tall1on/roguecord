@@ -10,15 +10,17 @@ import {connectionManager} from './ws/connectionManager';
 import {handleMessage, handleClientDisconnect} from './ws/handlers';
 import { setAdminKeyEnabled } from './admin';
 import { startRssPolling } from './rssPolling';
-import { getServer, getServerStorageSettings, hasAdminUser } from './models';
+import { getServer, getServerStorageSettings, getUsersWithLegacyDataUrlAvatars, hasAdminUser, updateUserProfile } from './models';
 import type { S3StorageConfig } from './storage/s3Storage';
 import { getFileStreamFromS3 } from './storage/s3Storage';
+import { parseUserAvatarDataUrl, storeUserAvatar } from './storage/userAvatarStorage';
 
 dotenv.config();
 
 const PORT = process.env.PORT ? ~~process.env.PORT : 1337;
 const HOST = process.env.LISTEN_IP || '0.0.0.0';
 const serverIconsRootDir = path.resolve(dataDir, 'server-icons');
+const userAvatarsRootDir = path.resolve(dataDir, 'user-avatars');
 const filesRootDir = path.resolve(dataDir, 'files');
 const emojiAssetsRootDir = path.resolve(process.cwd(), 'client', 'public', 'svg');
 const DEFAULT_FILE_CACHE_CONTROL = 'public, max-age=300';
@@ -247,12 +249,70 @@ const streamLocalFile = async (req: http.IncomingMessage, res: http.ServerRespon
 };
 
 const isSafeServerId = (value: string) => /^[a-zA-Z0-9-]+$/.test(value);
+const isSafeUserId = (value: string) => /^[a-zA-Z0-9-]+$/.test(value);
 
 const isSafeStorageName = (value: string) => {
     if (!value) return false;
     if (value !== path.basename(value)) return false;
     if (value.includes('..')) return false;
     return true;
+};
+
+const MAX_USER_AVATAR_SIZE_BYTES = 10 * 1024 * 1024;
+
+const migrateLegacyUserAvatarDataUrls = async () => {
+    const storageSettings = await getServerStorageSettings();
+    const storageType = storageSettings?.storageType === 's3' ? 's3' : 'data_dir';
+    const s3Config = storageSettings?.s3 ?? null;
+    const legacyUsers = await getUsersWithLegacyDataUrlAvatars();
+
+    if (!legacyUsers.length) {
+        return;
+    }
+
+    console.log(`[avatar-migration] Found ${legacyUsers.length} legacy user avatar data URL${legacyUsers.length === 1 ? '' : 's'} to backfill.`);
+
+    let migratedCount = 0;
+    let skippedCount = 0;
+    let failedCount = 0;
+
+    for (const user of legacyUsers) {
+        try {
+            if (user.avatar_storage_provider && user.avatar_storage_name) {
+                skippedCount += 1;
+                continue;
+            }
+
+            const parsedAvatar = parseUserAvatarDataUrl(user.avatar_url, MAX_USER_AVATAR_SIZE_BYTES);
+            if (!parsedAvatar) {
+                skippedCount += 1;
+                continue;
+            }
+
+            const storedAvatar = await storeUserAvatar({
+                userId: user.id,
+                parsedAvatar,
+                storageType,
+                s3Config
+            });
+
+            await updateUserProfile({
+                id: user.id,
+                avatar_url: null,
+                avatar_mime_type: storedAvatar.mimeType,
+                avatar_storage_provider: storedAvatar.storageProvider,
+                avatar_storage_key: storedAvatar.storageKey,
+                avatar_storage_name: storedAvatar.storageName
+            });
+
+            migratedCount += 1;
+        } catch (error) {
+            failedCount += 1;
+            console.error(`[avatar-migration] Failed to migrate legacy avatar for user ${user.id}:`, error);
+        }
+    }
+
+    console.log(`[avatar-migration] Backfill finished: migrated=${migratedCount}, skipped=${skippedCount}, failed=${failedCount}.`);
 };
 
 const isSafeChannelId = (value: string) => /^[a-zA-Z0-9-]+$/.test(value);
@@ -383,6 +443,36 @@ async function startServer() {
             }
         }
 
+        if (req.method === 'GET' && requestUrl.pathname.startsWith('/user-avatars/')) {
+            try {
+                const segments = requestUrl.pathname.split('/').filter(Boolean);
+                if (segments.length !== 3) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const userId = segments[1] || '';
+                const storageName = segments[2] || '';
+
+                if (!isSafeUserId(userId) || !isSafeStorageName(storageName)) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const avatarFilePath = path.resolve(userAvatarsRootDir, userId, storageName);
+                if (!avatarFilePath.startsWith(userAvatarsRootDir) || !fs.existsSync(avatarFilePath)) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                await streamLocalFile(req, res, avatarFilePath, getIconContentType(avatarFilePath));
+                return;
+            } catch (error) {
+                handleStreamingResponseError(res, error, 'Failed to serve user avatar:');
+                return;
+            }
+        }
+
         if (req.method === 'GET' && requestUrl.pathname.startsWith('/svg/')) {
             try {
                 const relativePath = decodeURIComponent(requestUrl.pathname.slice('/svg/'.length));
@@ -471,6 +561,11 @@ async function startServer() {
         } catch (error) {
             console.error('Database schema initialization failed:', error);
             process.exit(1);
+        }
+        try {
+            await migrateLegacyUserAvatarDataUrls();
+        } catch (error) {
+            console.error('[avatar-migration] Legacy avatar startup backfill aborted:', error);
         }
         try {
             await createWorker();
