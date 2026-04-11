@@ -60,7 +60,8 @@ import {
   getUserServerRoles,
   hydrateUserWithServerRoles,
   setUserServerRoles,
-  userHasServerRoleKey
+  userHasServerRoleKey,
+  registerPersistedS3ConfigResolver
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
 import crypto from 'node:crypto';
@@ -994,6 +995,8 @@ const getPersistedS3Config = async (): Promise<S3StorageConfig | null> => {
     return null;
   }
 };
+
+registerPersistedS3ConfigResolver(getPersistedS3Config);
 
 const getStorageRuntimeConfig = async (): Promise<{ storageType: 'data_dir' | 's3'; s3Config: S3StorageConfig | null }> => {
   const settings = await getServerStorageSettings();
@@ -2810,7 +2813,7 @@ const handleCompleteFileUpload = async (
     });
 
     const replyAttachmentMap = replyToMessage ? await getMessageAttachments([replyToMessage.id]) : {};
-    const replyUser = replyToMessage ? await getUserById(replyToMessage.user_id) : null;
+    const replyUser = replyToMessage ? await getResolvedUser(replyToMessage.user_id) : null;
 
     const messageWithUser = withMessageEmbeds({
       ...message,
