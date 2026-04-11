@@ -4,6 +4,6 @@
 - don't care about token/cost, make sure you don't make mistakes
 - provide migrations for existing server-dbs when adding/changing sqllite tables or content
 - dont use python for anything
-- use dynamic imports on client/frontend side where possible
+- use dynamic import() to code-split the application where possible
 - try to keep files under 1000 lines/efficent code split where makes sense
 - minimize code duplicates
