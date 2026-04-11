@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
+import { defineAsyncComponent, ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
 import { Archive, Code2, File, FileText, Film, Folder, Image, Music2, Reply, Trash2, X } from 'lucide-vue-next'
 import { EmojiPicker } from 'vue3-twemoji-picker-final'
 import AppAvatar from '../components/common/AppAvatar.vue'
@@ -7,6 +7,8 @@ import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, 
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
 import { openExternalUrl } from '../utils/openExternalUrl'
+
+const MessageAttachmentVideoPlayer = defineAsyncComponent(() => import('../components/chat/MessageAttachmentVideoPlayer.vue'))
 
 type TwemojiPickerSelection = {
   i?: string
@@ -1348,13 +1350,11 @@ watch(
                       <p class="media-attachment-embed__title">{{ getAttachmentDisplayLabel(attachment) }}</p>
                       <p class="media-attachment-embed__subtitle">{{ formatFileSize(attachment.size_bytes) }}</p>
                     </div>
-                    <video
+                    <MessageAttachmentVideoPlayer
                       v-if="getAttachmentInlineKind(attachment) === 'video'"
                       :src="attachment.url || ''"
-                      class="block max-h-[420px] max-w-full rounded-lg bg-black"
-                      controls
-                      preload="metadata"
-                    ></video>
+                      :title="getAttachmentDisplayLabel(attachment)"
+                    />
                     <audio
                       v-else
                       :src="attachment.url || ''"
