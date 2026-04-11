@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { useWebRtcStore } from './webrtc';
-import { readStoredAvatar as readStoredAvatarFromIndexedDb, removeLegacyStoredAvatar, saveStoredAvatar } from '../utils/avatarStorage';
+import { clearStoredAvatar, removeLegacyStoredAvatar } from '../utils/avatarStorage';
 import { cacheServerIcon, getCachedServerIcon, removeCachedServerIcon } from '../utils/serverIconCache';
 
 const NEW_NOTIFICATION_SOUND_DEBOUNCE_MS = 1000;
@@ -240,14 +240,6 @@ const arrayBufferToHex = (buffer: ArrayBuffer) => {
   return Array.from(new Uint8Array(buffer))
     .map(b => b.toString(16).padStart(2, '0'))
     .join('');
-};
-
-const readLegacyStoredAvatar = () => {
-  try {
-    return localStorage.getItem('avatarUrl');
-  } catch {
-    return null;
-  }
 };
 
 const generateKeyPair = async () => {
@@ -885,37 +877,16 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const initializeStoredAvatar = async () => {
-    const indexedDbAvatar = await readStoredAvatarFromIndexedDb();
-    if (indexedDbAvatar !== null) {
-      localAvatar.value = indexedDbAvatar;
-      removeLegacyStoredAvatar();
-      return indexedDbAvatar;
-    }
-
-    const legacyAvatar = readLegacyStoredAvatar();
-    if (legacyAvatar !== null) {
-      localAvatar.value = legacyAvatar;
-      await saveStoredAvatar(legacyAvatar);
-      removeLegacyStoredAvatar();
-      return legacyAvatar;
-    }
-
     localAvatar.value = null;
     removeLegacyStoredAvatar();
+    await clearStoredAvatar();
     return null;
   };
 
   const saveLocalAvatar = async (avatarUrl: string | null) => {
     localAvatar.value = avatarUrl;
-    await saveStoredAvatar(avatarUrl);
     removeLegacyStoredAvatar();
-
-    if (currentUser.value) {
-      currentUser.value = {
-        ...currentUser.value,
-        avatar_url: avatarUrl
-      };
-    }
+    await clearStoredAvatar();
   };
 
   const getLocalAvatar = () => localAvatar.value;
@@ -1758,9 +1729,9 @@ export const useChatStore = defineStore('chat', () => {
         currentUser.value = normalizeUser(payload.user);
         pendingPresenceStatus.value = normalizePresenceStatus(currentUser.value.status);
         currentUserRole.value = currentUser.value.role || 'user';
-        if (payload.user && payload.user.avatar_url !== localAvatar.value) {
-          void saveLocalAvatar(payload.user.avatar_url || null);
-        }
+        localAvatar.value = null;
+        removeLegacyStoredAvatar();
+        void clearStoredAvatar();
         saveLocalStatusEmoji(currentUser.value.status_emoji || null);
         saveLocalStatusText(currentUser.value.status_text || null);
         if (payload.server) {
@@ -2237,7 +2208,6 @@ export const useChatStore = defineStore('chat', () => {
       send('auth:request', {
         username,
         publicKey: publicKeyBase64,
-        avatarUrl: localAvatar.value,
         statusEmoji: localStatusEmoji.value,
         statusText: localStatusText.value
       });

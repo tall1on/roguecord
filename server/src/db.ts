@@ -114,6 +114,9 @@ function initializeDatabase() {
         public_key TEXT UNIQUE NOT NULL,
         avatar_url TEXT,
         avatar_mime_type TEXT,
+        avatar_storage_provider TEXT,
+        avatar_storage_key TEXT,
+        avatar_storage_name TEXT,
         status_emoji TEXT,
         status_text TEXT,
         last_ip TEXT,
@@ -715,6 +718,9 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
 
     const hasAvatarUrl = columns.some((column) => column.name === 'avatar_url');
     const hasAvatarMimeType = columns.some((column) => column.name === 'avatar_mime_type');
+    const hasAvatarStorageProvider = columns.some((column) => column.name === 'avatar_storage_provider');
+    const hasAvatarStorageKey = columns.some((column) => column.name === 'avatar_storage_key');
+    const hasAvatarStorageName = columns.some((column) => column.name === 'avatar_storage_name');
     const hasStatusEmoji = columns.some((column) => column.name === 'status_emoji');
     const hasStatusText = columns.some((column) => column.name === 'status_text');
     const hasLastIp = columns.some((column) => column.name === 'last_ip');
@@ -725,6 +731,9 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
     const pendingAlterStatements: string[] = [];
     if (!hasAvatarUrl) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_url TEXT');
     if (!hasAvatarMimeType) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_mime_type TEXT');
+    if (!hasAvatarStorageProvider) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_storage_provider TEXT');
+    if (!hasAvatarStorageKey) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_storage_key TEXT');
+    if (!hasAvatarStorageName) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_storage_name TEXT');
     if (!hasStatusEmoji) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN status_emoji TEXT');
     if (!hasStatusText) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN status_text TEXT');
     if (!hasLastIp) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN last_ip TEXT');
@@ -743,11 +752,19 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
                 WHEN LOWER(COALESCE(avatar_url, '')) LIKE 'data:image/png;%' THEN 'image/png'
                 WHEN LOWER(COALESCE(avatar_url, '')) LIKE 'data:image/jpeg;%' THEN 'image/jpeg'
                 WHEN LOWER(COALESCE(avatar_url, '')) LIKE 'data:image/jpg;%' THEN 'image/jpeg'
+                WHEN LOWER(COALESCE(avatar_url, '')) LIKE 'data:image/gif;%' THEN 'image/gif'
                 WHEN LOWER(COALESCE(avatar_url, '')) LIKE '%.png' THEN 'image/png'
                 WHEN LOWER(COALESCE(avatar_url, '')) LIKE '%.jpg' OR LOWER(COALESCE(avatar_url, '')) LIKE '%.jpeg' THEN 'image/jpeg'
+                WHEN LOWER(COALESCE(avatar_url, '')) LIKE '%.gif' THEN 'image/gif'
                 ELSE NULL
               END
             END,
+            avatar_storage_provider = CASE
+              WHEN LOWER(COALESCE(avatar_storage_provider, '')) IN ('data_dir', 's3') THEN LOWER(avatar_storage_provider)
+              ELSE NULL
+            END,
+            avatar_storage_key = NULLIF(TRIM(COALESCE(avatar_storage_key, '')), ''),
+            avatar_storage_name = NULLIF(TRIM(COALESCE(avatar_storage_name, '')), ''),
             status_emoji = NULLIF(TRIM(COALESCE(status_emoji, '')), ''),
             status_text = CASE
               WHEN TRIM(COALESCE(status_text, '')) = '' THEN NULL
