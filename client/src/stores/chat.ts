@@ -62,7 +62,7 @@ export interface FolderChannelFile {
   updated_at: string;
 }
 
-export type MessageEmbedType = 'youtube' | 'twitch' | 'spotify' | 'link';
+export type MessageEmbedType = 'youtube' | 'twitch' | 'spotify' | 'x' | 'link';
 
 export interface MessageEmbed {
   type: MessageEmbedType;

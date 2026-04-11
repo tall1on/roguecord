@@ -1,6 +1,6 @@
 import type { Message, User } from '../models';
 
-export type MessageEmbedType = 'youtube' | 'twitch' | 'spotify' | 'link';
+export type MessageEmbedType = 'youtube' | 'twitch' | 'spotify' | 'x' | 'link';
 
 export interface MessageEmbed {
   type: MessageEmbedType;
@@ -84,6 +84,7 @@ const isValidTwitchChannel = (value: string) => /^[A-Za-z0-9_]{3,25}$/.test(valu
 const isValidTwitchVideoId = (value: string) => /^\d+$/.test(value);
 const isValidTwitchClip = (value: string) => /^[A-Za-z0-9_-]{3,}$/.test(value);
 const SPOTIFY_SUPPORTED_KINDS = new Set(['track', 'album', 'playlist', 'artist', 'episode', 'show']);
+const X_POST_HOSTS = new Set(['x.com', 'twitter.com']);
 
 const buildTwitchEmbed = (url: URL): MessageEmbed | null => {
   const host = normalizeHost(url.hostname);
@@ -195,6 +196,39 @@ const buildSpotifyEmbed = (url: URL): MessageEmbed | null => {
   };
 };
 
+const buildXEmbed = (url: URL): MessageEmbed | null => {
+  const host = normalizeHost(url.hostname);
+  if (!X_POST_HOSTS.has(host)) {
+    return null;
+  }
+
+  const pathParts = url.pathname.split('/').filter(Boolean);
+  if (pathParts.length < 3) {
+    return null;
+  }
+
+  const username = pathParts[0] || '';
+  const statusSegment = pathParts[1]?.toLowerCase() || '';
+  const postId = pathParts[2] || '';
+
+  if (!/^[A-Za-z0-9_]{1,15}$/.test(username) || statusSegment !== 'status' || !/^\d+$/.test(postId)) {
+    return null;
+  }
+
+  const canonicalUrl = `https://x.com/${username}/status/${postId}`;
+
+  return {
+    type: 'x',
+    provider: 'X',
+    url: canonicalUrl,
+    displayUrl: canonicalUrl,
+    title: `Post by @${username}`,
+    description: null,
+    thumbnailUrl: null,
+    embedUrl: null
+  };
+};
+
 const buildGenericEmbed = (url: URL): MessageEmbed => {
   const providerHost = normalizeHost(url.hostname);
   const trimmedPath = `${url.pathname}${url.search}`;
@@ -232,6 +266,11 @@ const buildEmbedFromUrl = (urlString: string): MessageEmbed | null => {
     const spotify = buildSpotifyEmbed(url);
     if (spotify) {
       return spotify;
+    }
+
+    const x = buildXEmbed(url);
+    if (x) {
+      return x;
     }
 
     return buildGenericEmbed(url);
