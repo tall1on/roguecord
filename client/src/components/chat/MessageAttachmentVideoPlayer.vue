@@ -383,7 +383,7 @@ onMounted(() => {
 
             <div
               v-if="isVolumePopoverOpen"
-              class="absolute bottom-full right-0 mb-2 w-36 rounded-2xl border border-white/10 bg-zinc-950/95 p-2 shadow-[0_12px_30px_rgba(0,0,0,0.4)] backdrop-blur-md"
+              class="absolute bottom-full right-0 mb-2 w-44 rounded-2xl border border-white/10 bg-zinc-950/95 p-2 shadow-[0_12px_30px_rgba(0,0,0,0.4)] backdrop-blur-md"
               @click.stop
             >
               <div class="flex items-center gap-2">
@@ -407,8 +407,9 @@ onMounted(() => {
                     aria-label="Video volume"
                     @input="handleVolumeInput"
                   />
-                  <div class="mt-1 text-right text-[10px] font-medium text-zinc-300 sm:text-[11px]">{{ displayedVolumePercent }}</div>
                 </div>
+
+                <div class="w-9 shrink-0 text-right text-[10px] font-medium text-zinc-300 sm:text-[11px]">{{ displayedVolumePercent }}</div>
               </div>
             </div>
           </div>
