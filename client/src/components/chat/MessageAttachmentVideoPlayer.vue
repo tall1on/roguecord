@@ -13,9 +13,6 @@ const props = withDefaults(defineProps<{
 
 const videoRef = ref<HTMLVideoElement | null>(null)
 const playerRef = ref<HTMLElement | null>(null)
-const audioContext = ref<AudioContext | null>(null)
-const mediaElementSource = ref<MediaElementAudioSourceNode | null>(null)
-const gainNode = ref<GainNode | null>(null)
 const animationFrameId = ref<number | null>(null)
 const isPlaying = ref(false)
 const isMuted = ref(false)
@@ -30,9 +27,8 @@ const seekValue = ref(0)
 const volumePercent = ref(100)
 const lastNonZeroVolumePercent = ref(100)
 
-const clampedVolumePercent = computed(() => Math.min(200, Math.max(0, volumePercent.value)))
-const normalizedVolume = computed(() => Math.min(clampedVolumePercent.value, 100) / 100)
-const gainMultiplier = computed(() => Math.max(clampedVolumePercent.value, 1) / 100)
+const clampedVolumePercent = computed(() => Math.min(100, Math.max(0, volumePercent.value)))
+const normalizedVolume = computed(() => clampedVolumePercent.value / 100)
 const progressPercent = computed(() => {
   if (!duration.value) return 0
   return Math.min(100, (currentTime.value / duration.value) * 100)
@@ -84,47 +80,13 @@ const startProgressLoop = () => {
   animationFrameId.value = window.requestAnimationFrame(updatePlaybackProgress)
 }
 
-const ensureAudioGraph = async () => {
-  const video = videoRef.value
-  if (!video || typeof window === 'undefined') return
-
-  if (!audioContext.value) {
-    const AudioContextConstructor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-    if (!AudioContextConstructor) return
-
-    audioContext.value = new AudioContextConstructor()
-  }
-
-  if (!mediaElementSource.value) {
-    mediaElementSource.value = audioContext.value.createMediaElementSource(video)
-    gainNode.value = audioContext.value.createGain()
-    mediaElementSource.value.connect(gainNode.value)
-    gainNode.value.connect(audioContext.value.destination)
-  }
-
-  if (audioContext.value.state === 'suspended') {
-    await audioContext.value.resume()
-  }
-
-  if (gainNode.value) {
-    gainNode.value.gain.value = gainMultiplier.value
-  }
-}
-
 const applyVolume = async () => {
   const video = videoRef.value
   if (!video) return
 
-  video.muted = isMuted.value || clampedVolumePercent.value === 0
-  video.volume = normalizedVolume.value
-
-  if (clampedVolumePercent.value > 100) {
-    await ensureAudioGraph()
-  }
-
-  if (gainNode.value) {
-    gainNode.value.gain.value = video.muted ? 0 : gainMultiplier.value
-  }
+  const effectivelyMuted = isMuted.value || clampedVolumePercent.value === 0
+  video.muted = effectivelyMuted
+  video.volume = effectivelyMuted ? 0 : normalizedVolume.value
 }
 
 const syncFromVideo = () => {
@@ -132,7 +94,7 @@ const syncFromVideo = () => {
   if (!video) return
 
   isPlaying.value = !video.paused && !video.ended
-  isMuted.value = video.muted || clampedVolumePercent.value === 0
+  isMuted.value = clampedVolumePercent.value === 0 || video.muted || video.volume === 0
   currentTime.value = video.currentTime
   if (!isSeeking.value) {
     seekValue.value = video.currentTime
@@ -148,7 +110,7 @@ const togglePlayback = async () => {
   if (!video) return
 
   if (video.paused || video.ended) {
-    await ensureAudioGraph()
+    await applyVolume()
     await video.play()
     startProgressLoop()
     return
@@ -190,7 +152,7 @@ const handleSeekChange = (event: Event) => {
 
 const handleVolumeInput = async (event: Event) => {
   const target = event.target as HTMLInputElement
-  const nextVolume = Math.min(200, Math.max(0, Number(target.value)))
+  const nextVolume = Math.min(100, Math.max(0, Number(target.value)))
   volumePercent.value = nextVolume
   if (nextVolume > 0) {
     lastNonZeroVolumePercent.value = nextVolume
@@ -273,6 +235,7 @@ watch(() => props.src, () => {
   duration.value = 0
   seekValue.value = 0
   isPlaying.value = false
+  isMuted.value = clampedVolumePercent.value === 0
   cancelAnimationFrameLoop()
 })
 
@@ -284,6 +247,13 @@ watch(clampedVolumePercent, async (value) => {
   await applyVolume()
 }, { immediate: true })
 
+onMounted(() => {
+  if (typeof document === 'undefined') return
+  document.addEventListener('fullscreenchange', handleFullscreenChange)
+  document.addEventListener('pointerdown', handleDocumentPointerDown)
+  document.addEventListener('keydown', handleDocumentKeydown)
+})
+
 onBeforeUnmount(() => {
   cancelAnimationFrameLoop()
   if (typeof document !== 'undefined') {
@@ -291,18 +261,6 @@ onBeforeUnmount(() => {
     document.removeEventListener('pointerdown', handleDocumentPointerDown)
     document.removeEventListener('keydown', handleDocumentKeydown)
   }
-  gainNode.value?.disconnect()
-  mediaElementSource.value?.disconnect()
-  if (audioContext.value) {
-    void audioContext.value.close()
-  }
-})
-
-onMounted(() => {
-  if (typeof document === 'undefined') return
-  document.addEventListener('fullscreenchange', handleFullscreenChange)
-  document.addEventListener('pointerdown', handleDocumentPointerDown)
-  document.addEventListener('keydown', handleDocumentKeydown)
 })
 </script>
 
@@ -401,7 +359,7 @@ onMounted(() => {
                     class="video-player-range w-full"
                     type="range"
                     min="0"
-                    max="200"
+                    max="100"
                     step="1"
                     :value="clampedVolumePercent"
                     aria-label="Video volume"
