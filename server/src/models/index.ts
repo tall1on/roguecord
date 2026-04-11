@@ -1856,7 +1856,7 @@ export const getChannelMessages = async (
     const user = await getUserById(msg.user_id);
     if (user) {
       const resolvedUser = await resolveUserAvatarForClient(user, persistedS3Config);
-      messagesWithUsers.push(withMessageEmbeds({ ...msg, user: resolvedUser, reply_to_message: replyMap[msg.id] || null }));
+      messagesWithUsers.push(await withMessageEmbeds({ ...msg, user: resolvedUser, reply_to_message: replyMap[msg.id] || null }));
     }
   }
 

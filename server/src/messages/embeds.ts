@@ -11,6 +11,12 @@ export interface MessageEmbed {
   description: string | null;
   thumbnailUrl: string | null;
   embedUrl: string | null;
+  authorName?: string | null;
+  authorUsername?: string | null;
+  publishedAt?: string | null;
+  mediaType?: 'image' | 'video' | null;
+  mediaUrl?: string | null;
+  mediaThumbnailUrl?: string | null;
 }
 
 export interface MessageWithUserAndEmbeds extends Message {
@@ -85,6 +91,77 @@ const isValidTwitchVideoId = (value: string) => /^\d+$/.test(value);
 const isValidTwitchClip = (value: string) => /^[A-Za-z0-9_-]{3,}$/.test(value);
 const SPOTIFY_SUPPORTED_KINDS = new Set(['track', 'album', 'playlist', 'artist', 'episode', 'show']);
 const X_POST_HOSTS = new Set(['x.com', 'twitter.com']);
+const X_OEMBED_ENDPOINT = 'https://publish.x.com/oembed';
+
+const decodeHtmlEntities = (value: string) => {
+  return value
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x2F;/gi, '/');
+};
+
+const stripHtmlTags = (value: string) => decodeHtmlEntities(value.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+
+const parseXHtml = (html: string) => {
+  const textSource = html.match(/<p[^>]*lang="[^"]+"[^>]*dir="[^"]+"[^>]*>([\s\S]*?)<\/p>/i)?.[1] || '';
+  const description = stripHtmlTags(textSource) || null;
+  const imageUrl = html.match(/<a[^>]+href="([^"]+\/photo\/\d+)"[^>]*>\s*<img[^>]+src="([^"]+)"/i)?.[2] || null;
+  const videoThumb = html.match(/<a[^>]+href="([^"]+\/video\/\d+)"[^>]*>\s*<img[^>]+src="([^"]+)"/i)?.[2] || null;
+  const authorName = stripHtmlTags(html.match(/&mdash;\s*([^<(]+?)(?:\s*\(@|<\/a>)/i)?.[1] || '') || null;
+  const authorUsername = html.match(/\(@([A-Za-z0-9_]{1,15})\)/)?.[1] || null;
+
+  return {
+    description,
+    authorName,
+    authorUsername,
+    mediaType: imageUrl ? 'image' as const : videoThumb ? 'video' as const : null,
+    mediaUrl: imageUrl,
+    mediaThumbnailUrl: imageUrl || videoThumb
+  };
+};
+
+const fetchXEmbedMetadata = async (canonicalUrl: string) => {
+  const requestUrl = `${X_OEMBED_ENDPOINT}?omit_script=true&dnt=true&url=${encodeURIComponent(canonicalUrl)}`;
+
+  try {
+    const response = await fetch(requestUrl, {
+      headers: {
+        'User-Agent': 'RogueCord/1.0 (+https://publish.x.com/oembed)'
+      }
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json() as {
+      author_name?: string;
+      author_url?: string;
+      html?: string;
+      thumbnail_url?: string;
+    };
+
+    const parsedHtml = payload.html ? parseXHtml(payload.html) : null;
+    const authorUsername = payload.author_url
+      ? payload.author_url.match(/(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})/i)?.[1] || null
+      : parsedHtml?.authorUsername || null;
+
+    return {
+      authorName: payload.author_name || parsedHtml?.authorName || null,
+      authorUsername,
+      description: parsedHtml?.description || null,
+      mediaType: parsedHtml?.mediaType || null,
+      mediaUrl: parsedHtml?.mediaUrl || null,
+      mediaThumbnailUrl: parsedHtml?.mediaThumbnailUrl || payload.thumbnail_url || null,
+      thumbnailUrl: payload.thumbnail_url || parsedHtml?.mediaThumbnailUrl || null
+    };
+  } catch {
+    return null;
+  }
+};
 
 const buildTwitchEmbed = (url: URL): MessageEmbed | null => {
   const host = normalizeHost(url.hostname);
@@ -196,7 +273,7 @@ const buildSpotifyEmbed = (url: URL): MessageEmbed | null => {
   };
 };
 
-const buildXEmbed = (url: URL): MessageEmbed | null => {
+const buildXEmbed = async (url: URL): Promise<MessageEmbed | null> => {
   const host = normalizeHost(url.hostname);
   if (!X_POST_HOSTS.has(host)) {
     return null;
@@ -217,15 +294,22 @@ const buildXEmbed = (url: URL): MessageEmbed | null => {
 
   const canonicalUrl = `https://x.com/${username}/status/${postId}`;
 
+  const metadata = await fetchXEmbedMetadata(canonicalUrl);
+
   return {
     type: 'x',
     provider: 'X',
     url: canonicalUrl,
     displayUrl: canonicalUrl,
-    title: `Post by @${username}`,
-    description: null,
-    thumbnailUrl: null,
-    embedUrl: null
+    title: `Post by @${metadata?.authorUsername || username}`,
+    description: metadata?.description || null,
+    thumbnailUrl: metadata?.thumbnailUrl || null,
+    embedUrl: null,
+    authorName: metadata?.authorName || null,
+    authorUsername: metadata?.authorUsername || username,
+    mediaType: metadata?.mediaType || null,
+    mediaUrl: metadata?.mediaUrl || null,
+    mediaThumbnailUrl: metadata?.mediaThumbnailUrl || null
   };
 };
 
@@ -246,7 +330,7 @@ const buildGenericEmbed = (url: URL): MessageEmbed => {
   };
 };
 
-const buildEmbedFromUrl = (urlString: string): MessageEmbed | null => {
+const buildEmbedFromUrl = async (urlString: string): Promise<MessageEmbed | null> => {
   try {
     const url = new URL(urlString);
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
@@ -268,7 +352,7 @@ const buildEmbedFromUrl = (urlString: string): MessageEmbed | null => {
       return spotify;
     }
 
-    const x = buildXEmbed(url);
+    const x = await buildXEmbed(url);
     if (x) {
       return x;
     }
@@ -279,7 +363,7 @@ const buildEmbedFromUrl = (urlString: string): MessageEmbed | null => {
   }
 };
 
-export const extractEmbedsFromContent = (content: string): MessageEmbed[] => {
+export const extractEmbedsFromContent = async (content: string): Promise<MessageEmbed[]> => {
   if (!content || typeof content !== 'string') {
     return [];
   }
@@ -300,7 +384,7 @@ export const extractEmbedsFromContent = (content: string): MessageEmbed[] => {
 
   const embeds: MessageEmbed[] = [];
   for (const url of uniqueUrls) {
-    const embed = buildEmbedFromUrl(url);
+    const embed = await buildEmbedFromUrl(url);
     if (embed) {
       embeds.push(embed);
     }
@@ -309,10 +393,10 @@ export const extractEmbedsFromContent = (content: string): MessageEmbed[] => {
   return embeds;
 };
 
-export const withMessageEmbeds = <T extends Pick<Message, 'content'>>(message: T) => {
+export const withMessageEmbeds = async <T extends Pick<Message, 'content'>>(message: T) => {
   return {
     ...message,
-    embeds: extractEmbedsFromContent(message.content)
+    embeds: await extractEmbedsFromContent(message.content)
   };
 };
 
