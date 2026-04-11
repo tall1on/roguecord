@@ -70,6 +70,7 @@ import path from 'node:path';
 import { dataDir } from '../db';
 import {
   buildS3ManagedFilesPrefix,
+  createPresignedReadUrlForS3,
   buildS3StorageKey,
   clearS3KeysByPrefix,
   deleteS3Keys,
@@ -524,29 +525,67 @@ const ensureChannelFilesDir = (channelId: string) => {
 
 const buildStoredFileUrl = (storageProvider: 'data_dir' | 's3', channelId: string, storageName: string, storageKey: string | null) => {
   if (storageProvider === 's3' && storageKey) {
-    return `/files/s3/${encodeURIComponent(storageKey)}`;
+    return null;
   }
   return `/files/${encodeURIComponent(channelId)}/${encodeURIComponent(storageName)}`;
 };
 
+const buildAttachmentReadUrl = async (input: {
+  storageProvider: 'data_dir' | 's3';
+  channelId: string;
+  storageName: string;
+  storageKey: string | null;
+  originalName: string;
+  mimeType: string | null;
+  persistedS3Config: S3StorageConfig | null;
+}) => {
+  if (input.storageProvider === 's3' && input.storageKey && input.persistedS3Config) {
+    return createPresignedReadUrlForS3({
+      config: input.persistedS3Config,
+      key: input.storageKey,
+      fileName: input.originalName,
+      mimeType: input.mimeType
+    });
+  }
+
+  return buildStoredFileUrl(input.storageProvider, input.channelId, input.storageName, input.storageKey);
+};
+
 const enrichMessageAttachmentsForClient = async <T extends { id: string; channel_id: string }>(messages: T[]) => {
+  const persistedS3Config = await getPersistedS3Config();
   const attachmentMap = await getMessageAttachments(messages.map((message) => message.id));
-  return messages.map((message) => ({
+  return Promise.all(messages.map(async (message) => ({
     ...message,
-    attachments: (attachmentMap[message.id] || []).map((attachment) => ({
+    attachments: await Promise.all((attachmentMap[message.id] || []).map(async (attachment) => ({
       ...attachment,
-      url: buildStoredFileUrl(attachment.storage_provider, message.channel_id, attachment.storage_name, attachment.storage_key)
-    })),
+      url: await buildAttachmentReadUrl({
+        storageProvider: attachment.storage_provider,
+        channelId: message.channel_id,
+        storageName: attachment.storage_name,
+        storageKey: attachment.storage_key,
+        originalName: attachment.original_name,
+        mimeType: attachment.mime_type,
+        persistedS3Config
+      })
+    }))),
     reply_to_message: (message as T & { reply_to_message?: any }).reply_to_message
       ? {
           ...(message as T & { reply_to_message: any }).reply_to_message,
-          attachments: (((message as T & { reply_to_message: any }).reply_to_message.attachments) || []).map((attachment: any) => ({
+          attachments: await Promise.all((((message as T & { reply_to_message: any }).reply_to_message.attachments) || []).map(async (attachment: any) => ({
             ...attachment,
-            url: buildStoredFileUrl(attachment.storage_provider, (message as T & { reply_to_message: any }).reply_to_message.channel_id, attachment.storage_name, attachment.storage_key)
-          }))
+            url: await buildAttachmentReadUrl({
+              storageProvider: attachment.storage_provider,
+              channelId: (message as T & { reply_to_message: any }).reply_to_message.channel_id,
+              storageName: attachment.storage_name,
+              storageKey: attachment.storage_key,
+              originalName: attachment.original_name,
+              mimeType: attachment.mime_type,
+              persistedS3Config
+            })
+          })))
         }
       : null
-  }));
+  })));
 };
 
 const resolveSafeStoredFilePath = (channelId: string, storageName: string) => {
@@ -2561,7 +2600,15 @@ const createMessageAttachmentRecord = async (input: {
 
   return {
     ...createdAttachment,
-    url: buildStoredFileUrl(input.storageProvider, input.channelId, input.storageName, input.storageKey)
+    url: await buildAttachmentReadUrl({
+      storageProvider: input.storageProvider,
+      channelId: input.channelId,
+      storageName: input.storageName,
+      storageKey: input.storageKey,
+      originalName: input.originalName,
+      mimeType: input.mimeType,
+      persistedS3Config: await getPersistedS3Config()
+    })
   };
 };
 
@@ -2821,7 +2868,15 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
 
     createdAttachments.push({
       ...createdAttachment,
-      url: buildStoredFileUrl(storageProvider, channel_id, storageName, storageKey)
+      url: await buildAttachmentReadUrl({
+        storageProvider,
+        channelId: channel_id,
+        storageName,
+        storageKey,
+        originalName,
+        mimeType,
+        persistedS3Config: storageRuntime.storageType === 's3' ? storageRuntime.s3Config : null
+      })
     });
   }
 

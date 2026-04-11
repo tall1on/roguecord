@@ -24,6 +24,34 @@ const emojiAssetsRootDir = path.resolve(process.cwd(), 'client', 'public', 'svg'
 const DEFAULT_FILE_CACHE_CONTROL = 'public, max-age=300';
 const EMOJI_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 
+const streamS3File = async (req: http.IncomingMessage, res: http.ServerResponse, key: string, config: S3StorageConfig, fallbackContentType: string | null = null) => {
+    const rangeHeader = req.headers.range?.trim() || null;
+    const normalizedRange = rangeHeader && /^bytes=(\d*)-(\d*)$/i.test(rangeHeader) ? rangeHeader : null;
+    const response = await getFileStreamFromS3({
+        config,
+        key,
+        range: normalizedRange
+    });
+
+    const contentType = getFileContentType(key, response.contentType || fallbackContentType);
+    const isPartial = Boolean(normalizedRange && response.contentRange);
+    const headers: Record<string, string | number> = {
+        'Content-Type': contentType,
+        'Cache-Control': 'public, max-age=300',
+        'Accept-Ranges': response.acceptRanges || MEDIA_RANGE_HEADER
+    };
+
+    if (response.contentLength !== null) {
+        headers['Content-Length'] = response.contentLength;
+    }
+    if (response.contentRange) {
+        headers['Content-Range'] = response.contentRange;
+    }
+
+    res.writeHead(isPartial ? 206 : 200, headers);
+    await pipeline(response.body, res);
+};
+
 const getIconContentType = (filePath: string) => {
     const ext = path.extname(filePath).toLowerCase();
     switch (ext) {
@@ -218,34 +246,6 @@ const streamLocalFile = async (req: http.IncomingMessage, res: http.ServerRespon
     await pipeline(fs.createReadStream(filePath, { start: parsedRange.start, end: parsedRange.end }), res);
 };
 
-const streamS3File = async (req: http.IncomingMessage, res: http.ServerResponse, key: string, config: S3StorageConfig, fallbackContentType: string | null = null) => {
-    const rangeHeader = req.headers.range?.trim() || null;
-    const normalizedRange = rangeHeader && /^bytes=(\d*)-(\d*)$/i.test(rangeHeader) ? rangeHeader : null;
-    const response = await getFileStreamFromS3({
-        config,
-        key,
-        range: normalizedRange
-    });
-
-    const contentType = getFileContentType(key, response.contentType || fallbackContentType);
-    const isPartial = Boolean(normalizedRange && response.contentRange);
-    const headers: Record<string, string | number> = {
-        'Content-Type': contentType,
-        'Cache-Control': 'public, max-age=300',
-        'Accept-Ranges': response.acceptRanges || MEDIA_RANGE_HEADER
-    };
-
-    if (response.contentLength !== null) {
-        headers['Content-Length'] = response.contentLength;
-    }
-    if (response.contentRange) {
-        headers['Content-Range'] = response.contentRange;
-    }
-
-    res.writeHead(isPartial ? 206 : 200, headers);
-    await pipeline(response.body, res);
-};
-
 const isSafeServerId = (value: string) => /^[a-zA-Z0-9-]+$/.test(value);
 
 const isSafeStorageName = (value: string) => {
@@ -355,24 +355,6 @@ async function startServer() {
 
         if (req.method === 'GET' && requestUrl.pathname.startsWith('/files/')) {
             try {
-                if (requestUrl.pathname.startsWith('/files/s3/')) {
-                    const encodedKey = requestUrl.pathname.slice('/files/s3/'.length);
-                    const key = decodeURIComponent(encodedKey || '');
-                    if (!isSafeS3Key(key)) {
-                        sendNotFound(res);
-                        return;
-                    }
-
-                    const storageSettings = await getServerStorageSettings();
-                    if (!storageSettings?.s3) {
-                        sendServerError(res);
-                        return;
-                    }
-
-                    await streamS3File(req, res, key, storageSettings.s3);
-                    return;
-                }
-
                 const segments = requestUrl.pathname.split('/').filter(Boolean);
                 if (segments.length !== 3) {
                     sendNotFound(res);

@@ -10,6 +10,7 @@ import {
   S3Client,
   UploadPartCommand
 } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import fs from 'node:fs';
 
 export type S3StorageProvider = 'generic_s3' | 'cloudflare_r2';
@@ -921,6 +922,31 @@ export const getFileStreamFromS3 = async (input: {
     acceptRanges: typeof response.AcceptRanges === 'string' ? response.AcceptRanges : null,
     contentType: typeof response.ContentType === 'string' ? response.ContentType : null
   };
+};
+
+export const createPresignedReadUrlForS3 = async (input: {
+  config: S3StorageConfig;
+  key: string;
+  expiresInSeconds?: number;
+  fileName?: string | null;
+  mimeType?: string | null;
+}): Promise<string> => {
+  const normalized = sanitizeConfig(input.config);
+  const resolved = resolveS3ClientConfig(normalized);
+  const client = createS3Client(toS3StorageConfig(resolved));
+  const fileName = (input.fileName || '').trim();
+  const mimeType = (input.mimeType || '').trim();
+
+  return getSignedUrl(client, new GetObjectCommand({
+    Bucket: resolved.bucket,
+    Key: input.key,
+    ResponseContentDisposition: fileName
+      ? `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`
+      : undefined,
+    ResponseContentType: mimeType || undefined
+  }), {
+    expiresIn: Math.max(60, Math.min(input.expiresInSeconds || 3600, 60 * 60 * 24))
+  });
 };
 
 export const deleteFileFromS3 = async (input: {
