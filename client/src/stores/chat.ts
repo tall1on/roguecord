@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { useWebRtcStore } from './webrtc';
-import { clearStoredAvatar, removeLegacyStoredAvatar } from '../utils/avatarStorage';
+import { readStoredAvatar, removeLegacyStoredAvatar, saveStoredAvatar } from '../utils/avatarStorage';
 import { cacheServerIcon, getCachedServerIcon, removeCachedServerIcon } from '../utils/serverIconCache';
 
 const NEW_NOTIFICATION_SOUND_DEBOUNCE_MS = 1000;
@@ -240,6 +240,18 @@ const arrayBufferToHex = (buffer: ArrayBuffer) => {
   return Array.from(new Uint8Array(buffer))
     .map(b => b.toString(16).padStart(2, '0'))
     .join('');
+};
+
+const readLegacyStoredAvatar = () => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  try {
+    return window.localStorage.getItem('avatarUrl');
+  } catch {
+    return null;
+  }
 };
 
 const generateKeyPair = async () => {
@@ -877,16 +889,30 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const initializeStoredAvatar = async () => {
+    const storedAvatar = await readStoredAvatar();
+    if (storedAvatar !== null) {
+      localAvatar.value = storedAvatar;
+      removeLegacyStoredAvatar();
+      return storedAvatar;
+    }
+
+    const legacyStoredAvatar = readLegacyStoredAvatar();
+    if (legacyStoredAvatar !== null) {
+      localAvatar.value = legacyStoredAvatar;
+      await saveStoredAvatar(legacyStoredAvatar);
+      removeLegacyStoredAvatar();
+      return legacyStoredAvatar;
+    }
+
     localAvatar.value = null;
     removeLegacyStoredAvatar();
-    await clearStoredAvatar();
     return null;
   };
 
   const saveLocalAvatar = async (avatarUrl: string | null) => {
     localAvatar.value = avatarUrl;
+    await saveStoredAvatar(avatarUrl);
     removeLegacyStoredAvatar();
-    await clearStoredAvatar();
   };
 
   const getLocalAvatar = () => localAvatar.value;
@@ -1729,9 +1755,11 @@ export const useChatStore = defineStore('chat', () => {
         currentUser.value = normalizeUser(payload.user);
         pendingPresenceStatus.value = normalizePresenceStatus(currentUser.value.status);
         currentUserRole.value = currentUser.value.role || 'user';
-        localAvatar.value = null;
         removeLegacyStoredAvatar();
-        void clearStoredAvatar();
+        if ((currentUser.value.avatar_url || null) !== localAvatar.value) {
+          localAvatar.value = currentUser.value.avatar_url || null;
+          void saveStoredAvatar(localAvatar.value);
+        }
         saveLocalStatusEmoji(currentUser.value.status_emoji || null);
         saveLocalStatusText(currentUser.value.status_text || null);
         if (payload.server) {
@@ -2208,6 +2236,7 @@ export const useChatStore = defineStore('chat', () => {
       send('auth:request', {
         username,
         publicKey: publicKeyBase64,
+        avatarUrl: localAvatar.value,
         statusEmoji: localStatusEmoji.value,
         statusText: localStatusText.value
       });
