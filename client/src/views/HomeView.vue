@@ -1504,7 +1504,7 @@ watch(
                     referrerpolicy="strict-origin-when-cross-origin"
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
                     allowfullscreen
-                    sandbox="allow-same-origin allow-scripts allow-popups allow-presentation"
+                    sandbox="allow-same-origin allow-scripts allow-popups allow-presentation allow-popups-to-escape-sandbox"
                   />
 
                   <a
