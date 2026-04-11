@@ -289,3 +289,7 @@ body {
   border-radius: 9999px;
   background: rgb(24 24 27);
 }
+
+.emoji-picker {
+    padding: 0 !important;
+}

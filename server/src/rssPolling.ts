@@ -195,7 +195,7 @@ const pollChannelFeed = async (channel: Channel) => {
       connectionManager.broadcastToAuthenticated({
         type: 'new_message',
         payload: {
-          message: withMessageEmbeds({
+          message: await withMessageEmbeds({
             ...message,
             reactions: message.reactions || [],
             user: rssBotUser
