@@ -22,6 +22,7 @@ const isMuted = ref(false)
 const isFullscreen = ref(false)
 const isSeeking = ref(false)
 const isVolumePopoverOpen = ref(false)
+const isPlayerInteractionHovered = ref(false)
 const hasLoadedMetadata = ref(false)
 const currentTime = ref(0)
 const duration = ref(0)
@@ -237,6 +238,8 @@ const toggleVolumePopover = () => {
   isVolumePopoverOpen.value = !isVolumePopoverOpen.value
 }
 
+const showOverlay = computed(() => isPlayerInteractionHovered.value || isVolumePopoverOpen.value)
+
 const handleDocumentPointerDown = (event: Event) => {
   const target = event.target as Node | null
   if (!target || !playerRef.value?.contains(target)) {
@@ -307,6 +310,8 @@ onMounted(() => {
   <div
     ref="playerRef"
     class="video-player group relative flex w-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/80 shadow-[0_8px_30px_rgba(0,0,0,0.28)]"
+    @mouseenter="isPlayerInteractionHovered = true"
+    @mouseleave="isPlayerInteractionHovered = false"
   >
     <video
       ref="videoRef"
@@ -326,7 +331,10 @@ onMounted(() => {
       @volumechange="syncFromVideo"
     ></video>
 
-    <div class="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-zinc-950/95 via-zinc-950/70 to-transparent px-2.5 pb-2.5 pt-10 opacity-100 transition-opacity duration-200 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
+    <div
+      class="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-zinc-950/95 via-zinc-950/70 to-transparent px-2.5 pb-2.5 pt-10 transition-opacity duration-150"
+      :class="showOverlay ? 'opacity-100' : 'opacity-0'"
+    >
       <div class="pointer-events-auto rounded-2xl border border-white/10 bg-zinc-900/55 px-2.5 py-2 backdrop-blur-md">
         <div class="flex min-w-0 items-center gap-2 text-zinc-100">
           <button
