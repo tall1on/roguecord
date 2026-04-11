@@ -678,6 +678,43 @@ const getMessageEmbeds = (message: Message): MessageEmbed[] => {
   return Array.isArray(message.embeds) ? message.embeds : []
 }
 
+const SUPPRESSED_LINK_EMBED_TYPES = new Set<MessageEmbed['type']>(['spotify', 'youtube'])
+
+const EMBED_TYPES_WITHOUT_FALLBACK_LINK = new Set<MessageEmbed['type']>(['spotify', 'youtube', 'twitch'])
+
+const getSuppressedEmbedUrls = (message: Message): Set<string> => {
+  const suppressedUrls = new Set<string>()
+
+  for (const embed of getMessageEmbeds(message)) {
+    if (!SUPPRESSED_LINK_EMBED_TYPES.has(embed.type) || !embed.url) {
+      continue
+    }
+
+    suppressedUrls.add(embed.url)
+  }
+
+  return suppressedUrls
+}
+
+const shouldHideMessageContent = (message: Message): boolean => {
+  const content = typeof message.content === 'string' ? message.content.trim() : ''
+  if (!content) {
+    return false
+  }
+
+  const suppressedUrls = getSuppressedEmbedUrls(message)
+  if (suppressedUrls.size === 0) {
+    return false
+  }
+
+  const contentTokens = content.split(/\s+/)
+  if (contentTokens.length !== 1) {
+    return false
+  }
+
+  return suppressedUrls.has(contentTokens[0])
+}
+
 const getTrustedEmbedIframeSrc = (embed: MessageEmbed): string | null => {
   if (!embed.embedUrl || typeof embed.embedUrl !== 'string') {
     return null
@@ -735,6 +772,10 @@ const getEmbedIframeClass = (embed: MessageEmbed) => {
   return embed.type === 'spotify'
     ? 'w-full h-[152px] border-b border-[#3f4147]'
     : 'w-full aspect-video border-b border-[#3f4147]'
+}
+
+const shouldShowEmbedFallbackLink = (embed: MessageEmbed): boolean => {
+  return !EMBED_TYPES_WITHOUT_FALLBACK_LINK.has(embed.type)
 }
 
 const sendMessage = () => {
@@ -1332,7 +1373,11 @@ watch(
                   <p class="text-[12px] text-zinc-500 truncate">{{ getReplyPreviewText(entry.message.reply_to_message) }}</p>
                 </div>
               </div>
-              <p v-if="entry.message.content" class="text-zinc-300 whitespace-pre-wrap break-words leading-[1.35] text-[14px]" v-html="formatMessageContentWithLinks(entry.message.content)"></p>
+              <p
+                v-if="entry.message.content && !shouldHideMessageContent(entry.message)"
+                class="text-zinc-300 whitespace-pre-wrap break-words leading-[1.35] text-[14px]"
+                v-html="formatMessageContentWithLinks(entry.message.content)"
+              ></p>
               <div v-if="entry.message.attachments?.length" class="mt-2 space-y-2">
                 <div
                   v-for="attachment in entry.message.attachments"
@@ -1405,6 +1450,7 @@ watch(
                   />
 
                   <a
+                    v-if="shouldShowEmbedFallbackLink(embed)"
                     :href="embed.url"
                     target="_blank"
                     rel="noopener noreferrer"
