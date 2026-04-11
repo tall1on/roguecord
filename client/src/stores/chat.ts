@@ -73,6 +73,12 @@ export interface MessageEmbed {
   description: string | null;
   thumbnailUrl: string | null;
   embedUrl: string | null;
+  authorName?: string | null;
+  authorUsername?: string | null;
+  publishedAt?: string | null;
+  mediaType?: 'image' | 'video' | null;
+  mediaUrl?: string | null;
+  mediaThumbnailUrl?: string | null;
 }
 
 export interface MessageReaction {

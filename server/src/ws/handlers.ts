@@ -2089,7 +2089,7 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
             const systemUser = await getOrCreateSystemUser();
             const welcomeContent = `Welcome ${user.username} to the server!`;
             const message = await createMessage(server.welcomeChannelId, systemUser.id, welcomeContent);
-            const messageWithUser = withMessageEmbeds({ ...message, user: systemUser });
+            const messageWithUser = await withMessageEmbeds({ ...message, user: systemUser });
             
             connectionManager.broadcastToAuthenticated({
               type: 'new_message',
@@ -2815,7 +2815,7 @@ const handleCompleteFileUpload = async (
     const replyAttachmentMap = replyToMessage ? await getMessageAttachments([replyToMessage.id]) : {};
     const replyUser = replyToMessage ? await getResolvedUser(replyToMessage.user_id) : null;
 
-    const messageWithUser = withMessageEmbeds({
+    const messageWithUser = await withMessageEmbeds({
       ...message,
       user,
       attachments: [createdAttachment],
@@ -2973,7 +2973,7 @@ const handleSendMessage = async (client: ClientConnection, payload: { channel_id
   const replyAttachmentMap = replyToMessage ? await getMessageAttachments([replyToMessage.id]) : {};
   const replyUser = replyToMessage ? await getUserById(replyToMessage.user_id) : null;
 
-  const messageWithUser = withMessageEmbeds({
+  const messageWithUser = await withMessageEmbeds({
     ...message,
     user,
     attachments: createdAttachments,
@@ -4452,7 +4452,7 @@ const handleJoinServer = async (client: ClientConnection, payload: { serverId: s
   if (server.welcomeChannelId) {
     const welcomeContent = `Just joined the server!`;
     const message = await createMessage(server.welcomeChannelId, user.id, welcomeContent);
-    const messageWithUser = withMessageEmbeds({ ...message, user });
+    const messageWithUser = await withMessageEmbeds({ ...message, user });
     
     connectionManager.broadcastToAuthenticated({
       type: 'NEW_MESSAGE',

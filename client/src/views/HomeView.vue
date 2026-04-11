@@ -680,7 +680,7 @@ const getMessageEmbeds = (message: Message): MessageEmbed[] => {
 
 const SUPPRESSED_LINK_EMBED_TYPES = new Set<MessageEmbed['type']>(['spotify', 'youtube'])
 
-const EMBED_TYPES_WITHOUT_FALLBACK_LINK = new Set<MessageEmbed['type']>(['spotify', 'youtube', 'twitch'])
+const EMBED_TYPES_WITHOUT_FALLBACK_LINK = new Set<MessageEmbed['type']>(['spotify', 'youtube', 'twitch', 'x'])
 
 const getXPostMeta = (embed: MessageEmbed) => {
   if (embed.type !== 'x') {
@@ -701,12 +701,29 @@ const getXPostMeta = (embed: MessageEmbed) => {
     }
 
     return {
-      username,
-      postId
+      username: embed.authorUsername || username,
+      postId,
+      authorName: embed.authorName || null
     }
   } catch {
     return null
   }
+}
+
+const getXEmbedMediaSrc = (embed: MessageEmbed) => {
+  if (embed.type !== 'x') {
+    return null
+  }
+
+  if (embed.mediaType === 'image' && embed.mediaUrl) {
+    return embed.mediaUrl
+  }
+
+  if (embed.mediaThumbnailUrl) {
+    return embed.mediaThumbnailUrl
+  }
+
+  return embed.thumbnailUrl || null
 }
 
 const getSuppressedEmbedUrls = (message: Message): Set<string> => {
@@ -1500,10 +1517,33 @@ watch(
                     <div class="flex items-start justify-between gap-3">
                       <div class="min-w-0 flex-1">
                         <p class="text-xs uppercase tracking-wide text-sky-400">{{ embed.provider }}</p>
-                        <p class="mt-1 text-sm font-semibold text-white truncate">{{ embed.title }}</p>
-                        <p v-if="getXPostMeta(embed)" class="mt-2 text-sm text-zinc-300 break-all">
+                        <p class="mt-1 text-sm font-semibold text-white truncate">{{ getXPostMeta(embed)?.authorName || embed.title }}</p>
+                        <p v-if="getXPostMeta(embed)" class="mt-1 text-xs text-zinc-400 break-all">
                           @{{ getXPostMeta(embed)?.username }} · Post {{ getXPostMeta(embed)?.postId }}
                         </p>
+                        <p v-if="embed.description" class="mt-3 text-sm leading-6 text-zinc-200 whitespace-pre-wrap break-words">{{ embed.description }}</p>
+                        <img
+                          v-if="getXEmbedMediaSrc(embed) && embed.mediaType === 'image'"
+                          :src="getXEmbedMediaSrc(embed) || ''"
+                          alt="X post media"
+                          class="mt-3 max-h-[420px] w-full rounded-xl object-cover"
+                          loading="lazy"
+                        />
+                        <div
+                          v-else-if="getXEmbedMediaSrc(embed) && embed.mediaType === 'video'"
+                          class="mt-3 overflow-hidden rounded-xl border border-[#3f4147] bg-black"
+                        >
+                          <img
+                            :src="getXEmbedMediaSrc(embed) || ''"
+                            alt="X post video preview"
+                            class="max-h-[420px] w-full object-cover"
+                            loading="lazy"
+                          />
+                          <div class="flex items-center justify-between gap-3 border-t border-[#3f4147] px-3 py-2 text-xs text-zinc-300">
+                            <span>Video preview</span>
+                            <span class="rounded-full border border-[#4a4d55] px-2 py-1 uppercase tracking-wide">Open on X</span>
+                          </div>
+                        </div>
                         <p class="mt-2 text-xs text-blue-300 truncate">{{ embed.displayUrl }}</p>
                       </div>
                       <div class="shrink-0 rounded-full border border-[#3f4147] px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-zinc-300">
