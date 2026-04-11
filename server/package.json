@@ -11,7 +11,8 @@
   "author": "",
   "type": "commonjs",
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1027.0",
+    "@aws-sdk/client-s3": "3.1029.0",
+    "@aws-sdk/s3-request-presigner": "3.1029.0",
     "@types/node": "~24.12.2",
     "@types/ws": "^8.18.1",
     "dotenv": "^17.4.1",

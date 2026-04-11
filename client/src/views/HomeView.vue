@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
+import { defineAsyncComponent, ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Component, type ComponentPublicInstance } from 'vue'
 import { Archive, Code2, File, FileText, Film, Folder, Image, Music2, Reply, Trash2, X } from 'lucide-vue-next'
 import { EmojiPicker } from 'vue3-twemoji-picker-final'
 import AppAvatar from '../components/common/AppAvatar.vue'
@@ -7,6 +7,8 @@ import { useChatStore, type Message, type MessageEmbed, type FolderChannelFile, 
 import { useWebRtcStore } from '../stores/webrtc'
 import RougeCordMark from '../components/branding/RougeCordMark.vue'
 import { openExternalUrl } from '../utils/openExternalUrl'
+
+const MessageAttachmentVideoPlayer = defineAsyncComponent(() => import('../components/chat/MessageAttachmentVideoPlayer.vue'))
 
 type TwemojiPickerSelection = {
   i?: string
@@ -676,6 +678,43 @@ const getMessageEmbeds = (message: Message): MessageEmbed[] => {
   return Array.isArray(message.embeds) ? message.embeds : []
 }
 
+const SUPPRESSED_LINK_EMBED_TYPES = new Set<MessageEmbed['type']>(['spotify', 'youtube'])
+
+const EMBED_TYPES_WITHOUT_FALLBACK_LINK = new Set<MessageEmbed['type']>(['spotify', 'youtube', 'twitch'])
+
+const getSuppressedEmbedUrls = (message: Message): Set<string> => {
+  const suppressedUrls = new Set<string>()
+
+  for (const embed of getMessageEmbeds(message)) {
+    if (!SUPPRESSED_LINK_EMBED_TYPES.has(embed.type) || !embed.url) {
+      continue
+    }
+
+    suppressedUrls.add(embed.url)
+  }
+
+  return suppressedUrls
+}
+
+const shouldHideMessageContent = (message: Message): boolean => {
+  const content = typeof message.content === 'string' ? message.content.trim() : ''
+  if (!content) {
+    return false
+  }
+
+  const suppressedUrls = getSuppressedEmbedUrls(message)
+  if (suppressedUrls.size === 0) {
+    return false
+  }
+
+  const contentTokens = content.split(/\s+/)
+  if (contentTokens.length !== 1) {
+    return false
+  }
+
+  return suppressedUrls.has(contentTokens[0])
+}
+
 const getTrustedEmbedIframeSrc = (embed: MessageEmbed): string | null => {
   if (!embed.embedUrl || typeof embed.embedUrl !== 'string') {
     return null
@@ -731,8 +770,12 @@ const getEmbedContainerClass = (embed: MessageEmbed) => {
 
 const getEmbedIframeClass = (embed: MessageEmbed) => {
   return embed.type === 'spotify'
-    ? 'w-full h-[152px] border-b border-[#3f4147]'
+    ? 'block w-full h-[152px] border-0'
     : 'w-full aspect-video border-b border-[#3f4147]'
+}
+
+const shouldShowEmbedFallbackLink = (embed: MessageEmbed): boolean => {
+  return !EMBED_TYPES_WITHOUT_FALLBACK_LINK.has(embed.type)
 }
 
 const sendMessage = () => {
@@ -1086,13 +1129,21 @@ const formatFileSize = (sizeBytes: number) => {
   return `${gb.toFixed(1)} GB`
 }
 
+const normalizeDisplayDate = (dateString: string) => {
+  const normalizedDateString = /(?:[zZ]|[+-]\d{2}:\d{2})$/.test(dateString)
+    ? dateString
+    : `${dateString}Z`
+
+  return new Date(normalizedDateString)
+}
+
 const formatTime = (dateString: string) => {
-  const date = new Date(dateString)
+  const date = normalizeDisplayDate(dateString)
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
 const formatDateDivider = (dateString: string) => {
-  const date = new Date(dateString)
+  const date = normalizeDisplayDate(dateString)
   const now = new Date()
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
   const yesterday = new Date(today)
@@ -1116,7 +1167,7 @@ const formatDateDivider = (dateString: string) => {
 }
 
 const getMessageDayKey = (dateString: string) => {
-  const date = new Date(dateString)
+  const date = normalizeDisplayDate(dateString)
   return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
 }
 
@@ -1330,7 +1381,11 @@ watch(
                   <p class="text-[12px] text-zinc-500 truncate">{{ getReplyPreviewText(entry.message.reply_to_message) }}</p>
                 </div>
               </div>
-              <p v-if="entry.message.content" class="text-zinc-300 whitespace-pre-wrap break-words leading-[1.35] text-[14px]" v-html="formatMessageContentWithLinks(entry.message.content)"></p>
+              <p
+                v-if="entry.message.content && !shouldHideMessageContent(entry.message)"
+                class="text-zinc-300 whitespace-pre-wrap break-words leading-[1.35] text-[14px]"
+                v-html="formatMessageContentWithLinks(entry.message.content)"
+              ></p>
               <div v-if="entry.message.attachments?.length" class="mt-2 space-y-2">
                 <div
                   v-for="attachment in entry.message.attachments"
@@ -1348,13 +1403,11 @@ watch(
                       <p class="media-attachment-embed__title">{{ getAttachmentDisplayLabel(attachment) }}</p>
                       <p class="media-attachment-embed__subtitle">{{ formatFileSize(attachment.size_bytes) }}</p>
                     </div>
-                    <video
+                    <MessageAttachmentVideoPlayer
                       v-if="getAttachmentInlineKind(attachment) === 'video'"
                       :src="attachment.url || ''"
-                      class="block max-h-[420px] max-w-full rounded-lg bg-black"
-                      controls
-                      preload="metadata"
-                    ></video>
+                      :title="getAttachmentDisplayLabel(attachment)"
+                    />
                     <audio
                       v-else
                       :src="attachment.url || ''"
@@ -1405,6 +1458,7 @@ watch(
                   />
 
                   <a
+                    v-if="shouldShowEmbedFallbackLink(embed)"
                     :href="embed.url"
                     target="_blank"
                     rel="noopener noreferrer"

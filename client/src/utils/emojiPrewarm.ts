@@ -6,9 +6,13 @@ const EMOJI_PREWARM_REQUEST_TIMEOUT_MS = 15000
 const EMOJI_PREWARM_MANIFEST_PATH = '/svg/index.json'
 const EMOJI_PREWARM_FILENAME_PATTERN = /^[0-9a-f-]+\.svg$/i
 const EMOJI_PREWARM_FRAME_WAIT_TIMEOUT_MS = 2000
+const EMOJI_PREWARM_STORAGE_KEY = 'emojiPrewarmCache'
+const EMOJI_PREWARM_STORAGE_VERSION = 1
+const MAX_EMOJI_PREWARM_CACHE_ENTRIES = 5000
 
 let emojiAssetUrlsPromise: Promise<string[]> | null = null
 let emojiPrewarmStarted = false
+let persistedPrewarmedEmojiUrls: Set<string> | null = null
 
 type IdleDeadlineLike = {
   didTimeout: boolean
@@ -23,6 +27,11 @@ type WindowWithIdleCallback = Window & typeof globalThis & {
   cancelIdleCallback?: (handle: number) => void
 }
 
+type EmojiPrewarmCacheRecord = {
+  version: number
+  urls: string[]
+}
+
 const sortEmojiUrls = (urls: string[]) => {
   return [...urls].sort((left, right) => left.localeCompare(right))
 }
@@ -32,6 +41,71 @@ const isValidEmojiFilename = (value: unknown): value is string => {
 }
 
 const toEmojiAssetUrl = (filename: string) => `/svg/${filename}`
+
+const readPersistedPrewarmedEmojiUrls = () => {
+  if (persistedPrewarmedEmojiUrls) {
+    return persistedPrewarmedEmojiUrls
+  }
+
+  const initialUrls = new Set<string>()
+
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = window.localStorage.getItem(EMOJI_PREWARM_STORAGE_KEY)
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<EmojiPrewarmCacheRecord> | string[] | null
+        const urls = Array.isArray(parsed)
+          ? parsed
+          : parsed?.version === EMOJI_PREWARM_STORAGE_VERSION && Array.isArray(parsed.urls)
+            ? parsed.urls
+            : []
+
+        for (const url of urls) {
+          if (typeof url === 'string') {
+            initialUrls.add(url)
+          }
+        }
+      }
+    } catch {
+      // Ignore invalid persisted cache content.
+    }
+  }
+
+  persistedPrewarmedEmojiUrls = initialUrls
+  return persistedPrewarmedEmojiUrls
+}
+
+const writePersistedPrewarmedEmojiUrls = (urls: Set<string>) => {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    const serializedUrls = Array.from(urls).sort().slice(-MAX_EMOJI_PREWARM_CACHE_ENTRIES)
+    const payload: EmojiPrewarmCacheRecord = {
+      version: EMOJI_PREWARM_STORAGE_VERSION,
+      urls: serializedUrls
+    }
+
+    window.localStorage.setItem(EMOJI_PREWARM_STORAGE_KEY, JSON.stringify(payload))
+
+    if (serializedUrls.length !== urls.size) {
+      persistedPrewarmedEmojiUrls = new Set(serializedUrls)
+    }
+  } catch {
+    // Ignore storage quota and serialization errors.
+  }
+}
+
+const markEmojiPrewarmed = (assetUrl: string) => {
+  const prewarmedUrls = readPersistedPrewarmedEmojiUrls()
+  if (prewarmedUrls.has(assetUrl)) {
+    return
+  }
+
+  prewarmedUrls.add(assetUrl)
+  writePersistedPrewarmedEmojiUrls(prewarmedUrls)
+}
 
 const getEmojiAssetUrls = async (): Promise<string[]> => {
   if (!emojiAssetUrlsPromise) {
@@ -174,7 +248,9 @@ const runEmojiPrewarm = async () => {
   await waitForAnimationFrame()
   await delay(EMOJI_PREWARM_START_DELAY_MS)
 
-  const assetUrls = await getEmojiAssetUrls().catch(() => [])
+  const prewarmedUrls = readPersistedPrewarmedEmojiUrls()
+  const assetUrls = (await getEmojiAssetUrls().catch(() => []))
+    .filter((assetUrl) => !prewarmedUrls.has(assetUrl))
 
   let nextIndex = 0
   const workers = Array.from({ length: EMOJI_PREWARM_CONCURRENCY }, async () => {
@@ -183,6 +259,7 @@ const runEmojiPrewarm = async () => {
       nextIndex += 1
 
       await runPrewarmSlot(assetUrl)
+      markEmojiPrewarmed(assetUrl)
     }
   })
 

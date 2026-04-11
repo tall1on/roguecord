@@ -114,7 +114,7 @@ export interface MessageAttachment {
   size_bytes: number;
   storage_provider?: 'data_dir' | 's3';
   storage_key?: string | null;
-  url?: string | null;
+  url: string | null;
 }
 
 export interface PendingMessageUploadProgress {
