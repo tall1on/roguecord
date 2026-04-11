@@ -37,9 +37,9 @@ const sharedEmojiPickerOptions = {
   locals: 'en',
   native: true,
   hasGroupIcons: true,
-  hasSearch: true,
-  hasGroupNames: true,
-  stickyGroupNames: true,
+  hasSearch: false,
+  hasGroupNames: false,
+  stickyGroupNames: false,
   hasSkinTones: true,
   recentRecords: true
 } as const
