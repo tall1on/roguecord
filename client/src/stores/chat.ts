@@ -416,6 +416,64 @@ export const useChatStore = defineStore('chat', () => {
   
   const activeChannelId = ref<string | null>(null);
   const activeMainPanel = ref<ActiveMainPanel>({ type: 'text', channelId: null });
+
+  const getLastActiveChannelStorageKey = (serverAddress: string) => `lastActiveChannel:${serverAddress}`;
+
+  const getSavedActiveChannelId = (serverAddress: string | null | undefined): string | null => {
+    if (!serverAddress) {
+      return null;
+    }
+
+    const storedChannelId = localStorage.getItem(getLastActiveChannelStorageKey(serverAddress));
+    return storedChannelId && storedChannelId.trim() ? storedChannelId : null;
+  };
+
+  const getActiveConnectionAddress = (): string | null => {
+    if (!activeConnectionId.value) {
+      return null;
+    }
+
+    return savedConnections.value.find((connection) => connection.id === activeConnectionId.value)?.address || null;
+  };
+
+  const persistActiveChannelId = (channelId: string | null, serverAddress: string | null = getActiveConnectionAddress()) => {
+    if (!serverAddress) {
+      return;
+    }
+
+    const storageKey = getLastActiveChannelStorageKey(serverAddress);
+
+    if (channelId && channelId.trim()) {
+      localStorage.setItem(storageKey, channelId);
+      return;
+    }
+
+    localStorage.removeItem(storageKey);
+  };
+
+  const getValidSavedActiveTextChannel = (availableChannels: Channel[], serverAddress: string | null = getActiveConnectionAddress()): Channel | null => {
+    const savedChannelId = getSavedActiveChannelId(serverAddress);
+    if (!savedChannelId) {
+      return null;
+    }
+
+    return availableChannels.find((channel: Channel) => channel.id === savedChannelId && (channel.type === 'text' || channel.type === 'rss')) || null;
+  };
+
+  const activateChannel = (channel: Channel | null) => {
+    if (channel && (channel.type === 'text' || channel.type === 'rss')) {
+      activeChannelId.value = channel.id;
+      activeMainPanel.value = { type: 'text', channelId: channel.id };
+      persistActiveChannelId(channel.id);
+      clearChannelUnread(channel.id);
+      getMessages(channel.id);
+      return;
+    }
+
+    activeChannelId.value = null;
+    activeMainPanel.value = { type: 'text', channelId: null };
+    persistActiveChannelId(null);
+  };
   
   let pingInterval: number | null = null;
   let pongTimeout: number | null = null;
@@ -1931,11 +1989,17 @@ export const useChatStore = defineStore('chat', () => {
         pruneUnreadChannels(payload.channels || []);
         
         if (!activeChannelId.value) {
-          setFallbackActiveTextChannel(payload.channels || []);
+          const restoredChannel = getValidSavedActiveTextChannel(payload.channels || []);
+          if (restoredChannel) {
+            activateChannel(restoredChannel);
+          } else {
+            setFallbackActiveTextChannel(payload.channels || []);
+          }
         } else {
           const activeChannel = (payload.channels || []).find((c: Channel) => c.id === activeChannelId.value);
           if (activeChannel && (activeChannel.type === 'text' || activeChannel.type === 'rss')) {
             // Re-fetch messages for active channel in case we missed any while disconnected
+            persistActiveChannelId(activeChannel.id);
             getMessages(activeChannelId.value);
           } else {
             setFallbackActiveTextChannel(payload.channels || []);
@@ -2188,15 +2252,7 @@ export const useChatStore = defineStore('chat', () => {
 
   const setFallbackActiveTextChannel = (availableChannels: Channel[]) => {
     const firstTextChannel = availableChannels.find((c: Channel) => c.type === 'text' || c.type === 'rss');
-    if (firstTextChannel) {
-      activeChannelId.value = firstTextChannel.id;
-      activeMainPanel.value = { type: 'text', channelId: firstTextChannel.id };
-      clearChannelUnread(firstTextChannel.id);
-      getMessages(firstTextChannel.id);
-    } else {
-      activeChannelId.value = null;
-      activeMainPanel.value = { type: 'text', channelId: null };
-    }
+    activateChannel(firstTextChannel || null);
   };
 
   const createChannel = (category_id: string | null, name: string, type: 'text' | 'voice' | 'rss' | 'folder', feed_url?: string) => {
@@ -2655,17 +2711,15 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const setActiveChannel = (channel_id: string) => {
-    activeChannelId.value = channel_id;
     const channel = channels.value.find((c) => c.id === channel_id);
     if (channel?.type === 'folder') {
+      activeChannelId.value = channel_id;
       activeMainPanel.value = { type: 'folder', channelId: channel_id };
       requestFolderFiles(channel_id);
       return;
     }
 
-    activeMainPanel.value = { type: 'text', channelId: channel_id };
-    clearChannelUnread(channel_id);
-    getMessages(channel_id);
+    activateChannel(channel && (channel.type === 'text' || channel.type === 'rss') ? channel : null);
   };
 
   const requestFolderFiles = (channel_id: string) => {
