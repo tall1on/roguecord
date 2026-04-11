@@ -770,7 +770,7 @@ const getEmbedContainerClass = (embed: MessageEmbed) => {
 
 const getEmbedIframeClass = (embed: MessageEmbed) => {
   return embed.type === 'spotify'
-    ? 'w-full h-[152px] border-b border-[#3f4147]'
+    ? 'block w-full h-[152px] border-0'
     : 'w-full aspect-video border-b border-[#3f4147]'
 }
 
