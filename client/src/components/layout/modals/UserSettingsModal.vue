@@ -39,15 +39,14 @@ const avatarError = ref<string | null>(null)
 const statusEmojiPickerOpen = ref(false)
 const statusEmojiPickerRef = ref<HTMLElement | null>(null)
 const sharedEmojiPickerOptions = {
-  imgSrc: 'https://fastly.jsdelivr.net/gh/limin04551/vue3-twemoji-picker/public/img/',
-  locals: 'en',
-  native: true,
-  hasGroupIcons: true,
-  hasSearch: true,
-  hasGroupNames: true,
-  stickyGroupNames: true,
-  hasSkinTones: true,
-  recentRecords: true
+    locals: 'en',
+    native: true,
+    hasGroupIcons: true,
+    hasSearch: false,
+    hasGroupNames: false,
+    stickyGroupNames: false,
+    hasSkinTones: true,
+    recentRecords: true
 } as const
 
 const currentIdentityFingerprint = computed(() => {
