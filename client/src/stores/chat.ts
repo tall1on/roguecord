@@ -917,6 +917,16 @@ export const useChatStore = defineStore('chat', () => {
 
   const getLocalAvatar = () => localAvatar.value;
 
+  const getAuthAvatarDataUrl = () => {
+    if (typeof localAvatar.value !== 'string') {
+      return null;
+    }
+
+    return /^data:image\/(png|jpeg|gif);base64,/i.test(localAvatar.value)
+      ? localAvatar.value
+      : null;
+  };
+
   const DEFAULT_SERVER_PORT = '1337';
   const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
 
@@ -2233,10 +2243,11 @@ export const useChatStore = defineStore('chat', () => {
       if (localAvatar.value === null) {
         await initializeStoredAvatar();
       }
+      const authAvatarUrl = getAuthAvatarDataUrl();
       send('auth:request', {
         username,
         publicKey: publicKeyBase64,
-        avatarUrl: localAvatar.value,
+        avatarUrl: authAvatarUrl,
         statusEmoji: localStatusEmoji.value,
         statusText: localStatusText.value
       });
