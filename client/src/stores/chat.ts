@@ -1766,10 +1766,6 @@ export const useChatStore = defineStore('chat', () => {
         pendingPresenceStatus.value = normalizePresenceStatus(currentUser.value.status);
         currentUserRole.value = currentUser.value.role || 'user';
         removeLegacyStoredAvatar();
-        if ((currentUser.value.avatar_url || null) !== localAvatar.value) {
-          localAvatar.value = currentUser.value.avatar_url || null;
-          void saveStoredAvatar(localAvatar.value);
-        }
         saveLocalStatusEmoji(currentUser.value.status_emoji || null);
         saveLocalStatusText(currentUser.value.status_text || null);
         if (payload.server) {
