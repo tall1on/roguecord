@@ -682,6 +682,33 @@ const SUPPRESSED_LINK_EMBED_TYPES = new Set<MessageEmbed['type']>(['spotify', 'y
 
 const EMBED_TYPES_WITHOUT_FALLBACK_LINK = new Set<MessageEmbed['type']>(['spotify', 'youtube', 'twitch'])
 
+const getXPostMeta = (embed: MessageEmbed) => {
+  if (embed.type !== 'x') {
+    return null
+  }
+
+  try {
+    const parsed = new URL(embed.url)
+    const pathParts = parsed.pathname.split('/').filter(Boolean)
+    if (pathParts.length < 3 || pathParts[1]?.toLowerCase() !== 'status') {
+      return null
+    }
+
+    const username = pathParts[0] || ''
+    const postId = pathParts[2] || ''
+    if (!username || !postId) {
+      return null
+    }
+
+    return {
+      username,
+      postId
+    }
+  } catch {
+    return null
+  }
+}
+
 const getSuppressedEmbedUrls = (message: Message): Set<string> => {
   const suppressedUrls = new Set<string>()
 
@@ -763,9 +790,15 @@ const getTrustedEmbedIframeSrc = (embed: MessageEmbed): string | null => {
 }
 
 const getEmbedContainerClass = (embed: MessageEmbed) => {
-  return embed.type === 'spotify'
-    ? 'max-w-[420px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]'
-    : 'max-w-[560px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]'
+  if (embed.type === 'spotify') {
+    return 'max-w-[420px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]'
+  }
+
+  if (embed.type === 'x') {
+    return 'max-w-[560px] overflow-hidden rounded-xl border border-[#3f4147] bg-[#111214]'
+  }
+
+  return 'max-w-[560px] overflow-hidden rounded-lg border border-[#3f4147] bg-[#2b2d31]'
 }
 
 const getEmbedIframeClass = (embed: MessageEmbed) => {
@@ -1456,6 +1489,28 @@ watch(
                     allowfullscreen
                     sandbox="allow-same-origin allow-scripts allow-popups allow-presentation"
                   />
+
+                  <a
+                    v-else-if="embed.type === 'x'"
+                    :href="embed.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="block p-4 hover:bg-[#17181c] transition-colors"
+                  >
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0 flex-1">
+                        <p class="text-xs uppercase tracking-wide text-sky-400">{{ embed.provider }}</p>
+                        <p class="mt-1 text-sm font-semibold text-white truncate">{{ embed.title }}</p>
+                        <p v-if="getXPostMeta(embed)" class="mt-2 text-sm text-zinc-300 break-all">
+                          @{{ getXPostMeta(embed)?.username }} · Post {{ getXPostMeta(embed)?.postId }}
+                        </p>
+                        <p class="mt-2 text-xs text-blue-300 truncate">{{ embed.displayUrl }}</p>
+                      </div>
+                      <div class="shrink-0 rounded-full border border-[#3f4147] px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-zinc-300">
+                        Open
+                      </div>
+                    </div>
+                  </a>
 
                   <a
                     v-if="shouldShowEmbedFallbackLink(embed)"
