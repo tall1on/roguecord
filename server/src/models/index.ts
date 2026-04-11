@@ -1,6 +1,22 @@
 import { db } from '../db';
 import crypto from 'node:crypto';
 import { type MessageWithUserAndEmbeds, withMessageEmbeds } from '../messages/embeds';
+import { buildUserAvatarClientUrl } from '../storage/userAvatarStorage';
+import type { S3StorageConfig } from '../storage/s3Storage';
+
+let persistedS3ConfigResolver: (() => Promise<S3StorageConfig | null>) | null = null;
+
+export const registerPersistedS3ConfigResolver = (resolver: () => Promise<S3StorageConfig | null>) => {
+  persistedS3ConfigResolver = resolver;
+};
+
+const getPersistedS3ConfigForMessageSerialization = async (): Promise<S3StorageConfig | null> => {
+  if (!persistedS3ConfigResolver) {
+    return null;
+  }
+
+  return persistedS3ConfigResolver();
+};
 
 // Helper functions to wrap sqlite3 in Promises
 export const dbRun = (sql: string, params: any[] = []): Promise<void> => {
@@ -520,6 +536,23 @@ export interface User {
   role: string;
   created_at: string;
 }
+
+const resolveUserAvatarForClient = async (user: User, persistedS3Config: S3StorageConfig | null): Promise<User> => {
+  const avatar_url = await buildUserAvatarClientUrl({
+    userId: user.id,
+    avatarUrl: user.avatar_url,
+    avatarStorageProvider: user.avatar_storage_provider,
+    avatarStorageKey: user.avatar_storage_key,
+    avatarStorageName: user.avatar_storage_name,
+    avatarMimeType: user.avatar_mime_type,
+    persistedS3Config
+  });
+
+  return {
+    ...user,
+    avatar_url
+  };
+};
 
 export const createUser = async (
   username: string,
@@ -1267,39 +1300,42 @@ export const getMessageReplyReferences = async (messageIds: string[]): Promise<R
     .map((row) => row.reply_id as string | null)
     .filter((id): id is string => typeof id === 'string' && id.length > 0);
   const attachmentMap = await getMessageAttachments(replyIds);
+  const persistedS3Config = await getPersistedS3ConfigForMessageSerialization();
 
-  return rows.reduce<Record<string, MessageReplyReference | null>>((acc, row) => {
+  const entries = await Promise.all(rows.map(async (row) => {
     if (!row.reply_id || !row.reply_user_join_id) {
-      acc[row.message_id] = null;
-      return acc;
+      return [row.message_id, null] as const;
     }
 
-    acc[row.message_id] = {
+    const resolvedReplyUser = await resolveUserAvatarForClient({
+      id: row.reply_user_join_id,
+      username: row.reply_username,
+      avatar_url: row.reply_avatar_url,
+      avatar_mime_type: row.reply_avatar_mime_type ?? null,
+      avatar_storage_provider: row.reply_avatar_storage_provider === 's3' || row.reply_avatar_storage_provider === 'data_dir' ? row.reply_avatar_storage_provider : null,
+      avatar_storage_key: row.reply_avatar_storage_key ?? null,
+      avatar_storage_name: row.reply_avatar_storage_name ?? null,
+      status_emoji: null,
+      status_text: null,
+      public_key: row.reply_public_key,
+      last_ip: row.reply_last_ip,
+      presence_status: row.reply_presence_status ?? 'offline',
+      role: row.reply_role,
+      created_at: row.reply_user_created_at
+    }, persistedS3Config);
+
+    return [row.message_id, {
       id: row.reply_id,
       channel_id: row.reply_channel_id,
       user_id: row.reply_user_id,
       content: row.reply_content,
       created_at: row.reply_created_at,
-      user: {
-        id: row.reply_user_join_id,
-        username: row.reply_username,
-        avatar_url: row.reply_avatar_url,
-        avatar_mime_type: row.reply_avatar_mime_type ?? null,
-        avatar_storage_provider: row.reply_avatar_storage_provider === 's3' || row.reply_avatar_storage_provider === 'data_dir' ? row.reply_avatar_storage_provider : null,
-        avatar_storage_key: row.reply_avatar_storage_key ?? null,
-        avatar_storage_name: row.reply_avatar_storage_name ?? null,
-        status_emoji: null,
-        status_text: null,
-        public_key: row.reply_public_key,
-        last_ip: row.reply_last_ip,
-        presence_status: row.reply_presence_status ?? 'offline',
-        role: row.reply_role,
-        created_at: row.reply_user_created_at
-      },
+      user: resolvedReplyUser,
       attachments: attachmentMap[row.reply_id] || []
-    };
-    return acc;
-  }, {});
+    }] as const;
+  }));
+
+  return Object.fromEntries(entries);
 };
 
 export const createMessageAttachment = async (input: {
@@ -1812,13 +1848,15 @@ export const getChannelMessages = async (
   const pageMessages = hasMore ? messages.slice(0, normalizedLimit) : messages;
   const replyMap = await getMessageReplyReferences(pageMessages.map((message) => message.id));
   const messagesWithReactions = await enrichMessagesWithReactions(pageMessages);
+  const persistedS3Config = await getPersistedS3ConfigForMessageSerialization();
   
   // Fetch users for messages (could be done with a JOIN, but this is fine for now)
   const messagesWithUsers: MessageWithUserAndEmbedData[] = [];
   for (const msg of messagesWithReactions) {
     const user = await getUserById(msg.user_id);
     if (user) {
-      messagesWithUsers.push(withMessageEmbeds({ ...msg, user, reply_to_message: replyMap[msg.id] || null }));
+      const resolvedUser = await resolveUserAvatarForClient(user, persistedS3Config);
+      messagesWithUsers.push(withMessageEmbeds({ ...msg, user: resolvedUser, reply_to_message: replyMap[msg.id] || null }));
     }
   }
 
