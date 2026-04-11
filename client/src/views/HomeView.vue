@@ -1129,13 +1129,21 @@ const formatFileSize = (sizeBytes: number) => {
   return `${gb.toFixed(1)} GB`
 }
 
+const normalizeDisplayDate = (dateString: string) => {
+  const normalizedDateString = /(?:[zZ]|[+-]\d{2}:\d{2})$/.test(dateString)
+    ? dateString
+    : `${dateString}Z`
+
+  return new Date(normalizedDateString)
+}
+
 const formatTime = (dateString: string) => {
-  const date = new Date(dateString)
+  const date = normalizeDisplayDate(dateString)
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
 const formatDateDivider = (dateString: string) => {
-  const date = new Date(dateString)
+  const date = normalizeDisplayDate(dateString)
   const now = new Date()
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
   const yesterday = new Date(today)
@@ -1159,7 +1167,7 @@ const formatDateDivider = (dateString: string) => {
 }
 
 const getMessageDayKey = (dateString: string) => {
-  const date = new Date(dateString)
+  const date = normalizeDisplayDate(dateString)
   return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
 }
 
