@@ -10,6 +10,14 @@ type AudioElementWithSinkId = HTMLAudioElement & {
 type MediaSourceType = 'mic' | 'screen' | 'camera';
 type ScreenStreamFps = 15 | 30 | 60;
 type ScreenStreamResolution = 'source' | '1440p' | '1080p' | '720p' | '480p' | '4k' | '8k';
+type DisplayAudioConstraints = MediaTrackConstraints & {
+  suppressLocalAudioPlayback?: boolean;
+  systemAudio?: 'include' | 'exclude';
+  selfBrowserSurface?: 'include' | 'exclude';
+  surfaceSwitching?: 'include' | 'exclude';
+  monitorTypeSurfaces?: 'include' | 'exclude';
+  windowAudio?: 'exclude' | 'window' | 'system';
+};
 
 type ScreenStreamPreference = {
   fps: ScreenStreamFps;
@@ -518,11 +526,16 @@ export const useWebRtcStore = defineStore('webrtc', () => {
             echoCancellation: false,
             noiseSuppression: false,
             autoGainControl: false,
-            suppressLocalAudioPlayback: false
-          } as MediaTrackConstraints
+            suppressLocalAudioPlayback: false,
+            systemAudio: 'include',
+            selfBrowserSurface: 'exclude',
+            surfaceSwitching: 'include',
+            monitorTypeSurfaces: 'include',
+            windowAudio: 'system'
+          } as DisplayAudioConstraints
         });
       } catch (displayAudioError) {
-        console.warn('[WebRTC][screen] getDisplayMedia with audio constraints failed, retrying with audio=true', displayAudioError);
+        console.warn('[WebRTC][screen] getDisplayMedia with advanced audio constraints failed, retrying with audio=true', displayAudioError);
         displayStream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
           audio: true
@@ -594,14 +607,18 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       });
 
       if (audioTrack && device.value?.canProduce('audio')) {
-        screenAudioProducer.value = await readySendTransport.produce({
-          track: audioTrack,
-          appData: { source: 'screen' as MediaSourceType }
-        });
+        try {
+          screenAudioProducer.value = await readySendTransport.produce({
+            track: audioTrack,
+            appData: { source: 'screen' as MediaSourceType }
+          });
 
-        screenAudioProducer.value.on('transportclose', () => {
+          screenAudioProducer.value.on('transportclose', () => {
+            screenAudioProducer.value = null;
+          });
+        } catch (_screenAudioProduceError) {
           screenAudioProducer.value = null;
-        });
+        }
       }
 
       console.info('[WebRTC][screen] Produce resolved', {
