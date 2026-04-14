@@ -554,6 +554,52 @@ const resolveUserAvatarForClient = async (user: User, persistedS3Config: S3Stora
   };
 };
 
+type UserAvatarClientUrlCache = Map<string, string | null>;
+
+const buildUserAvatarClientUrlCacheKey = (user: User): string => {
+  const storageProvider = user.avatar_storage_provider || 'none';
+  const storageKey = user.avatar_storage_key || '';
+  const storageName = user.avatar_storage_name || '';
+  const avatarUrl = user.avatar_url || '';
+  return `${user.id}|${storageProvider}|${storageKey}|${storageName}|${avatarUrl}`;
+};
+
+const resolveUserAvatarForClientWithCache = async (
+  user: User,
+  persistedS3Config: S3StorageConfig | null,
+  avatarUrlCache: UserAvatarClientUrlCache | null
+): Promise<User> => {
+  if (!avatarUrlCache) {
+    return resolveUserAvatarForClient(user, persistedS3Config);
+  }
+
+  const cacheKey = buildUserAvatarClientUrlCacheKey(user);
+  const cachedAvatarUrl = avatarUrlCache.get(cacheKey);
+  if (cachedAvatarUrl !== undefined) {
+    return {
+      ...user,
+      avatar_url: cachedAvatarUrl
+    };
+  }
+
+  const avatar_url = await buildUserAvatarClientUrl({
+    userId: user.id,
+    avatarUrl: user.avatar_url,
+    avatarStorageProvider: user.avatar_storage_provider,
+    avatarStorageKey: user.avatar_storage_key,
+    avatarStorageName: user.avatar_storage_name,
+    avatarMimeType: user.avatar_mime_type,
+    persistedS3Config
+  });
+
+  avatarUrlCache.set(cacheKey, avatar_url);
+
+  return {
+    ...user,
+    avatar_url
+  };
+};
+
 export const createUser = async (
   username: string,
   public_key: string,
@@ -1261,7 +1307,10 @@ export const toggleMessageReaction = async (messageId: string, userId: string, e
   return getMessageReactionSummary(messageId);
 };
 
-export const getMessageReplyReferences = async (messageIds: string[]): Promise<Record<string, MessageReplyReference | null>> => {
+export const getMessageReplyReferences = async (
+  messageIds: string[],
+  avatarUrlCache: UserAvatarClientUrlCache | null = null
+): Promise<Record<string, MessageReplyReference | null>> => {
   if (messageIds.length === 0) {
     return {};
   }
@@ -1307,7 +1356,7 @@ export const getMessageReplyReferences = async (messageIds: string[]): Promise<R
       return [row.message_id, null] as const;
     }
 
-    const resolvedReplyUser = await resolveUserAvatarForClient({
+    const resolvedReplyUser = await resolveUserAvatarForClientWithCache({
       id: row.reply_user_join_id,
       username: row.reply_username,
       avatar_url: row.reply_avatar_url,
@@ -1322,7 +1371,7 @@ export const getMessageReplyReferences = async (messageIds: string[]): Promise<R
       presence_status: row.reply_presence_status ?? 'offline',
       role: row.reply_role,
       created_at: row.reply_user_created_at
-    }, persistedS3Config);
+    }, persistedS3Config, avatarUrlCache);
 
     return [row.message_id, {
       id: row.reply_id,
@@ -1846,7 +1895,8 @@ export const getChannelMessages = async (
 
   const hasMore = messages.length > normalizedLimit;
   const pageMessages = hasMore ? messages.slice(0, normalizedLimit) : messages;
-  const replyMap = await getMessageReplyReferences(pageMessages.map((message) => message.id));
+  const avatarUrlCache: UserAvatarClientUrlCache = new Map();
+  const replyMap = await getMessageReplyReferences(pageMessages.map((message) => message.id), avatarUrlCache);
   const messagesWithReactions = await enrichMessagesWithReactions(pageMessages);
   const persistedS3Config = await getPersistedS3ConfigForMessageSerialization();
   
@@ -1855,7 +1905,7 @@ export const getChannelMessages = async (
   for (const msg of messagesWithReactions) {
     const user = await getUserById(msg.user_id);
     if (user) {
-      const resolvedUser = await resolveUserAvatarForClient(user, persistedS3Config);
+      const resolvedUser = await resolveUserAvatarForClientWithCache(user, persistedS3Config, avatarUrlCache);
       messagesWithUsers.push(await withMessageEmbeds({ ...msg, user: resolvedUser, reply_to_message: replyMap[msg.id] || null }));
     }
   }

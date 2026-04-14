@@ -342,6 +342,11 @@ export const useChatStore = defineStore('chat', () => {
   let lastNewNotificationSoundAt = 0;
   const ws = ref<WebSocket | null>(null);
   const isConnected = ref(false);
+  const isConnecting = ref(false);
+  const isAuthPending = ref(false);
+  const isInitialSyncPending = ref(false);
+  const hasReceivedInitialChannels = ref(false);
+  const hasReceivedInitialMemberList = ref(false);
   const currentUser = ref<User | null>(null);
   const localAvatar = ref<string | null>(null);
   const currentUserRole = ref<string>('user');
@@ -372,6 +377,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   });
   const lastError = ref<string | null>(null);
+  const connectionError = ref<string | null>(null);
   
   const DEFAULT_NEW_USER_SERVER_ADDRESS = 'wss://rc1.exatek.de:1337';
 
@@ -1301,6 +1307,7 @@ export const useChatStore = defineStore('chat', () => {
     const delay = Math.floor(baseDelay + jitter);
     
     console.log(`Scheduling reconnect in ${delay}ms (attempt ${reconnectAttempts + 1})`);
+    isConnecting.value = true;
     
     reconnectTimer = window.setTimeout(() => {
       reconnectTimer = null;
@@ -1352,6 +1359,11 @@ export const useChatStore = defineStore('chat', () => {
     
     localStorage.setItem('lastUsedServer', wsUrl);
     
+    isConnecting.value = true;
+    isAuthPending.value = false;
+    isInitialSyncPending.value = false;
+    hasReceivedInitialChannels.value = false;
+    hasReceivedInitialMemberList.value = false;
     ws.value = new WebSocket(wsUrl);
     
     let hasConnectedOnce = false;
@@ -1359,6 +1371,8 @@ export const useChatStore = defineStore('chat', () => {
     ws.value.onopen = () => {
       hasConnectedOnce = true;
       isConnected.value = true;
+      isConnecting.value = false;
+      connectionError.value = null;
       reconnectAttempts = 0;
       console.log('WebSocket connected');
       
@@ -1388,6 +1402,11 @@ export const useChatStore = defineStore('chat', () => {
     
     ws.value.onclose = () => {
       isConnected.value = false;
+      isConnecting.value = false;
+      isAuthPending.value = false;
+      isInitialSyncPending.value = false;
+      hasReceivedInitialChannels.value = false;
+      hasReceivedInitialMemberList.value = false;
       ws.value = null;
       console.log('WebSocket disconnected');
       
@@ -1401,16 +1420,26 @@ export const useChatStore = defineStore('chat', () => {
       }
       
       if (!isIntentionalDisconnect) {
+        connectionError.value = 'Connection lost. Reconnecting...';
         if (isAutoStartup && !hasConnectedOnce) {
           console.log('Connection failed on automatic startup, not reconnecting.');
+          connectionError.value = 'Failed to connect to server.';
           return;
         }
         
         scheduleReconnect(wsUrl);
+      } else {
+        connectionError.value = null;
       }
     };
     
     ws.value.onerror = (error) => {
+      isConnecting.value = false;
+      isAuthPending.value = false;
+      isInitialSyncPending.value = false;
+      hasReceivedInitialChannels.value = false;
+      hasReceivedInitialMemberList.value = false;
+      connectionError.value = 'WebSocket connection error.';
       console.error('WebSocket error:', error);
     };
     
@@ -1433,6 +1462,10 @@ export const useChatStore = defineStore('chat', () => {
 
   const disconnect = () => {
     isIntentionalDisconnect = true;
+    isAuthPending.value = false;
+    isInitialSyncPending.value = false;
+    hasReceivedInitialChannels.value = false;
+    hasReceivedInitialMemberList.value = false;
     if (reconnectTimer) {
       window.clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -1452,6 +1485,7 @@ export const useChatStore = defineStore('chat', () => {
       ws.value = null;
     }
     isConnected.value = false;
+    isConnecting.value = false;
     activeConnectionId.value = null;
     categories.value = [];
     channels.value = [];
@@ -1752,6 +1786,11 @@ export const useChatStore = defineStore('chat', () => {
 
   const handleMessage = async (message: any) => {
     const { type, payload } = message;
+
+    const updateInitialSyncPending = () => {
+      isInitialSyncPending.value = Boolean(currentUser.value)
+        && !(hasReceivedInitialChannels.value && hasReceivedInitialMemberList.value);
+    };
     
     // Notify listeners
     messageListeners.value.forEach(listener => listener(message));
@@ -1768,7 +1807,12 @@ export const useChatStore = defineStore('chat', () => {
         break;
 
       case 'authenticated':
+        isConnecting.value = false;
+        isAuthPending.value = false;
         currentUser.value = normalizeUser(payload.user);
+        hasReceivedInitialChannels.value = false;
+        hasReceivedInitialMemberList.value = false;
+        isInitialSyncPending.value = true;
         pendingPresenceStatus.value = normalizePresenceStatus(currentUser.value.status);
         currentUserRole.value = currentUser.value.role || 'user';
         removeLegacyStoredAvatar();
@@ -1836,6 +1880,8 @@ export const useChatStore = defineStore('chat', () => {
         users.value = Array.isArray(payload.members) ? payload.members.map((member: any) => normalizeUser(member)) : [];
         onlineUserIds.value = new Set(payload.onlineUserIds);
         memberIps.value = payload.memberIps || {};
+        hasReceivedInitialMemberList.value = true;
+        updateInitialSyncPending();
         if (currentUser.value) {
           const refreshedCurrentUser = users.value.find((user) => user.id === currentUser.value?.id) || currentUser.value;
           currentUser.value = {
@@ -1945,6 +1991,11 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       case 'auth:banned': {
+        isConnecting.value = false;
+        isAuthPending.value = false;
+        isInitialSyncPending.value = false;
+        hasReceivedInitialChannels.value = false;
+        hasReceivedInitialMemberList.value = false;
         const reasonText = payload?.reason ? ` Reason: ${payload.reason}` : '';
         moderationNotice.value = {
           action: 'ban',
@@ -1998,6 +2049,8 @@ export const useChatStore = defineStore('chat', () => {
         uncategorizedCategoryDeleted.value = payload.uncategorized_category_deleted === true;
         applyUnreadStatesFromServer(payload.unreadStates as ChannelUnreadState[] | undefined);
         pruneUnreadChannels(payload.channels || []);
+        hasReceivedInitialChannels.value = true;
+        updateInitialSyncPending();
         
         if (!activeChannelId.value) {
           const restoredChannel = getValidSavedActiveTextChannel(payload.channels || []);
@@ -2218,6 +2271,13 @@ export const useChatStore = defineStore('chat', () => {
       }
         
       case 'error':
+        isConnecting.value = false;
+        isAuthPending.value = false;
+        if (!currentUser.value) {
+          isInitialSyncPending.value = false;
+          hasReceivedInitialChannels.value = false;
+          hasReceivedInitialMemberList.value = false;
+        }
         lastError.value = payload.message;
         console.error('Server error:', payload.message);
         break;
@@ -2240,6 +2300,11 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const authenticate = async (username: string) => {
+    isAuthPending.value = true;
+    isInitialSyncPending.value = false;
+    hasReceivedInitialChannels.value = false;
+    hasReceivedInitialMemberList.value = false;
+    lastError.value = null;
     try {
       const { publicKeyBase64 } = await getKeys();
       if (localAvatar.value === null) {
@@ -2253,7 +2318,11 @@ export const useChatStore = defineStore('chat', () => {
         statusEmoji: localStatusEmoji.value,
         statusText: localStatusText.value
       });
+      if (!ws.value || ws.value.readyState !== WebSocket.OPEN || !isConnected.value) {
+        throw new Error('WebSocket is not connected during authentication request');
+      }
     } catch (e) {
+      isAuthPending.value = false;
       console.error("Authentication request failed", e);
     }
   };
@@ -2784,6 +2853,10 @@ export const useChatStore = defineStore('chat', () => {
 
   return {
     isConnected,
+    isConnecting,
+    isAuthPending,
+    isInitialSyncPending,
+    connectionError,
     currentUser,
     currentUserRole,
     server,

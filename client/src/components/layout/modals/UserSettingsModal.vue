@@ -34,6 +34,7 @@ const identityError = ref<string | null>(null)
 const identityImportInput = ref<HTMLInputElement | null>(null)
 const avatarInput = ref<HTMLInputElement | null>(null)
 const avatarPreviewUrl = ref<string | null>(chatStore.currentUser?.avatar_url ?? null)
+const avatarPreviewLoadFailed = ref(false)
 const avatarStatus = ref<string | null>(null)
 const avatarError = ref<string | null>(null)
 const statusEmojiPickerOpen = ref(false)
@@ -133,6 +134,7 @@ const promptAvatarSelection = () => {
 const clearAvatar = () => {
   void chatStore.saveLocalAvatar(null)
   avatarPreviewUrl.value = null
+  avatarPreviewLoadFailed.value = false
   avatarStatus.value = 'Profile picture will be removed when you save your profile changes.'
   avatarError.value = null
   if (avatarInput.value) {
@@ -182,6 +184,7 @@ const handleAvatarSelected = (event: Event) => {
 
     void chatStore.saveLocalAvatar(result)
     avatarPreviewUrl.value = result
+    avatarPreviewLoadFailed.value = false
     avatarStatus.value = 'Profile picture selected. Save your profile changes to upload it to the server.'
     avatarError.value = null
     target.value = ''
@@ -199,6 +202,10 @@ const handleAdminKeySubmit = () => {
     chatStore.submitAdminKey(adminKeyInput.value.trim())
     adminKeyInput.value = ''
   }
+}
+
+const handleAvatarPreviewError = () => {
+  avatarPreviewLoadFailed.value = true
 }
 
 const resetIdentityMessages = () => {
@@ -342,6 +349,7 @@ watch(() => chatStore.localStatusText, (value) => {
 
 watch(() => chatStore.currentUser?.avatar_url, (value) => {
   avatarPreviewUrl.value = chatStore.getLocalAvatar() ?? value ?? null
+  avatarPreviewLoadFailed.value = false
 })
 
 onMounted(() => {
@@ -496,7 +504,13 @@ onBeforeUnmount(() => {
 
             <div class="flex items-center gap-4">
               <div class="w-16 h-16 rounded-full overflow-hidden border border-white/10 bg-indigo-500/20 text-indigo-300 flex items-center justify-center text-xl font-bold">
-                <img v-if="avatarPreviewUrl" :src="avatarPreviewUrl" alt="Profile preview" class="w-full h-full object-cover" />
+                <img
+                  v-if="avatarPreviewUrl && !avatarPreviewLoadFailed"
+                  :src="avatarPreviewUrl"
+                  alt="Profile preview"
+                  class="w-full h-full object-cover"
+                  @error="handleAvatarPreviewError"
+                />
                 <span v-else>{{ (editedUsername || chatStore.currentUser?.username || '?').charAt(0).toUpperCase() }}</span>
               </div>
 
