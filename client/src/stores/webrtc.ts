@@ -10,14 +10,6 @@ type AudioElementWithSinkId = HTMLAudioElement & {
 type MediaSourceType = 'mic' | 'screen' | 'camera';
 type ScreenStreamFps = 15 | 30 | 60;
 type ScreenStreamResolution = 'source' | '1440p' | '1080p' | '720p' | '480p' | '4k' | '8k';
-type DisplayAudioConstraints = MediaTrackConstraints & {
-  suppressLocalAudioPlayback?: boolean;
-  systemAudio?: 'include' | 'exclude';
-  selfBrowserSurface?: 'include' | 'exclude';
-  surfaceSwitching?: 'include' | 'exclude';
-  monitorTypeSurfaces?: 'include' | 'exclude';
-  windowAudio?: 'exclude' | 'window' | 'system';
-};
 
 type ScreenStreamPreference = {
   fps: ScreenStreamFps;
@@ -516,6 +508,47 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     );
   };
 
+  const isConstraintRelatedDisplayCaptureError = (error: unknown) => {
+    const domErrorName =
+      error && typeof error === 'object' && 'name' in error
+        ? String((error as { name?: unknown }).name || '')
+        : '';
+
+    if (
+      domErrorName === 'OverconstrainedError' ||
+      domErrorName === 'ConstraintNotSatisfiedError' ||
+      domErrorName === 'TypeError'
+    ) {
+      return true;
+    }
+
+    const normalizedMessage = getErrorMessage(error).toLowerCase();
+    return normalizedMessage.includes('constraint');
+  };
+
+  const isUserCancelledOrPermissionDeniedDisplayCaptureError = (error: unknown) => {
+    const domErrorName =
+      error && typeof error === 'object' && 'name' in error
+        ? String((error as { name?: unknown }).name || '')
+        : '';
+
+    if (domErrorName === 'NotAllowedError' || domErrorName === 'AbortError') {
+      return true;
+    }
+
+    const normalizedMessage = getErrorMessage(error).toLowerCase();
+    return (
+      normalizedMessage.includes('permission denied') ||
+      normalizedMessage.includes('denied permission') ||
+      normalizedMessage.includes('permission dismissed') ||
+      normalizedMessage.includes('user cancelled') ||
+      normalizedMessage.includes('user canceled') ||
+      normalizedMessage.includes('cancelled') ||
+      normalizedMessage.includes('canceled') ||
+      normalizedMessage.includes('dismissed')
+    );
+  };
+
   const startScreenShare = async () => {
     if (!activeVoiceChannelId.value) {
       screenShareError.value = 'Join a voice channel before sharing your screen.';
@@ -551,50 +584,76 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
     try {
       let displayStream: MediaStream;
+      const preferredVideoConstraints: MediaTrackConstraints | true = true;
+
       try {
-        try {
-          displayStream = await navigator.mediaDevices.getDisplayMedia({
-            video: true,
-            audio: {
-              echoCancellation: false,
-              noiseSuppression: false,
-              autoGainControl: false,
-              suppressLocalAudioPlayback: false,
-              systemAudio: 'include',
-              selfBrowserSurface: 'exclude',
-              surfaceSwitching: 'include',
-              monitorTypeSurfaces: 'include',
-              windowAudio: 'system'
-            } as DisplayAudioConstraints
+        displayStream = await navigator.mediaDevices.getDisplayMedia({
+          video: preferredVideoConstraints,
+          audio: true
+        });
+      } catch (initialAudioError) {
+        if (isUserCancelledOrPermissionDeniedDisplayCaptureError(initialAudioError)) {
+          throw initialAudioError;
+        }
+
+        if (isConstraintRelatedDisplayCaptureError(initialAudioError)) {
+          console.info('[WebRTC][screen] Display-audio capture failed due to constraints, retrying with minimal constraints', {
+            errorName:
+              initialAudioError && typeof initialAudioError === 'object' && 'name' in initialAudioError
+                ? (initialAudioError as { name?: unknown }).name
+                : null,
+            errorMessage: getErrorMessage(initialAudioError)
           });
-        } catch (displayAudioError) {
-          if (isAudioDisplayCaptureError(displayAudioError)) {
-            throw displayAudioError;
+
+          try {
+            displayStream = await navigator.mediaDevices.getDisplayMedia({
+              video: true,
+              audio: true
+            });
+          } catch (minimalAudioError) {
+            if (isUserCancelledOrPermissionDeniedDisplayCaptureError(minimalAudioError)) {
+              throw minimalAudioError;
+            }
+
+            console.info('[WebRTC][screen] Minimal display-audio capture retry failed, retrying with video-only share', {
+              errorName:
+                minimalAudioError && typeof minimalAudioError === 'object' && 'name' in minimalAudioError
+                  ? (minimalAudioError as { name?: unknown }).name
+                  : null,
+              errorMessage: getErrorMessage(minimalAudioError)
+            });
+
+            try {
+              displayStream = await navigator.mediaDevices.getDisplayMedia({
+                video: true,
+                audio: false
+              });
+            } catch (videoOnlyError) {
+              throw videoOnlyError;
+            }
+          }
+        } else {
+          if (!isAudioDisplayCaptureError(initialAudioError)) {
+            throw initialAudioError;
           }
 
-          console.warn('[WebRTC][screen] getDisplayMedia with advanced audio constraints failed, retrying with audio=true', displayAudioError);
-          displayStream = await navigator.mediaDevices.getDisplayMedia({
-            video: true,
-            audio: true
+          console.info('[WebRTC][screen] Display-audio capture unavailable, retrying with video-only share', {
+            errorName:
+              initialAudioError && typeof initialAudioError === 'object' && 'name' in initialAudioError
+                ? (initialAudioError as { name?: unknown }).name
+                : null,
+            errorMessage: getErrorMessage(initialAudioError)
           });
-        }
-      } catch (displayMediaError) {
-        if (!isAudioDisplayCaptureError(displayMediaError)) {
-          throw displayMediaError;
-        }
 
-        console.warn('[WebRTC][screen] Display audio capture failed, retrying with video-only screen share', {
-          errorName:
-            displayMediaError && typeof displayMediaError === 'object' && 'name' in displayMediaError
-              ? (displayMediaError as { name?: unknown }).name
-              : null,
-          errorMessage: getErrorMessage(displayMediaError)
-        });
-
-        displayStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: false
-        });
+          try {
+            displayStream = await navigator.mediaDevices.getDisplayMedia({
+              video: true,
+              audio: false
+            });
+          } catch (videoOnlyError) {
+            throw videoOnlyError;
+          }
+        }
       }
 
       console.info('[WebRTC][screen] getDisplayMedia resolved', {
