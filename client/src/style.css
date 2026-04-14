@@ -292,4 +292,6 @@ body {
 
 .emoji-picker {
     padding: 0 !important;
+    max-height: 400px !important;
+    height: unset !important;
 }
