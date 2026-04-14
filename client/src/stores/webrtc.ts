@@ -46,6 +46,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const screenProducer = shallowRef<any | null>(null);
   const screenAudioProducer = shallowRef<any | null>(null);
   const screenShareStream = shallowRef<MediaStream | null>(null);
+  const screenShareFallbackAudioStream = shallowRef<MediaStream | null>(null);
   const screenShareError = ref<string | null>(null);
   const consumers = shallowRef<Map<string, any>>(new Map());
   
@@ -424,6 +425,17 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       screenShareStream.value = null;
     }
 
+    if (screenShareFallbackAudioStream.value) {
+      screenShareFallbackAudioStream.value.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (_e) {
+          // no-op
+        }
+      });
+      screenShareFallbackAudioStream.value = null;
+    }
+
     const localUserId = chatStore.currentUser?.id;
     if (localUserId && userScreenStreams.value.has(localUserId)) {
       deleteUserScreenStream(localUserId);
@@ -583,104 +595,190 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     }
 
     try {
-      let displayStream: MediaStream;
-      const preferredVideoConstraints: MediaTrackConstraints | true = true;
-      const userAgent = navigator.userAgent || '';
-      const isChromiumBasedBrowser =
-        /(Chrome|Chromium|Edg|Brave)\//.test(userAgent) &&
-        !/Firefox\//.test(userAgent) &&
-        !/Version\/.*Safari\//.test(userAgent);
-
-      const displayCaptureAttempts: Array<{
-        type: 'chrome-tab-audio-optimized' | 'standard-display-audio' | 'video-only-fallback';
-        constraints: DisplayMediaStreamOptions;
-      }> = [];
-
-      if (isChromiumBasedBrowser) {
-        const chromeTabVideoConstraints = {
-          displaySurface: 'browser',
-          preferCurrentTab: true,
-          selfBrowserSurface: 'exclude',
-          surfaceSwitching: 'include'
-        } as unknown as MediaTrackConstraints;
-
-        const chromeTabAudioConstraints = {
-          suppressLocalAudioPlayback: false
-        } as unknown as MediaTrackConstraints;
-
-        displayCaptureAttempts.push({
-          type: 'chrome-tab-audio-optimized',
-          constraints: {
-            video: chromeTabVideoConstraints,
-            audio: chromeTabAudioConstraints
-          }
+      if (screenShareStream.value || screenAudioProducer.value) {
+        console.warn('[WebRTC][screen] Cleaning stale local screen-share state before new capture', {
+          hasScreenShareStream: Boolean(screenShareStream.value),
+          hasScreenAudioProducer: Boolean(screenAudioProducer.value)
         });
+        cleanupScreenShareProducer(true);
       }
 
-      displayCaptureAttempts.push({
-        type: 'standard-display-audio',
-        constraints: {
-          video: preferredVideoConstraints,
-          audio: true
-        }
-      });
+      let displayStream: MediaStream | null = null;
+      let displayCaptureAttempt:
+        | 'chrome-tab-audio-optimized'
+        | 'standard-display-audio'
+        | 'plain-audio-retry-after-missing-track'
+        | 'video-only-fallback' = 'standard-display-audio';
+      let lastAudioCaptureError: unknown = null;
+      const userAgent = navigator.userAgent || '';
+      const isChromeBrowser = /Chrome\/\d+/i.test(userAgent) && !/Edg\//i.test(userAgent) && !/OPR\//i.test(userAgent);
+      let shouldRunExtraPlainAudioRetry = false;
 
-      displayCaptureAttempts.push({
-        type: 'video-only-fallback',
-        constraints: {
-          video: true,
-          audio: false
-        }
-      });
+      const stopDisplayStreamTracks = (stream: MediaStream) => {
+        stream.getTracks().forEach((track) => {
+          try {
+            track.stop();
+          } catch (_e) {
+            // no-op
+          }
+        });
+      };
 
-      let captureAttemptType: 'chrome-tab-audio-optimized' | 'standard-display-audio' | 'video-only-fallback' = 'standard-display-audio';
-      let captureError: unknown = null;
+      const audioCaptureAttempts: Array<{
+        type: 'chrome-tab-audio-optimized' | 'standard-display-audio';
+        constraints: any;
+      }> = isChromeBrowser
+        ? [
+            {
+              type: 'chrome-tab-audio-optimized',
+              constraints: {
+                video: true,
+                audio: true,
+                preferCurrentTab: true
+              } as any
+            },
+            {
+              type: 'standard-display-audio',
+              constraints: {
+                video: true,
+                audio: true
+              }
+            }
+          ]
+        : [
+            {
+              type: 'standard-display-audio',
+              constraints: {
+                video: true,
+                audio: true
+              }
+            }
+          ];
 
-      for (let i = 0; i < displayCaptureAttempts.length; i++) {
-        const attempt = displayCaptureAttempts[i];
+      for (let attemptIndex = 0; attemptIndex < audioCaptureAttempts.length; attemptIndex += 1) {
+        const attempt = audioCaptureAttempts[attemptIndex];
+        const nextAttemptType = audioCaptureAttempts[attemptIndex + 1]?.type || 'video-only-fallback';
+
         try {
-          displayStream = await navigator.mediaDevices.getDisplayMedia(attempt.constraints);
-          captureAttemptType = attempt.type;
-          captureError = null;
-          break;
-        } catch (attemptError) {
-          captureError = attemptError;
+          displayCaptureAttempt = attempt.type;
+          const attemptedStream = await navigator.mediaDevices.getDisplayMedia(attempt.constraints);
+          const audioTracks = attemptedStream.getAudioTracks();
+          const videoTracks = attemptedStream.getVideoTracks();
+          const hasAudioTrack = audioTracks.length > 0;
 
-          if (isUserCancelledOrPermissionDeniedDisplayCaptureError(attemptError)) {
-            throw attemptError;
-          }
-
-          const isLastAttempt = i === displayCaptureAttempts.length - 1;
-          if (isLastAttempt) {
-            throw attemptError;
-          }
-
-          const isRetryable =
-            isConstraintRelatedDisplayCaptureError(attemptError) ||
-            isAudioDisplayCaptureError(attemptError);
-
-          if (!isRetryable) {
-            throw attemptError;
-          }
-
-          console.debug('[WebRTC][screen] Display capture attempt failed, retrying', {
+          console.info('[WebRTC][screen] Display capture attempt resolved', {
             attemptType: attempt.type,
-            nextAttemptType: displayCaptureAttempts[i + 1]?.type || null,
+            streamId: attemptedStream.id,
+            hasAudioTrack,
+            audioTrackCount: audioTracks.length,
+            videoTrackCount: videoTracks.length,
+            audioTrackReadyStates: audioTracks.map((track) => track.readyState)
+          });
+
+          if (!hasAudioTrack) {
+            if (attempt.type === 'chrome-tab-audio-optimized') {
+              shouldRunExtraPlainAudioRetry = true;
+            }
+
+            console.warn('[WebRTC][screen] Display capture attempt returned stream without audio track', {
+              attemptType: attempt.type,
+              nextAttemptType
+            });
+            stopDisplayStreamTracks(attemptedStream);
+            continue;
+          }
+
+          displayStream = attemptedStream;
+          break;
+        } catch (audioAttemptError) {
+          if (isUserCancelledOrPermissionDeniedDisplayCaptureError(audioAttemptError)) {
+            throw audioAttemptError;
+          }
+
+          lastAudioCaptureError = audioAttemptError;
+          console.info('[WebRTC][screen] Display capture attempt failed, retrying', {
+            attemptType: attempt.type,
+            nextAttemptType,
+            constraintRelated: isConstraintRelatedDisplayCaptureError(audioAttemptError),
+            isAudioError: isAudioDisplayCaptureError(audioAttemptError),
             errorName:
-              attemptError && typeof attemptError === 'object' && 'name' in attemptError
-                ? (attemptError as { name?: unknown }).name
+              audioAttemptError && typeof audioAttemptError === 'object' && 'name' in audioAttemptError
+                ? (audioAttemptError as { name?: unknown }).name
                 : null,
-            errorMessage: getErrorMessage(attemptError)
+            errorMessage: getErrorMessage(audioAttemptError)
           });
         }
       }
 
-      if (!displayStream!) {
-        throw captureError;
+      if (!displayStream && shouldRunExtraPlainAudioRetry) {
+        try {
+          displayCaptureAttempt = 'plain-audio-retry-after-missing-track';
+          displayStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: true
+          });
+
+          const hasAudioTrack = displayStream.getAudioTracks().length > 0;
+          console.info('[WebRTC][screen] Display capture attempt resolved', {
+            attemptType: displayCaptureAttempt,
+            streamId: displayStream.id,
+            hasAudioTrack,
+            audioTrackCount: displayStream.getAudioTracks().length,
+            videoTrackCount: displayStream.getVideoTracks().length,
+            audioTrackReadyStates: displayStream.getAudioTracks().map((track) => track.readyState)
+          });
+
+          if (!hasAudioTrack) {
+            console.warn('[WebRTC][screen] Additional plain-audio retry returned no audio track; falling back to video-only capture', {
+              attemptType: displayCaptureAttempt,
+              nextAttemptType: 'video-only-fallback'
+            });
+            stopDisplayStreamTracks(displayStream);
+            displayStream = null;
+          }
+        } catch (plainAudioRetryError) {
+          if (isUserCancelledOrPermissionDeniedDisplayCaptureError(plainAudioRetryError)) {
+            throw plainAudioRetryError;
+          }
+
+          lastAudioCaptureError = plainAudioRetryError;
+          console.info('[WebRTC][screen] Display capture attempt failed, retrying', {
+            attemptType: displayCaptureAttempt,
+            nextAttemptType: 'video-only-fallback',
+            constraintRelated: isConstraintRelatedDisplayCaptureError(plainAudioRetryError),
+            isAudioError: isAudioDisplayCaptureError(plainAudioRetryError),
+            errorName:
+              plainAudioRetryError && typeof plainAudioRetryError === 'object' && 'name' in plainAudioRetryError
+                ? (plainAudioRetryError as { name?: unknown }).name
+                : null,
+            errorMessage: getErrorMessage(plainAudioRetryError)
+          });
+        }
+      }
+
+      if (!displayStream) {
+        console.info('[WebRTC][screen] Falling back to video-only capture after audio attempts failed', {
+          isChromeBrowser,
+          lastAudioErrorName:
+            lastAudioCaptureError && typeof lastAudioCaptureError === 'object' && 'name' in lastAudioCaptureError
+              ? (lastAudioCaptureError as { name?: unknown }).name
+              : null,
+          lastAudioErrorMessage: getErrorMessage(lastAudioCaptureError)
+        });
+
+        displayCaptureAttempt = 'video-only-fallback';
+        try {
+          displayStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: false
+          });
+        } catch (videoOnlyError) {
+          throw videoOnlyError;
+        }
       }
 
       console.info('[WebRTC][screen] getDisplayMedia resolved', {
-        attemptType: captureAttemptType,
+        attempt: displayCaptureAttempt,
         streamId: displayStream.id,
         trackCount: displayStream.getTracks().length,
         hasAudioTrack: displayStream.getAudioTracks().length > 0
@@ -710,11 +808,45 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         stopScreenShare();
       };
 
-      const audioTrack = displayStream.getAudioTracks()[0] || null;
-      if (!audioTrack) {
-        console.info('[WebRTC][screen] Display capture has no audio track; continuing with video-only screen share', {
-          attemptType: captureAttemptType
-        });
+      let audioTrack = displayStream.getAudioTracks()[0] || null;
+      let usingFallbackMicAudio = false;
+
+      if (!audioTrack && device.value?.canProduce('audio')) {
+        if (producer.value) {
+          console.info('[WebRTC][screen] Skipping fallback mic audio: active normal mic producer exists');
+        } else {
+          try {
+            const fallbackAudioStream = await navigator.mediaDevices.getUserMedia({
+              audio: true,
+              video: false
+            });
+            const fallbackAudioTrack = fallbackAudioStream.getAudioTracks()[0] || null;
+
+            if (fallbackAudioTrack) {
+              screenShareFallbackAudioStream.value = fallbackAudioStream;
+              audioTrack = fallbackAudioTrack;
+              usingFallbackMicAudio = true;
+              console.info('[WebRTC][screen] Using fallback mic audio for screen share');
+            } else {
+              fallbackAudioStream.getTracks().forEach((track) => {
+                try {
+                  track.stop();
+                } catch (_e) {
+                  // no-op
+                }
+              });
+              console.info('[WebRTC][screen] Fallback mic capture returned no audio track');
+            }
+          } catch (fallbackMicError) {
+            console.info('[WebRTC][screen] Fallback mic capture failed', {
+              errorName:
+                fallbackMicError && typeof fallbackMicError === 'object' && 'name' in fallbackMicError
+                  ? (fallbackMicError as { name?: unknown }).name
+                  : null,
+              errorMessage: getErrorMessage(fallbackMicError)
+            });
+          }
+        }
       }
 
       if (audioTrack) {
@@ -734,6 +866,17 @@ export const useWebRtcStore = defineStore('webrtc', () => {
               producer_id: currentScreenAudioProducer.id
             });
           }
+
+          if (usingFallbackMicAudio && screenShareFallbackAudioStream.value) {
+            screenShareFallbackAudioStream.value.getTracks().forEach((track) => {
+              try {
+                track.stop();
+              } catch (_e) {
+                // no-op
+              }
+            });
+            screenShareFallbackAudioStream.value = null;
+          }
         };
       }
 
@@ -751,39 +894,33 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         appData: { source: 'screen' as MediaSourceType }
       });
 
-      if (audioTrack) {
-        if (device.value?.canProduce('audio')) {
-          try {
-            screenAudioProducer.value = await readySendTransport.produce({
-              track: audioTrack,
-              appData: { source: 'screen' as MediaSourceType }
-            });
-
-            screenAudioProducer.value.on('transportclose', () => {
-              screenAudioProducer.value = null;
-            });
-          } catch (screenAudioProduceError) {
-            screenAudioProducer.value = null;
-            console.debug('[WebRTC][screen] Screen audio produce failed; continuing with video-only screen share', {
-              attemptType: captureAttemptType,
-              errorName:
-                screenAudioProduceError && typeof screenAudioProduceError === 'object' && 'name' in screenAudioProduceError
-                  ? (screenAudioProduceError as { name?: unknown }).name
-                  : null,
-              errorMessage: getErrorMessage(screenAudioProduceError)
-            });
-          }
-        } else {
-          console.info('[WebRTC][screen] Screen audio track captured but audio producer is unavailable', {
-            attemptType: captureAttemptType
+      if (audioTrack && device.value?.canProduce('audio')) {
+        console.info('[WebRTC][screen] Producing screen audio track', {
+          audioSource: usingFallbackMicAudio ? 'fallback-mic' : 'display-audio',
+          trackId: audioTrack.id,
+          readyState: audioTrack.readyState
+        });
+        try {
+          screenAudioProducer.value = await readySendTransport.produce({
+            track: audioTrack,
+            appData: { source: 'screen' as MediaSourceType }
           });
+
+          screenAudioProducer.value.on('transportclose', () => {
+            screenAudioProducer.value = null;
+          });
+        } catch (_screenAudioProduceError) {
+          screenAudioProducer.value = null;
         }
+      } else {
+        console.info('[WebRTC][screen] Screen audio track not produced', {
+          hasAudioTrack: Boolean(audioTrack),
+          canProduceAudio: Boolean(device.value?.canProduce('audio'))
+        });
       }
 
       console.info('[WebRTC][screen] Produce resolved', {
-        producerId: screenProducer.value?.id,
-        hasAudioTrack: Boolean(audioTrack),
-        hasAudioProducer: Boolean(screenAudioProducer.value)
+        producerId: screenProducer.value?.id
       });
 
 
@@ -796,13 +933,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       });
     } catch (error) {
       screenShareError.value = 'Failed to start screen share. Please try again.';
-      console.warn('[WebRTC][screen] Failed to start screen share', {
-        errorName:
-          error && typeof error === 'object' && 'name' in error
-            ? (error as { name?: unknown }).name
-            : null,
-        errorMessage: getErrorMessage(error)
-      });
+      console.error('[WebRTC][screen] Failed to start screen share:', error);
       cleanupScreenShareProducer();
     }
   };
