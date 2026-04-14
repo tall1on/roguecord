@@ -880,12 +880,12 @@ onUnmounted(() => {
     <div class="flex min-h-0 min-w-0 flex-1 overflow-hidden relative">
       <ServerListSidebar @open-create-server="showCreateServerModal = true" />
 
-      <div v-if="chatStore.isConnecting || chatStore.isAuthPending" class="absolute inset-y-0 right-0 left-[72px] z-50 flex flex-col items-center justify-center bg-zinc-900/80 backdrop-blur-sm">
+      <div v-if="chatStore.isConnecting || chatStore.isAuthPending || chatStore.isInitialSyncPending" class="absolute inset-y-0 right-0 left-[72px] z-50 flex flex-col items-center justify-center bg-zinc-900/80 backdrop-blur-sm">
         <div class="w-12 h-12 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin mb-4"></div>
         <p class="text-zinc-300 font-medium animate-pulse">Connecting to server...</p>
       </div>
 
-      <div v-if="chatStore.activeConnectionId && !chatStore.isConnected && !chatStore.isConnecting && !chatStore.isAuthPending" class="absolute top-0 left-[72px] right-0 z-50 flex items-center justify-center bg-red-500/90 text-white px-4 py-2 shadow-md">
+      <div v-if="chatStore.activeConnectionId && !chatStore.isConnected && !chatStore.isConnecting && !chatStore.isAuthPending && !chatStore.isInitialSyncPending" class="absolute top-0 left-[72px] right-0 z-50 flex items-center justify-center bg-red-500/90 text-white px-4 py-2 shadow-md">
         <AlertCircle class="w-4 h-4 mr-2" />
         <p class="text-sm font-medium">
           {{ chatStore.connectionError || 'Disconnected from server. Trying to reconnect...' }}
