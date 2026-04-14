@@ -342,6 +342,7 @@ export const useChatStore = defineStore('chat', () => {
   let lastNewNotificationSoundAt = 0;
   const ws = ref<WebSocket | null>(null);
   const isConnected = ref(false);
+  const isConnecting = ref(false);
   const currentUser = ref<User | null>(null);
   const localAvatar = ref<string | null>(null);
   const currentUserRole = ref<string>('user');
@@ -1301,6 +1302,7 @@ export const useChatStore = defineStore('chat', () => {
     const delay = Math.floor(baseDelay + jitter);
     
     console.log(`Scheduling reconnect in ${delay}ms (attempt ${reconnectAttempts + 1})`);
+    isConnecting.value = true;
     
     reconnectTimer = window.setTimeout(() => {
       reconnectTimer = null;
@@ -1352,6 +1354,7 @@ export const useChatStore = defineStore('chat', () => {
     
     localStorage.setItem('lastUsedServer', wsUrl);
     
+    isConnecting.value = true;
     ws.value = new WebSocket(wsUrl);
     
     let hasConnectedOnce = false;
@@ -1388,6 +1391,7 @@ export const useChatStore = defineStore('chat', () => {
     
     ws.value.onclose = () => {
       isConnected.value = false;
+      isConnecting.value = false;
       ws.value = null;
       console.log('WebSocket disconnected');
       
@@ -1411,6 +1415,7 @@ export const useChatStore = defineStore('chat', () => {
     };
     
     ws.value.onerror = (error) => {
+      isConnecting.value = false;
       console.error('WebSocket error:', error);
     };
     
@@ -1452,6 +1457,7 @@ export const useChatStore = defineStore('chat', () => {
       ws.value = null;
     }
     isConnected.value = false;
+    isConnecting.value = false;
     activeConnectionId.value = null;
     categories.value = [];
     channels.value = [];
@@ -1768,6 +1774,7 @@ export const useChatStore = defineStore('chat', () => {
         break;
 
       case 'authenticated':
+        isConnecting.value = false;
         currentUser.value = normalizeUser(payload.user);
         pendingPresenceStatus.value = normalizePresenceStatus(currentUser.value.status);
         currentUserRole.value = currentUser.value.role || 'user';
@@ -1945,6 +1952,7 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       case 'auth:banned': {
+        isConnecting.value = false;
         const reasonText = payload?.reason ? ` Reason: ${payload.reason}` : '';
         moderationNotice.value = {
           action: 'ban',
@@ -2218,6 +2226,7 @@ export const useChatStore = defineStore('chat', () => {
       }
         
       case 'error':
+        isConnecting.value = false;
         lastError.value = payload.message;
         console.error('Server error:', payload.message);
         break;
@@ -2784,6 +2793,7 @@ export const useChatStore = defineStore('chat', () => {
 
   return {
     isConnected,
+    isConnecting,
     currentUser,
     currentUserRole,
     server,

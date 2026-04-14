@@ -877,8 +877,13 @@ onUnmounted(() => {
       v-model:autoConnectLastServer="autoConnectLastServer"
     />
 
-    <div class="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+    <div class="flex min-h-0 min-w-0 flex-1 overflow-hidden relative">
       <ServerListSidebar @open-create-server="showCreateServerModal = true" />
+
+      <div v-if="chatStore.isConnecting" class="absolute inset-y-0 right-0 left-[72px] z-50 flex flex-col items-center justify-center bg-zinc-900/80 backdrop-blur-sm">
+        <div class="w-12 h-12 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin mb-4"></div>
+        <p class="text-zinc-300 font-medium animate-pulse">Connecting to server...</p>
+      </div>
 
       <div v-if="chatStore.moderationNotice" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm">
         <div class="bg-zinc-950 border border-white/10 p-6 rounded-xl shadow-2xl w-[400px] max-w-[95vw]">
