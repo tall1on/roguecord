@@ -2058,7 +2058,22 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
 
         // Send full member list to the newly authenticated user
         const allUsers = await getUsers();
+        const persistedS3Config = await getPersistedS3Config();
         const hydratedUsers = server?.id ? await Promise.all(allUsers.map((member) => hydrateUserWithServerRoles(server.id, member))) : allUsers;
+        const hydratedUsersWithResolvedAvatars = await Promise.all(
+          hydratedUsers.map(async (member: any) => ({
+            ...member,
+            avatar_url: await buildUserAvatarClientUrl({
+              userId: member.id,
+              avatarUrl: member.avatar_url,
+              avatarStorageProvider: member.avatar_storage_provider,
+              avatarStorageKey: member.avatar_storage_key,
+              avatarStorageName: member.avatar_storage_name,
+              avatarMimeType: member.avatar_mime_type,
+              persistedS3Config
+            })
+          }))
+        );
         const onlineUserIdsList = connectionManager.getOnlineUserIds();
         const onlineUserIdsSet = new Set(onlineUserIdsList);
         const memberIps = Object.fromEntries(
@@ -2067,7 +2082,7 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
         client.ws.send(JSON.stringify({
           type: 'member_list',
           payload: {
-            members: hydratedUsers.map((member) => serializeMemberForViewer(member, user.id, onlineUserIdsSet)),
+            members: hydratedUsersWithResolvedAvatars.map((member) => serializeMemberForViewer(member, user.id, onlineUserIdsSet)),
             onlineUserIds: onlineUserIdsList,
             memberIps
           }
