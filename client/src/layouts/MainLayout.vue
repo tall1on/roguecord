@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { RouterView } from 'vue-router'
 import { useRouter } from 'vue-router'
-import { Minus, Square, X } from 'lucide-vue-next'
+import { Minus, Square, X, AlertCircle } from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import LoginModal from '../components/layout/modals/LoginModal.vue'
@@ -880,9 +880,12 @@ onUnmounted(() => {
     <div class="flex min-h-0 min-w-0 flex-1 overflow-hidden relative">
       <ServerListSidebar @open-create-server="showCreateServerModal = true" />
 
-      <div v-if="chatStore.isConnecting" class="absolute inset-y-0 right-0 left-[72px] z-50 flex flex-col items-center justify-center bg-zinc-900/80 backdrop-blur-sm">
-        <div class="w-12 h-12 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin mb-4"></div>
-        <p class="text-zinc-300 font-medium animate-pulse">Connecting to server...</p>
+      <div v-if="chatStore.activeConnectionId && (!chatStore.isConnected || chatStore.isConnecting)" class="absolute top-0 left-[72px] right-0 z-50 flex items-center justify-center bg-red-500/90 text-white px-4 py-2 shadow-md">
+        <div v-if="chatStore.isConnecting" class="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2"></div>
+        <AlertCircle v-else class="w-4 h-4 mr-2" />
+        <p class="text-sm font-medium">
+          {{ chatStore.isConnecting ? 'Connecting to server...' : 'Disconnected from server. Trying to reconnect...' }}
+        </p>
       </div>
 
       <div v-if="chatStore.moderationNotice" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm">

@@ -373,6 +373,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   });
   const lastError = ref<string | null>(null);
+  const connectionError = ref<string | null>(null);
   
   const DEFAULT_NEW_USER_SERVER_ADDRESS = 'wss://rc1.exatek.de:1337';
 
@@ -1362,6 +1363,8 @@ export const useChatStore = defineStore('chat', () => {
     ws.value.onopen = () => {
       hasConnectedOnce = true;
       isConnected.value = true;
+      isConnecting.value = false;
+      connectionError.value = null;
       reconnectAttempts = 0;
       console.log('WebSocket connected');
       
@@ -1405,17 +1408,22 @@ export const useChatStore = defineStore('chat', () => {
       }
       
       if (!isIntentionalDisconnect) {
+        connectionError.value = 'Connection lost. Reconnecting...';
         if (isAutoStartup && !hasConnectedOnce) {
           console.log('Connection failed on automatic startup, not reconnecting.');
+          connectionError.value = 'Failed to connect to server.';
           return;
         }
         
         scheduleReconnect(wsUrl);
+      } else {
+        connectionError.value = null;
       }
     };
     
     ws.value.onerror = (error) => {
       isConnecting.value = false;
+      connectionError.value = 'WebSocket connection error.';
       console.error('WebSocket error:', error);
     };
     
@@ -2794,6 +2802,7 @@ export const useChatStore = defineStore('chat', () => {
   return {
     isConnected,
     isConnecting,
+    connectionError,
     currentUser,
     currentUserRole,
     server,
