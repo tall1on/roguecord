@@ -1221,19 +1221,6 @@ const getMessageDayKey = (dateString: string) => {
   return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
 }
 
-const resolveMessageAvatarUrl = (message: Message) => {
-  const user = message.user
-  if (!user) {
-    return null
-  }
-
-  if (user.role === 'system') {
-    return chatStore.resolveServerIconUrl(chatStore.server?.iconPath || null, undefined, chatStore.server?.updatedAt || null) || user.avatar_url
-  }
-
-  return user.avatar_url
-}
-
 const getMessageRoleColor = (message: Message) => {
   const roleKey = message.user?.role || 'all_users'
   return chatStore.getServerRoleColor(roleKey)
@@ -1411,7 +1398,7 @@ watch(
             @contextmenu.stop.prevent="openMessageContextMenu($event, entry.message)"
           >
             <AppAvatar
-              :src="resolveMessageAvatarUrl(entry.message)"
+              :src="entry.message.user?.avatar_url || null"
               :fallback="entry.message.user?.username || 'Unknown User'"
               wrapper-class="w-10 h-10 rounded-full bg-indigo-500/20 text-indigo-200 shrink-0 flex items-center justify-center font-bold mt-0.5 overflow-visible"
               image-class="w-full h-full object-cover rounded-full"
