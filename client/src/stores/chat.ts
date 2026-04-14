@@ -343,6 +343,7 @@ export const useChatStore = defineStore('chat', () => {
   const ws = ref<WebSocket | null>(null);
   const isConnected = ref(false);
   const isConnecting = ref(false);
+  const isAuthPending = ref(false);
   const currentUser = ref<User | null>(null);
   const localAvatar = ref<string | null>(null);
   const currentUserRole = ref<string>('user');
@@ -1356,6 +1357,7 @@ export const useChatStore = defineStore('chat', () => {
     localStorage.setItem('lastUsedServer', wsUrl);
     
     isConnecting.value = true;
+    isAuthPending.value = false;
     ws.value = new WebSocket(wsUrl);
     
     let hasConnectedOnce = false;
@@ -1395,6 +1397,7 @@ export const useChatStore = defineStore('chat', () => {
     ws.value.onclose = () => {
       isConnected.value = false;
       isConnecting.value = false;
+      isAuthPending.value = false;
       ws.value = null;
       console.log('WebSocket disconnected');
       
@@ -1423,6 +1426,7 @@ export const useChatStore = defineStore('chat', () => {
     
     ws.value.onerror = (error) => {
       isConnecting.value = false;
+      isAuthPending.value = false;
       connectionError.value = 'WebSocket connection error.';
       console.error('WebSocket error:', error);
     };
@@ -1446,6 +1450,7 @@ export const useChatStore = defineStore('chat', () => {
 
   const disconnect = () => {
     isIntentionalDisconnect = true;
+    isAuthPending.value = false;
     if (reconnectTimer) {
       window.clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -1783,6 +1788,7 @@ export const useChatStore = defineStore('chat', () => {
 
       case 'authenticated':
         isConnecting.value = false;
+        isAuthPending.value = false;
         currentUser.value = normalizeUser(payload.user);
         pendingPresenceStatus.value = normalizePresenceStatus(currentUser.value.status);
         currentUserRole.value = currentUser.value.role || 'user';
@@ -1961,6 +1967,7 @@ export const useChatStore = defineStore('chat', () => {
 
       case 'auth:banned': {
         isConnecting.value = false;
+        isAuthPending.value = false;
         const reasonText = payload?.reason ? ` Reason: ${payload.reason}` : '';
         moderationNotice.value = {
           action: 'ban',
@@ -2235,6 +2242,7 @@ export const useChatStore = defineStore('chat', () => {
         
       case 'error':
         isConnecting.value = false;
+        isAuthPending.value = false;
         lastError.value = payload.message;
         console.error('Server error:', payload.message);
         break;
@@ -2257,6 +2265,7 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const authenticate = async (username: string) => {
+    isAuthPending.value = true;
     try {
       const { publicKeyBase64 } = await getKeys();
       if (localAvatar.value === null) {
@@ -2270,7 +2279,11 @@ export const useChatStore = defineStore('chat', () => {
         statusEmoji: localStatusEmoji.value,
         statusText: localStatusText.value
       });
+      if (!ws.value || ws.value.readyState !== WebSocket.OPEN || !isConnected.value) {
+        isAuthPending.value = false;
+      }
     } catch (e) {
+      isAuthPending.value = false;
       console.error("Authentication request failed", e);
     }
   };
@@ -2802,6 +2815,7 @@ export const useChatStore = defineStore('chat', () => {
   return {
     isConnected,
     isConnecting,
+    isAuthPending,
     connectionError,
     currentUser,
     currentUserRole,
