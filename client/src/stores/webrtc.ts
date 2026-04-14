@@ -484,6 +484,38 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     return sendTransport.value;
   };
 
+  const getErrorMessage = (error: unknown) => {
+    if (typeof error === 'string') return error;
+    if (error && typeof error === 'object' && 'message' in error) {
+      const message = (error as { message?: unknown }).message;
+      if (typeof message === 'string') return message;
+    }
+    return '';
+  };
+
+  const isAudioDisplayCaptureError = (error: unknown) => {
+    const domErrorName =
+      error && typeof error === 'object' && 'name' in error
+        ? String((error as { name?: unknown }).name || '')
+        : '';
+    const normalizedMessage = getErrorMessage(error).toLowerCase();
+
+    if (domErrorName === 'NotReadableError' || domErrorName === 'TrackStartError') {
+      return true;
+    }
+
+    if (!normalizedMessage.includes('audio')) {
+      return false;
+    }
+
+    return (
+      normalizedMessage.includes('could not start') ||
+      normalizedMessage.includes('failed to start') ||
+      normalizedMessage.includes('source') ||
+      normalizedMessage.includes('capture')
+    );
+  };
+
   const startScreenShare = async () => {
     if (!activeVoiceChannelId.value) {
       screenShareError.value = 'Join a voice channel before sharing your screen.';
@@ -520,25 +552,48 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     try {
       let displayStream: MediaStream;
       try {
-        displayStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            suppressLocalAudioPlayback: false,
-            systemAudio: 'include',
-            selfBrowserSurface: 'exclude',
-            surfaceSwitching: 'include',
-            monitorTypeSurfaces: 'include',
-            windowAudio: 'system'
-          } as DisplayAudioConstraints
+        try {
+          displayStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+              suppressLocalAudioPlayback: false,
+              systemAudio: 'include',
+              selfBrowserSurface: 'exclude',
+              surfaceSwitching: 'include',
+              monitorTypeSurfaces: 'include',
+              windowAudio: 'system'
+            } as DisplayAudioConstraints
+          });
+        } catch (displayAudioError) {
+          if (isAudioDisplayCaptureError(displayAudioError)) {
+            throw displayAudioError;
+          }
+
+          console.warn('[WebRTC][screen] getDisplayMedia with advanced audio constraints failed, retrying with audio=true', displayAudioError);
+          displayStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: true
+          });
+        }
+      } catch (displayMediaError) {
+        if (!isAudioDisplayCaptureError(displayMediaError)) {
+          throw displayMediaError;
+        }
+
+        console.warn('[WebRTC][screen] Display audio capture failed, retrying with video-only screen share', {
+          errorName:
+            displayMediaError && typeof displayMediaError === 'object' && 'name' in displayMediaError
+              ? (displayMediaError as { name?: unknown }).name
+              : null,
+          errorMessage: getErrorMessage(displayMediaError)
         });
-      } catch (displayAudioError) {
-        console.warn('[WebRTC][screen] getDisplayMedia with advanced audio constraints failed, retrying with audio=true', displayAudioError);
+
         displayStream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
-          audio: true
+          audio: false
         });
       }
 
