@@ -542,6 +542,16 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       cleanupScreenShareProducer(false);
     }
 
+    const isDisplayAudioStartupFailure = (error: unknown) => {
+      const domError = error as DOMException | undefined;
+      const name = domError?.name || '';
+      const message = domError?.message || String(error || '');
+      if (name === 'NotReadableError') {
+        return true;
+      }
+      return /could not start audio source|audio source|not readable/i.test(message);
+    };
+
     try {
       const requestedDisplayAudio = true;
       const permissiveDisplayVideoConstraints: MediaTrackConstraints = {
@@ -550,85 +560,28 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           max: 60
         }
       };
-
-      const isDisplayAudioStartupFailure = (error: unknown) => {
-        const domError = error as DOMException | undefined;
-        const name = domError?.name || '';
-        const message = domError?.message || String(error || '');
-        if (name === 'NotReadableError') {
-          return true;
-        }
-        return /could not start audio source|audio source|not readable/i.test(message);
+      const isChromiumEngine = /Chrome|Chromium|Edg\//.test(navigator.userAgent);
+      const displayCaptureOptions: DisplayMediaStreamOptions & Record<string, unknown> = {
+        video: permissiveDisplayVideoConstraints,
+        audio: requestedDisplayAudio
       };
 
-      let displayStream: MediaStream;
-      let usedVideoOnlyFallback = false;
-
-      if (requestedDisplayAudio) {
-        const attemptAOptions: DisplayMediaStreamOptions = {
-          video: permissiveDisplayVideoConstraints,
-          audio: true
-        };
-
-        try {
-          console.info('[WebRTC][screen] Capture attempt A started (audio=true, minimal options)');
-          displayStream = await navigator.mediaDevices.getDisplayMedia(attemptAOptions);
-          console.info('[WebRTC][screen] Capture attempt A succeeded', {
-            streamId: displayStream.id
-          });
-        } catch (attemptAError) {
-          console.warn('[WebRTC][screen] Capture attempt A failed', attemptAError);
-          if (!isDisplayAudioStartupFailure(attemptAError)) {
-            throw attemptAError;
-          }
-
-          const attemptBOptions: DisplayMediaStreamOptions = {
-            video: permissiveDisplayVideoConstraints,
-            audio: {
-              systemAudio: 'include',
-              suppressLocalAudioPlayback: false
-            } as MediaTrackConstraints
-          };
-
-          try {
-            console.info('[WebRTC][screen] Capture attempt B started (Chromium-friendly audio hints)');
-            displayStream = await navigator.mediaDevices.getDisplayMedia(attemptBOptions);
-            console.info('[WebRTC][screen] Capture attempt B succeeded', {
-              streamId: displayStream.id
-            });
-          } catch (attemptBError) {
-            console.warn('[WebRTC][screen] Capture attempt B failed', attemptBError);
-            if (!isDisplayAudioStartupFailure(attemptBError)) {
-              throw attemptBError;
-            }
-
-            const attemptCOptions: DisplayMediaStreamOptions = {
-              video: permissiveDisplayVideoConstraints,
-              audio: false
-            };
-
-            console.info('[WebRTC][screen] Capture attempt C started (video-only fallback)');
-            displayStream = await navigator.mediaDevices.getDisplayMedia(attemptCOptions);
-            usedVideoOnlyFallback = true;
-            console.info('[WebRTC][screen] Capture attempt C succeeded', {
-              streamId: displayStream.id
-            });
-          }
-        }
-      } else {
-        const noAudioOptions: DisplayMediaStreamOptions = {
-          video: permissiveDisplayVideoConstraints,
-          audio: false
-        };
-        console.info('[WebRTC][screen] Capture started (audio disabled by user preference)');
-        displayStream = await navigator.mediaDevices.getDisplayMedia(noAudioOptions);
+      if (isChromiumEngine && requestedDisplayAudio) {
+        // Chromium display-capture hint used by apps like Discord without forcing tab-only sharing.
+        displayCaptureOptions.systemAudio = 'include';
       }
+
+      console.info('[WebRTC][screen] Capture started (single-pass, minimal display-audio request)', {
+        isChromiumEngine,
+        requestedDisplayAudio,
+        systemAudioHint: displayCaptureOptions.systemAudio ?? null
+      });
+      const displayStream = await navigator.mediaDevices.getDisplayMedia(displayCaptureOptions);
 
       console.info('[WebRTC][screen] getDisplayMedia resolved', {
         streamId: displayStream.id,
         trackCount: displayStream.getTracks().length,
-        requestedDisplayAudio,
-        usedVideoOnlyFallback
+        requestedDisplayAudio
       });
 
       const displayAudioTracks = displayStream.getAudioTracks();
@@ -643,14 +596,11 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       });
 
       if (requestedDisplayAudio && !firstDisplayAudioTrack) {
-        screenShareError.value = usedVideoOnlyFallback
-          ? 'Screen sharing started, but system audio capture failed on this browser/device. Video is still being shared.'
-          : 'Screen sharing started, but no share-audio track was provided by your browser/window selection.';
+        screenShareError.value = 'Screen sharing started, but no share-audio track was provided by your browser/window selection.';
         console.warn('[WebRTC][screen] Share-audio requested but no display audio track is available', {
           requestedDisplayAudio,
           audioTrackCount: displayAudioTracks.length,
-          streamId: displayStream.id,
-          usedVideoOnlyFallback
+          streamId: displayStream.id
         });
       }
 
@@ -756,7 +706,11 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         cleanupScreenShareProducer(false);
       });
     } catch (error) {
-      screenShareError.value = 'Failed to start screen share. Please try again.';
+      if (isDisplayAudioStartupFailure(error)) {
+        screenShareError.value = 'Failed to start screen share audio (NotReadableError). Your browser/OS or selected capture target cannot start a readable audio source for this share. Try another window/tab/screen target or disable share-audio for this target.';
+      } else {
+        screenShareError.value = 'Failed to start screen share. Please try again.';
+      }
       console.error('[WebRTC][screen] Failed to start screen share:', error);
       cleanupScreenShareProducer();
     }
