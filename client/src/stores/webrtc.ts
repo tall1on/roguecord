@@ -38,6 +38,31 @@ const SCREENSHARE_NOTIFICATION_SOUND_DEBOUNCE_MS = 1000;
 export const useWebRtcStore = defineStore('webrtc', () => {
   const chatStore = useChatStore();
   let lastScreenshareNotificationSoundAt = 0;
+
+  const mergeParticipantWithKnownUser = (participant: any) => {
+    if (!participant?.id) {
+      return participant;
+    }
+
+    const knownUser = chatStore.users.find((user) => user.id === participant.id);
+    if (!knownUser) {
+      return participant;
+    }
+
+    return {
+      ...knownUser,
+      ...participant,
+      avatar_url: knownUser.avatar_url ?? participant.avatar_url ?? null
+    };
+  };
+
+  const normalizeParticipants = (participants: any[] | null | undefined) => {
+    if (!Array.isArray(participants)) {
+      return [];
+    }
+
+    return participants.map((participant) => mergeParticipantWithKnownUser(participant));
+  };
   
   const device = shallowRef<Device | null>(null);
   const sendTransport = shallowRef<any | null>(null);
@@ -1363,7 +1388,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       case 'voice_participants_list':
         const newMap = new Map<string, any[]>();
         for (const [channelId, users] of Object.entries(payload.participants)) {
-          newMap.set(channelId, users as any[]);
+          newMap.set(channelId, normalizeParticipants(users as any[]));
         }
         channelParticipants.value = newMap;
         break;
@@ -1371,7 +1396,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       case 'voice_channel_joined':
         if (payload.channel_id !== activeVoiceChannelId.value) return;
         await initDevice(payload.rtpCapabilities);
-        voiceParticipants.value = payload.users;
+        voiceParticipants.value = normalizeParticipants(payload.users);
 
         speakingUserIds.value = new Set();
 
@@ -1383,13 +1408,15 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         break;
         
       case 'user_joined_voice':
-        if (payload.channel_id === activeVoiceChannelId.value && !voiceParticipants.value.find(u => u.id === payload.user.id)) {
-          voiceParticipants.value.push(payload.user);
+        const joinedUser = mergeParticipantWithKnownUser(payload.user);
+
+        if (payload.channel_id === activeVoiceChannelId.value && !voiceParticipants.value.find(u => u.id === joinedUser.id)) {
+          voiceParticipants.value.push(joinedUser);
         }
         
         const currentParticipants = channelParticipants.value.get(payload.channel_id) || [];
-        if (!currentParticipants.find(u => u.id === payload.user.id)) {
-          const newParticipants = [...currentParticipants, payload.user];
+        if (!currentParticipants.find(u => u.id === joinedUser.id)) {
+          const newParticipants = [...currentParticipants, joinedUser];
           channelParticipants.value.set(payload.channel_id, newParticipants);
           channelParticipants.value = new Map(channelParticipants.value);
         }
@@ -1800,6 +1827,17 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
       }
       channelParticipants.value = new Map();
     }
+  });
+
+  watch(() => chatStore.users, () => {
+    voiceParticipants.value = normalizeParticipants(voiceParticipants.value);
+
+    const refreshedParticipants = new Map<string, any[]>();
+    for (const [channelId, users] of channelParticipants.value.entries()) {
+      refreshedParticipants.set(channelId, normalizeParticipants(users));
+    }
+
+    channelParticipants.value = refreshedParticipants;
   });
 
   return {
