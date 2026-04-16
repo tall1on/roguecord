@@ -157,17 +157,44 @@ export const buildUserAvatarClientUrl = async (input: {
   persistedS3Config: S3StorageConfig | null;
 }) => {
   if (input.avatarStorageProvider === 's3' && input.avatarStorageKey && input.persistedS3Config) {
-    return createPresignedReadUrlForS3({
+    const presignedUrl = createPresignedReadUrlForS3({
       config: input.persistedS3Config,
       key: input.avatarStorageKey,
       fileName: input.avatarStorageName || `avatar-${input.userId}`,
       mimeType: input.avatarMimeType
     });
+
+    console.info('[AVATAR DEBUG] Resolved S3 user avatar URL', {
+      userId: input.userId,
+      provider: input.avatarStorageProvider,
+      storageKeyPresent: Boolean(input.avatarStorageKey),
+      storageName: input.avatarStorageName || null,
+      resolvedUrlPresent: Boolean(presignedUrl)
+    });
+
+    return presignedUrl;
   }
 
   if (input.avatarStorageProvider === 'data_dir' && input.avatarStorageName) {
-    return buildLocalUserAvatarUrl(input.userId, input.avatarStorageName);
+    const localUrl = buildLocalUserAvatarUrl(input.userId, input.avatarStorageName);
+
+    console.info('[AVATAR DEBUG] Resolved local data-dir user avatar URL', {
+      userId: input.userId,
+      provider: input.avatarStorageProvider,
+      storageName: input.avatarStorageName,
+      resolvedUrl: localUrl
+    });
+
+    return localUrl;
   }
+
+  console.info('[AVATAR DEBUG] Falling back to persisted avatar_url value', {
+    userId: input.userId,
+    provider: input.avatarStorageProvider,
+    storageName: input.avatarStorageName,
+    rawAvatarUrlPresent: Boolean(input.avatarUrl),
+    rawAvatarUrl: input.avatarUrl
+  });
 
   return input.avatarUrl;
 };
