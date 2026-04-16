@@ -563,7 +563,6 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
       const chromiumDisplayMediaOptions = {
         ...baseDisplayMediaOptions,
-        preferCurrentTab: true,
         selfBrowserSurface: 'include',
         surfaceSwitching: 'include',
         systemAudio: 'include',
