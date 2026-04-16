@@ -260,6 +260,44 @@ const readLegacyStoredAvatar = () => {
   }
 };
 
+const resolveUserAvatarUrl = (
+  avatarUrl: string | null | undefined,
+  activeConnectionId: string | null,
+  savedConnections: SavedConnection[]
+) => {
+  const url = (avatarUrl || '').trim();
+  if (!url) {
+    return null;
+  }
+
+  if (/^(data:|blob:|https?:\/\/|\/\/)/i.test(url)) {
+    return url;
+  }
+
+  const normalizedPath = url.startsWith('/') ? url : `/${url}`;
+  if (!/^\/(user-avatars|files\/user-avatars)\//i.test(normalizedPath)) {
+    return normalizedPath;
+  }
+
+  const activeConnection = activeConnectionId
+    ? savedConnections.find((connection) => connection.id === activeConnectionId)
+    : null;
+
+  if (!activeConnection?.address) {
+    return `${window.location.origin}${normalizedPath}`;
+  }
+
+  try {
+    const rawAddress = activeConnection.address.trim();
+    const wsAddress = /^wss?:\/\//i.test(rawAddress) ? rawAddress : `ws://${rawAddress}`;
+    const parsed = new URL(wsAddress);
+    const httpProtocol = parsed.protocol === 'wss:' ? 'https:' : 'http:';
+    return `${httpProtocol}//${parsed.host}${normalizedPath}`;
+  } catch {
+    return `${window.location.origin}${normalizedPath}`;
+  }
+};
+
 const generateKeyPair = async () => {
   return await window.crypto.subtle.generateKey(
     {
@@ -619,7 +657,7 @@ export const useChatStore = defineStore('chat', () => {
 
     return {
       ...user,
-      avatar_url: user?.avatar_url || null,
+      avatar_url: resolveUserAvatarUrl(user?.avatar_url, activeConnectionId.value, savedConnections.value),
       avatar_mime_type: user?.avatar_mime_type || null,
       status_emoji: statusEmoji,
       status_text: statusText,
