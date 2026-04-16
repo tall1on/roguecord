@@ -534,30 +534,54 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       return;
     }
 
+    const hadStaleScreenShareState = Boolean(
+      screenShareStream.value || screenAudioProducer.value || screenProducer.value
+    );
+    if (hadStaleScreenShareState) {
+      console.info('[WebRTC][screen] Clearing stale local screen-share state before new capture request');
+      cleanupScreenShareProducer(false);
+    }
+
     try {
       const requestedDisplayAudio = true;
-      let displayStream: MediaStream;
-      try {
-        displayStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
+      const isChromiumEngine = /\b(?:Chrome|Chromium|Edg|OPR)\b/.test(navigator.userAgent)
+        && !/\b(?:Firefox)\b/.test(navigator.userAgent);
+
+      const baseDisplayMediaOptions: DisplayMediaStreamOptions = {
+        video: {
+          frameRate: {
+            ideal: 30,
+            max: 60
+          }
+        },
+        audio: requestedDisplayAudio
+          ? ({
             suppressLocalAudioPlayback: false
-          } as MediaTrackConstraints
-        });
-      } catch (displayAudioError) {
-        console.warn('[WebRTC][screen] getDisplayMedia with audio constraints failed, retrying with audio=true', displayAudioError);
-        displayStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: true
-        });
-      }
+          } as MediaTrackConstraints)
+          : false
+      };
+
+      const chromiumDisplayMediaOptions = {
+        ...baseDisplayMediaOptions,
+        preferCurrentTab: true,
+        selfBrowserSurface: 'include',
+        surfaceSwitching: 'include',
+        systemAudio: 'include',
+        monitorTypeSurfaces: 'include',
+        windowAudio: 'system'
+      } as unknown as DisplayMediaStreamOptions;
+
+      const displayMediaOptions = isChromiumEngine
+        ? chromiumDisplayMediaOptions
+        : baseDisplayMediaOptions;
+
+      const displayStream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
 
       console.info('[WebRTC][screen] getDisplayMedia resolved', {
         streamId: displayStream.id,
-        trackCount: displayStream.getTracks().length
+        trackCount: displayStream.getTracks().length,
+        requestedDisplayAudio,
+        isChromiumEngine
       });
 
       const displayAudioTracks = displayStream.getAudioTracks();
