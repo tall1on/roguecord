@@ -2162,7 +2162,23 @@ const handleGetChannels = async (client: ClientConnection) => {
     for (const [userId, peer] of room.peers.entries()) {
       const user = await getUserById(userId);
       if (user) {
-        users.push({ id: user.id, username: user.username, avatar_url: user.avatar_url, isMuted: peer.isMuted, isDeafened: peer.isDeafened });
+        const resolvedAvatarUrl = (await getResolvedUser(user.id))?.avatar_url || user.avatar_url;
+
+        console.info('[WS DEBUG][voice_participants_list] voice participant avatar resolved', {
+          channelId,
+          userId: user.id,
+          avatarStorageProvider: user.avatar_storage_provider || null,
+          rawAvatarUrlPresent: Boolean(user.avatar_url),
+          resolvedAvatarUrlPresent: Boolean(resolvedAvatarUrl)
+        });
+
+        users.push({
+          id: user.id,
+          username: user.username,
+          avatar_url: resolvedAvatarUrl,
+          isMuted: peer.isMuted,
+          isDeafened: peer.isDeafened
+        });
       }
     }
     voiceParticipants[channelId] = users;
