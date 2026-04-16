@@ -535,6 +535,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     }
 
     try {
+      const requestedDisplayAudio = true;
       let displayStream: MediaStream;
       try {
         displayStream = await navigator.mediaDevices.getDisplayMedia({
@@ -558,6 +559,26 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         streamId: displayStream.id,
         trackCount: displayStream.getTracks().length
       });
+
+      const displayAudioTracks = displayStream.getAudioTracks();
+      const firstDisplayAudioTrack = displayAudioTracks[0] || null;
+      console.info('[WebRTC][screen] Display audio diagnostics', {
+        requestedDisplayAudio,
+        audioTrackCount: displayAudioTracks.length,
+        firstTrackLabel: firstDisplayAudioTrack?.label || null,
+        firstTrackReadyState: firstDisplayAudioTrack?.readyState || null,
+        firstTrackEnabled: firstDisplayAudioTrack?.enabled ?? null,
+        firstTrackMuted: firstDisplayAudioTrack?.muted ?? null
+      });
+
+      if (requestedDisplayAudio && !firstDisplayAudioTrack) {
+        screenShareError.value = 'Screen sharing started, but no share-audio track was provided by your browser/window selection.';
+        console.warn('[WebRTC][screen] Share-audio requested but no display audio track is available', {
+          requestedDisplayAudio,
+          audioTrackCount: displayAudioTracks.length,
+          streamId: displayStream.id
+        });
+      }
 
       const videoTrack = displayStream.getVideoTracks()[0];
       if (!videoTrack) {
@@ -583,7 +604,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         stopScreenShare();
       };
 
-      const audioTrack = displayStream.getAudioTracks()[0] || null;
+      const audioTrack = firstDisplayAudioTrack;
       if (audioTrack) {
         audioTrack.onended = () => {
           if (!screenAudioProducer.value) return;
@@ -618,15 +639,35 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         appData: { source: 'screen' as MediaSourceType }
       });
 
-      if (audioTrack && device.value?.canProduce('audio')) {
-        screenAudioProducer.value = await readySendTransport.produce({
-          track: audioTrack,
-          appData: { source: 'screen' as MediaSourceType }
-        });
+      if (audioTrack) {
+        const canProduceAudio = Boolean(device.value?.canProduce('audio'));
+        if (!canProduceAudio) {
+          screenShareError.value = 'Screen sharing started, but your client cannot send share-audio on this browser/device.';
+          console.warn('[WebRTC][screen] Skipping screen-audio producer: device cannot produce audio', {
+            hasDevice: Boolean(device.value),
+            streamId: displayStream.id,
+            audioTrackId: audioTrack.id
+          });
+        } else {
+          try {
+            screenAudioProducer.value = await readySendTransport.produce({
+              track: audioTrack,
+              appData: { source: 'screen' as MediaSourceType }
+            });
 
-        screenAudioProducer.value.on('transportclose', () => {
-          screenAudioProducer.value = null;
-        });
+            screenAudioProducer.value.on('transportclose', () => {
+              screenAudioProducer.value = null;
+            });
+          } catch (screenAudioProduceError) {
+            screenShareError.value = 'Screen sharing audio failed to start. Please retry and ensure your browser window supports share-audio.';
+            console.warn('[WebRTC][screen] Screen-audio producer creation failed', {
+              streamId: displayStream.id,
+              audioTrackId: audioTrack.id,
+              error: screenAudioProduceError
+            });
+            throw screenAudioProduceError;
+          }
+        }
       }
 
       console.info('[WebRTC][screen] Produce resolved', {
@@ -1557,6 +1598,14 @@ export const useWebRtcStore = defineStore('webrtc', () => {
                   requestId,
                   producerId: msg.payload.id
                 });
+                if (source === 'screen' && kind === 'audio') {
+                  console.info('[WebRTC][screen-audio] Producer accepted by server', {
+                    source,
+                    producerId: msg.payload.id,
+                    requestId,
+                    channelId: payload.channel_id
+                  });
+                }
                 callback({ id: msg.payload.id });
               }
             };
