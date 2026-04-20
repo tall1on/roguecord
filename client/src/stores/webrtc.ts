@@ -7,7 +7,7 @@ type AudioElementWithSinkId = HTMLAudioElement & {
   setSinkId?: (sinkId: string) => Promise<void>;
 };
 
-type MediaSourceType = 'mic' | 'screen' | 'camera';
+type MediaSourceType = 'mic' | 'screen' | 'camera' | 'system-audio';
 type ScreenStreamFps = 15 | 30 | 60;
 type ScreenStreamResolution = 'source' | '1440p' | '1080p' | '720p' | '480p' | '4k' | '8k';
 
@@ -72,6 +72,19 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const screenAudioProducer = shallowRef<any | null>(null);
   const screenShareStream = shallowRef<MediaStream | null>(null);
   const screenShareError = ref<string | null>(null);
+
+  // System-audio (desktop loopback) state. Kept separate from the screen-share
+  // audio producer so the two can coexist (user may share screen + system audio
+  // in addition to the mic) and so that mute/deafen never gates system audio.
+  const systemAudioProducer = shallowRef<any | null>(null);
+  const systemAudioHandle = shallowRef<
+    import('../audio/systemLoopback/types').SystemLoopbackHandle | null
+  >(null);
+  const systemAudioStatus = ref<'idle' | 'starting' | 'live' | 'error'>('idle');
+  const systemAudioError = ref<string | null>(null);
+  const systemAudioStats = shallowRef<
+    import('../audio/systemLoopback/types').Stats | null
+  >(null);
   const consumers = shallowRef<Map<string, any>>(new Map());
   
   const activeVoiceChannelId = ref<string | null>(null);
@@ -501,6 +514,158 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     return sendTransport.value;
   };
 
+  const unproduceSystemAudio = async (notifyServer: boolean = true) => {
+    const previousProducer = systemAudioProducer.value;
+    const previousHandle = systemAudioHandle.value;
+    systemAudioProducer.value = null;
+    systemAudioHandle.value = null;
+    systemAudioStats.value = null;
+    systemAudioStatus.value = 'idle';
+    systemAudioError.value = null;
+
+    if (previousProducer) {
+      const producerId = previousProducer.id as string | undefined;
+      try {
+        previousProducer.close();
+      } catch (_e) {
+        // no-op
+      }
+      if (notifyServer && producerId && activeVoiceChannelId.value) {
+        chatStore.send('close_producer', {
+          channel_id: activeVoiceChannelId.value,
+          producer_id: producerId
+        });
+      }
+    }
+
+    if (previousHandle) {
+      try {
+        await previousHandle.stop();
+      } catch (_e) {
+        // no-op
+      }
+    }
+  };
+
+  const produceSystemAudio = async (
+    opts: {
+      deviceId?: string;
+      bitrateBps?: number;
+      frameDurationMs?: number;
+    } = {}
+  ) => {
+    if (systemAudioProducer.value || systemAudioHandle.value) {
+      return;
+    }
+    if (!activeVoiceChannelId.value) {
+      const msg = 'Join a voice channel before sharing system audio.';
+      systemAudioError.value = msg;
+      systemAudioStatus.value = 'error';
+      throw new Error(msg);
+    }
+
+    systemAudioStatus.value = 'starting';
+    systemAudioError.value = null;
+
+    const readySendTransport = await waitForSendTransport();
+    if (!readySendTransport) {
+      const msg = 'Send transport is not ready yet. Try again in a moment.';
+      systemAudioStatus.value = 'error';
+      systemAudioError.value = msg;
+      throw new Error(msg);
+    }
+    if (!device.value?.canProduce('audio')) {
+      const msg = 'This device cannot produce audio via mediasoup.';
+      systemAudioStatus.value = 'error';
+      systemAudioError.value = msg;
+      throw new Error(msg);
+    }
+
+    let handle: import('../audio/systemLoopback/types').SystemLoopbackHandle;
+    try {
+      const mod = await import('../audio/systemLoopback');
+      handle = await mod.startSystemAudioLoopback({
+        deviceId: opts.deviceId,
+        bitrateBps: opts.bitrateBps,
+        frameDurationMs: opts.frameDurationMs as any
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      systemAudioStatus.value = 'error';
+      systemAudioError.value = msg;
+      throw err;
+    }
+
+    systemAudioHandle.value = handle;
+
+    // On Rust-side state changes, surface errors/stopped into the store.
+    const unsubscribeState = handle.onStateChange((state) => {
+      if (state.state === 'error') {
+        systemAudioError.value = state.error;
+        systemAudioStatus.value = 'error';
+        void unproduceSystemAudio(true);
+      } else if (state.state === 'stopped') {
+        if (systemAudioStatus.value !== 'error') {
+          systemAudioStatus.value = 'idle';
+        }
+        void unproduceSystemAudio(false);
+      }
+    });
+
+    try {
+      const produced = await readySendTransport.produce({
+        track: handle.track,
+        codecOptions: {
+          opusStereo: true,
+          opusDtx: false,
+          opusFec: true,
+          opusMaxPlaybackRate: 48000,
+          opusMaxAverageBitrate: 128000
+        },
+        appData: { source: 'system-audio' as MediaSourceType }
+      });
+
+      systemAudioProducer.value = produced;
+      systemAudioStatus.value = 'live';
+
+      produced.on('transportclose', () => {
+        unsubscribeState();
+        void unproduceSystemAudio(false);
+      });
+      produced.on('trackended', () => {
+        unsubscribeState();
+        void unproduceSystemAudio(true);
+      });
+    } catch (err) {
+      unsubscribeState();
+      const msg = err instanceof Error ? err.message : String(err);
+      systemAudioStatus.value = 'error';
+      systemAudioError.value = msg;
+      try { await handle.stop(); } catch { /* ignore */ }
+      systemAudioHandle.value = null;
+      throw err;
+    }
+  };
+
+  const stopSystemAudio = async () => {
+    await unproduceSystemAudio(true);
+  };
+
+  const refreshSystemAudioStats = async () => {
+    const h = systemAudioHandle.value;
+    if (!h) {
+      systemAudioStats.value = null;
+      return null;
+    }
+    try {
+      const s = await h.getStats();
+      systemAudioStats.value = s;
+      return s;
+    } catch (_e) {
+      return null;
+    }
+  };
+
   const startScreenShare = async () => {
     if (!activeVoiceChannelId.value) {
       screenShareError.value = 'Join a voice channel before sharing your screen.';
@@ -538,14 +703,17 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       let displayStream: MediaStream;
       try {
         displayStream = await navigator.mediaDevices.getDisplayMedia({
+          preferCurrentTab: true,
           video: true,
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            suppressLocalAudioPlayback: false
-          } as MediaTrackConstraints
-        });
+          audio: true,
+          // Chromium-specific hints (ignored if unsupported)
+          systemAudio: "include",
+          windowAudio: "system",
+          surfaceSwitching: "include",
+          selfBrowserSurface: "exclude"
+        } as DisplayMediaStreamOptions & Record<string, unknown>);
+        console.log(displayStream.getVideoTracks());
+        console.log(displayStream.getAudioTracks());
       } catch (displayAudioError) {
         console.warn('[WebRTC][screen] getDisplayMedia with audio constraints failed, retrying with audio=true', displayAudioError);
         displayStream = await navigator.mediaDevices.getDisplayMedia({
@@ -1309,6 +1477,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     
     stopLocalInput();
     cleanupScreenShareProducer();
+    void unproduceSystemAudio(false);
 
     if (localStream.value) {
       localStream.value.getTracks().forEach(track => track.stop());
@@ -1527,7 +1696,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
             const inferredSource: MediaSourceType = kind === 'audio' ? 'mic' : 'camera';
             const appDataSource = appData?.source;
             const source: MediaSourceType =
-              appDataSource === 'mic' || appDataSource === 'screen' || appDataSource === 'camera'
+              appDataSource === 'mic' || appDataSource === 'screen' || appDataSource === 'camera' || appDataSource === 'system-audio'
                 ? appDataSource
                 : inferredSource;
             const requestId = typeof crypto?.randomUUID === 'function'
@@ -1851,6 +2020,14 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
     screenShareStream,
     screenShareError,
     screenProducer,
+    systemAudioProducer,
+    systemAudioHandle,
+    systemAudioStatus,
+    systemAudioError,
+    systemAudioStats,
+    produceSystemAudio,
+    stopSystemAudio,
+    refreshSystemAudioStats,
     ping,
     bandwidth,
     pingHistory,

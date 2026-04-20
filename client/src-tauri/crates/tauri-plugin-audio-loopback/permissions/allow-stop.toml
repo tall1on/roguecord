@@ -1,0 +1,6 @@
+"$schema" = "schemas/schema.json"
+
+[[permission]]
+identifier = "allow-stop"
+description = "Stop an active audio-loopback session."
+commands.allow = ["audio_loopback_stop"]

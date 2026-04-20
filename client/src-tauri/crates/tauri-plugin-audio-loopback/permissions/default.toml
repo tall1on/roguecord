@@ -1,0 +1,10 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Default permissions for the audio-loopback plugin. Allows all user commands."
+permissions = [
+    "allow-list-devices",
+    "allow-start",
+    "allow-stop",
+    "allow-stats",
+]

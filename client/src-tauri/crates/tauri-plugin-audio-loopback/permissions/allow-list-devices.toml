@@ -1,0 +1,6 @@
+"$schema" = "schemas/schema.json"
+
+[[permission]]
+identifier = "allow-list-devices"
+description = "Enumerate audio render endpoints."
+commands.allow = ["audio_loopback_list_devices"]

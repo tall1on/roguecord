@@ -1,0 +1,6 @@
+"$schema" = "schemas/schema.json"
+
+[[permission]]
+identifier = "allow-stats"
+description = "Fetch runtime statistics for an active audio-loopback session."
+commands.allow = ["audio_loopback_stats"]

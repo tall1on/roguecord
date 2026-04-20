@@ -1,0 +1,6 @@
+"$schema" = "schemas/schema.json"
+
+[[permission]]
+identifier = "allow-start"
+description = "Start a WASAPI loopback capture + Opus encoding session."
+commands.allow = ["audio_loopback_start"]

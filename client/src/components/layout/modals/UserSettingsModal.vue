@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { EmojiPicker } from 'vue3-twemoji-picker-final'
 import { useChatStore } from '../../../stores/chat'
 import { useWebRtcStore } from '../../../stores/webrtc'
+import SystemAudioSection from './userSettings/SystemAudioSection.vue'
 
 type TwemojiPickerSelection = {
   i?: string
@@ -646,6 +647,8 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </div>
+
+          <SystemAudioSection />
         </div>
 
         <div v-else-if="activeSection === 'connections'" class="space-y-4 max-w-2xl">

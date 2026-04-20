@@ -3515,7 +3515,7 @@ const handleConnectWebRtcTransport = async (client: ClientConnection, payload: {
   }));
 };
 
-const handleProduce = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, kind: any, rtpParameters: any, source?: 'mic' | 'screen' | 'camera', request_id?: string }) => {
+const handleProduce = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, kind: any, rtpParameters: any, source?: 'mic' | 'screen' | 'camera' | 'system-audio', request_id?: string }) => {
   if (!client.userId) return;
   const { channel_id, transport_id, kind, rtpParameters, source = 'mic', request_id } = payload;
   
@@ -3539,8 +3539,8 @@ const handleProduce = async (client: ClientConnection, payload: { channel_id: st
   // Voice mute/deafen flags should only gate microphone producers.
   // Screen-share audio must continue to flow so viewers can hear shared system audio,
   // and screen/camera video must not be paused by voice-state flags.
-  const normalizedSource: 'mic' | 'screen' | 'camera' =
-    source === 'mic' || source === 'screen' || source === 'camera'
+  const normalizedSource: 'mic' | 'screen' | 'camera' | 'system-audio' =
+    source === 'mic' || source === 'screen' || source === 'camera' || source === 'system-audio'
       ? source
       : (kind === 'audio' ? 'mic' : 'camera');
 
@@ -3585,8 +3585,8 @@ const handleCloseProducer = async (client: ClientConnection, payload: { channel_
   if (!producer) return;
 
   const producerSource = (producer.appData as { source?: unknown } | undefined)?.source;
-  const source: 'mic' | 'screen' | 'camera' =
-    producerSource === 'mic' || producerSource === 'screen' || producerSource === 'camera'
+  const source: 'mic' | 'screen' | 'camera' | 'system-audio' =
+    producerSource === 'mic' || producerSource === 'screen' || producerSource === 'camera' || producerSource === 'system-audio'
       ? producerSource
       : (producer.kind === 'audio' ? 'mic' : 'camera');
 
@@ -3638,8 +3638,8 @@ const handleConsume = async (client: ClientConnection, payload: { channel_id: st
   });
 
   const producerSource = (producer?.appData as { source?: unknown } | undefined)?.source;
-  const source: 'mic' | 'screen' | 'camera' =
-    producerSource === 'mic' || producerSource === 'screen' || producerSource === 'camera'
+  const source: 'mic' | 'screen' | 'camera' | 'system-audio' =
+    producerSource === 'mic' || producerSource === 'screen' || producerSource === 'camera' || producerSource === 'system-audio'
       ? producerSource
       : (consumer.kind === 'audio' ? 'mic' : 'camera');
 
@@ -3717,7 +3717,7 @@ const handleGetProducers = async (client: ClientConnection, payload: { channel_i
             producer_id: producerId,
             user_id: peerId,
             kind: producer.kind,
-            source: (producer.appData?.source as 'mic' | 'screen' | 'camera' | undefined) || (producer.kind === 'audio' ? 'mic' : 'camera')
+            source: (producer.appData?.source as 'mic' | 'screen' | 'camera' | 'system-audio' | undefined) || (producer.kind === 'audio' ? 'mic' : 'camera')
           }
         }));
       }
@@ -4392,8 +4392,8 @@ const handleVoiceStateUpdate = async (client: ClientConnection, payload: { chann
 
     for (const producer of peer.producers.values()) {
       const producerSource = (producer.appData as { source?: unknown } | undefined)?.source;
-      const source: 'mic' | 'screen' | 'camera' =
-        producerSource === 'mic' || producerSource === 'screen' || producerSource === 'camera'
+      const source: 'mic' | 'screen' | 'camera' | 'system-audio' =
+        producerSource === 'mic' || producerSource === 'screen' || producerSource === 'camera' || producerSource === 'system-audio'
           ? producerSource
           : (producer.kind === 'audio' ? 'mic' : 'camera');
 
