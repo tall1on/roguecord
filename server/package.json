@@ -16,7 +16,7 @@
     "@types/node": "~24.12.2",
     "@types/ws": "^8.18.1",
     "dotenv": "17.4.2",
-    "mediasoup": "^3.19.19",
+    "mediasoup": "3.20.0",
     "selfsigned": "^5.5.0",
     "sqlite3": "^6.0.1",
     "ts-node": "^10.9.2",
