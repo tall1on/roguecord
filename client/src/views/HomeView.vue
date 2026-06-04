@@ -9,6 +9,7 @@ import RougeCordMark from '../components/branding/RougeCordMark.vue'
 import { openExternalUrl } from '../utils/openExternalUrl'
 
 const MessageAttachmentVideoPlayer = defineAsyncComponent(() => import('../components/chat/MessageAttachmentVideoPlayer.vue'))
+const MessageReactionChip = defineAsyncComponent(() => import('../components/chat/MessageReactionChip.vue'))
 
 type TwemojiPickerSelection = {
   i?: string
@@ -71,9 +72,7 @@ const activeFolderFiles = computed<FolderChannelFile[]>(() => {
   return chatStore.folderFiles[channelId] || []
 })
 
-const canManageFolderFiles = computed(() => {
-  return chatStore.userHasRole(chatStore.currentUser, ['admin', 'owner'])
-})
+const canManageFolderFiles = computed(() => chatStore.currentUserHasPermission('manage_folder_files'))
 
 const canUploadToFolder = computed(() => canManageFolderFiles.value)
 
@@ -291,7 +290,7 @@ const openScreenContextMenu = (event: MouseEvent, userId: string) => {
 
 const canDeleteMessage = (message: Message) => {
   const currentUserId = chatStore.currentUser?.id
-  return message.user_id === currentUserId || chatStore.userHasRole(chatStore.currentUser, ['admin', 'owner'])
+  return message.user_id === currentUserId || chatStore.currentUserHasPermission('manage_messages')
 }
 
 const canReplyToMessage = (message: Message) => {
@@ -621,15 +620,12 @@ onMounted(() => {
   window.addEventListener('keydown', onGlobalKeyDown)
 })
 
-const privilegedRoles = new Set(['admin', 'owner', 'mod', 'moderator', 'bot', 'system'])
-
 const isReadOnlyRssChannel = computed(() => {
   if (!activeTextChannel.value || activeTextChannel.value.type !== 'rss') {
     return false
   }
 
-  const roleKeys = chatStore.getUserRoleKeys(chatStore.currentUser)
-  return !roleKeys.some((role) => privilegedRoles.has(role))
+  return !chatStore.currentUserHasPermission('send_rss_messages')
 })
 
 const messagePlaceholder = computed(() => {
@@ -1222,8 +1218,8 @@ const getMessageDayKey = (dateString: string) => {
 }
 
 const getMessageRoleColor = (message: Message) => {
-  const roleKey = message.user?.role || 'all_users'
-  return chatStore.getServerRoleColor(roleKey)
+  const role = chatStore.getPrimaryServerRole(message.user)
+  return role?.color || chatStore.getServerRoleColor(message.user?.role || 'all_users')
 }
 
 type RenderEntry =
@@ -1563,19 +1559,12 @@ watch(
                 </div>
               </div>
               <div v-if="getMessageReactions(entry.message).length > 0" class="mt-2 flex flex-wrap gap-2">
-                  <button
-                    v-for="reaction in getMessageReactions(entry.message)"
-                    :key="`${entry.message.id}-${reaction.emoji}`"
-                    type="button"
-                    class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium shadow-sm transition-all duration-150"
-                    :class="reaction.reacted_by_current_user
-                      ? 'border-indigo-300/45 bg-indigo-400/20 text-indigo-100 shadow-indigo-950/20 hover:bg-indigo-400/26'
-                      : 'border-white/10 bg-zinc-900/70 text-zinc-300 hover:bg-zinc-800/80'"
-                    @click="toggleMessageReaction(entry.message, reaction.emoji)"
-                  >
-                  <span v-twemoji="reaction.emoji" class="inline-flex items-center"></span>
-                  <span>{{ reaction.count }}</span>
-                </button>
+                <MessageReactionChip
+                  v-for="reaction in getMessageReactions(entry.message)"
+                  :key="`${entry.message.id}-${reaction.emoji}`"
+                  :reaction="reaction"
+                  @toggle="toggleMessageReaction(entry.message, $event)"
+                />
               </div>
             </div>
           </div>
@@ -1737,7 +1726,7 @@ watch(
           </div>
         </div>
         <p v-if="isReadOnlyRssChannel" class="mt-2 text-xs text-gray-400">
-          RSS feed channels are read-only for normal users.
+          RSS feed channels are read-only without the send RSS messages permission.
         </p>
       </div>
     </template>

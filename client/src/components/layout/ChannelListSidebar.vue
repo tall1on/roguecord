@@ -7,6 +7,8 @@ import { useWebRtcStore } from '../../stores/webrtc'
 
 const props = defineProps<{
   isAdmin: boolean
+  canOpenServerSettings: boolean
+  canManageChannels: boolean
 }>()
 
 type ChannelCreateType = 'text' | 'voice' | 'rss' | 'folder'
@@ -230,7 +232,7 @@ const sortCategories = () => {
 }
 
 const handleDragStart = (channel: Channel) => {
-  if (!props.isAdmin) return
+  if (!props.canManageChannels) return
   draggedChannelId.value = channel.id
   dragOverChannelId.value = channel.id
   dragOverCategoryId.value = channel.category_id ?? null
@@ -238,7 +240,7 @@ const handleDragStart = (channel: Channel) => {
 }
 
 const handleDragOver = (event: DragEvent, channel: Channel) => {
-  if (!props.isAdmin || !draggedChannelId.value || draggedChannelId.value === channel.id) return
+  if (!props.canManageChannels || !draggedChannelId.value || draggedChannelId.value === channel.id) return
   event.preventDefault()
   event.stopPropagation()
   dragOverCategoryId.value = null
@@ -275,7 +277,7 @@ const buildReorderPayload = (sourceChannel: Channel, targetCategoryId: string | 
 }
 
 const handleDrop = (targetChannel: Channel) => {
-  if (!props.isAdmin || !draggedChannelId.value || draggedChannelId.value === targetChannel.id) {
+  if (!props.canManageChannels || !draggedChannelId.value || draggedChannelId.value === targetChannel.id) {
     resetDragState()
     return
   }
@@ -300,7 +302,7 @@ const handleDrop = (targetChannel: Channel) => {
 }
 
 const handleCategoryDragOver = (event: DragEvent, categoryId: string | null) => {
-  if (!props.isAdmin || !draggedChannelId.value) return
+  if (!props.canManageChannels || !draggedChannelId.value) return
   event.preventDefault()
   event.stopPropagation()
   dragOverChannelId.value = null
@@ -316,7 +318,7 @@ const handleCategoryHeaderDrop = (event: DragEvent, categoryId: string) => {
     return
   }
 
-  if (!props.isAdmin || !draggedCategoryId.value || draggedCategoryId.value === categoryId) {
+  if (!props.canManageChannels || !draggedCategoryId.value || draggedCategoryId.value === categoryId) {
     resetDragState()
     return
   }
@@ -342,7 +344,7 @@ const handleCategoryHeaderDrop = (event: DragEvent, categoryId: string) => {
 }
 
 const handleCategoryDrop = (categoryId: string | null) => {
-  if (!props.isAdmin || !draggedChannelId.value) {
+  if (!props.canManageChannels || !draggedChannelId.value) {
     resetDragState()
     return
   }
@@ -362,13 +364,13 @@ const handleDragEnd = () => {
 }
 
 const handleCategoryHeaderDragStart = (categoryId: string) => {
-  if (!props.isAdmin) return
+  if (!props.canManageChannels) return
   draggedCategoryId.value = categoryId
   dragOverCategoryTargetId.value = categoryId
 }
 
 const handleCategoryHeaderDragOver = (event: DragEvent, categoryId: string) => {
-  if (!props.isAdmin || !draggedCategoryId.value || draggedCategoryId.value === categoryId) return
+  if (!props.canManageChannels || !draggedCategoryId.value || draggedCategoryId.value === categoryId) return
   event.preventDefault()
   event.stopPropagation()
   dragOverCategoryTargetId.value = categoryId
@@ -385,7 +387,7 @@ const channelRowClass = (channel: Channel) => {
 
   return [
     baseClass,
-    props.isAdmin ? 'admin-draggable-channel' : '',
+    props.canManageChannels ? 'admin-draggable-channel' : '',
     draggedChannelId.value === channel.id ? 'opacity-60' : '',
     isDragTarget(channel.id) ? 'ring-1 ring-indigo-400/70 bg-zinc-900/90' : ''
   ]
@@ -598,7 +600,7 @@ const handleChannelClick = (channel: Channel) => {
 }
 
 const openChannelListContextMenu = (event: MouseEvent) => {
-  if (!props.isAdmin) return
+  if (!props.canManageChannels) return
 
   event.preventDefault()
   contextMenuX.value = event.clientX
@@ -609,7 +611,7 @@ const openChannelListContextMenu = (event: MouseEvent) => {
 }
 
 const openChannelContextMenu = (event: MouseEvent, channel: Channel) => {
-  if (!props.isAdmin) return
+  if (!props.canManageChannels) return
 
   event.preventDefault()
   contextMenuX.value = event.clientX
@@ -620,7 +622,7 @@ const openChannelContextMenu = (event: MouseEvent, channel: Channel) => {
 }
 
 const openCategoryContextMenu = (event: MouseEvent, categoryId: string) => {
-  if (!props.isAdmin) return
+  if (!props.canManageChannels) return
 
   event.preventDefault()
   contextMenuX.value = event.clientX
@@ -632,7 +634,7 @@ const openCategoryContextMenu = (event: MouseEvent, categoryId: string) => {
 }
 
 const openUncategorizedContextMenu = (event: MouseEvent) => {
-  if (!props.isAdmin) return
+  if (!props.canManageChannels) return
 
   event.preventDefault()
   contextMenuX.value = event.clientX
@@ -662,7 +664,7 @@ const canDeleteCategoryFromContextMenu = computed(() => {
 const shouldShowContextMenuDivider = computed(() => !!contextMenuChannel.value || canDeleteCategoryFromContextMenu.value)
 
 const deleteChannelFromContextMenu = () => {
-  if (!props.isAdmin || !contextMenuChannel.value) return
+  if (!props.canManageChannels || !contextMenuChannel.value) return
 
   const channelToDelete = contextMenuChannel.value
   if (!confirm(`Delete #${channelToDelete.name}? This cannot be undone.`)) {
@@ -677,7 +679,7 @@ const deleteChannelFromContextMenu = () => {
 }
 
 const deleteCategoryFromContextMenu = () => {
-  if (!props.isAdmin) return
+  if (!props.canManageChannels) return
 
   const categoryId = contextMenuCategoryId.value
   const isUncategorized = contextMenuUncategorized.value
@@ -716,7 +718,7 @@ const deleteCategoryFromContextMenu = () => {
 }
 
 const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss' | 'folder') => {
-  if (!props.isAdmin) return
+  if (!props.canManageChannels) return
 
   contextMenuVisible.value = false
   contextMenuChannel.value = null
@@ -726,7 +728,7 @@ const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss' | 'fold
 }
 
 const openCreateCategoryFromContextMenu = () => {
-  if (!props.isAdmin) return
+  if (!props.canManageChannels) return
 
   contextMenuVisible.value = false
   contextMenuChannel.value = null
@@ -745,7 +747,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
       <header class="h-14 px-4 flex items-center justify-between border-b border-white/5 hover:bg-zinc-900/80 cursor-pointer transition-colors shrink-0">
         <h1 class="font-bold text-white truncate drop-shadow-sm">{{ activeServer.name }}</h1>
         <div class="flex items-center gap-2">
-          <button v-if="isAdmin" class="text-zinc-400 hover:text-white transition-colors" title="Server Settings" @click.stop="emit('open-server-settings')">
+          <button v-if="canOpenServerSettings" class="text-zinc-400 hover:text-white transition-colors" title="Server Settings" @click.stop="emit('open-server-settings')">
             <Settings class="w-4 h-4" />
           </button>
           <button class="text-zinc-400 hover:text-white transition-colors" title="Invite People" @click.stop="emit('open-invite')">
@@ -768,7 +770,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           @drop.prevent="handleCategoryDrop(category.id)"
         >
           <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer"
-            :draggable="isAdmin"
+            :draggable="canManageChannels"
             @click="toggleCategoryCollapsed(category.id)"
             @dragstart="handleCategoryHeaderDragStart(category.id)"
             @dragover="draggedChannelId ? handleCategoryDragOver($event, category.id) : handleCategoryHeaderDragOver($event, category.id)"
@@ -781,7 +783,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
               <ChevronRight v-else class="w-3 h-3 mr-1" />
               {{ category.name }}
             </div>
-            <button v-if="isAdmin" class="text-zinc-500 hover:text-zinc-300 opacity-0 group-hover:opacity-100 transition-all font-bold" @click.stop="emit('open-create-channel', { categoryId: category.id })">
+            <button v-if="canManageChannels" class="text-zinc-500 hover:text-zinc-300 opacity-0 group-hover:opacity-100 transition-all font-bold" @click.stop="emit('open-create-channel', { categoryId: category.id })">
               <Plus class="w-3.5 h-3.5" />
             </button>
           </div>
@@ -792,7 +794,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
               v-if="shouldRenderChannelInCategory(category.id, channel.id)"
               class="relative flex items-center px-2 py-1.5 rounded-lg cursor-pointer group mb-[2px] transition-colors"
               :class="channelRowClass(channel)"
-              :draggable="isAdmin"
+              :draggable="canManageChannels"
               @click="handleChannelClick(channel)"
               @dragstart="handleDragStart(channel)"
               @dragover="handleDragOver($event, channel)"
@@ -844,7 +846,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
         >
           <div class="pt-2 pb-1.5 px-2 flex items-center justify-between group cursor-pointer" @contextmenu.stop.prevent="openUncategorizedContextMenu">
             <div class="text-xs font-bold text-zinc-500 group-hover:text-zinc-300 uppercase tracking-widest transition-colors">Channels</div>
-            <button v-if="isAdmin" class="text-zinc-500 hover:text-zinc-300 opacity-0 group-hover:opacity-100 transition-all font-bold" @click.stop="emit('open-create-channel', { categoryId: null })">
+            <button v-if="canManageChannels" class="text-zinc-500 hover:text-zinc-300 opacity-0 group-hover:opacity-100 transition-all font-bold" @click.stop="emit('open-create-channel', { categoryId: null })">
               <Plus class="w-3.5 h-3.5" />
             </button>
           </div>
@@ -853,7 +855,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
             <div
               class="relative flex items-center px-2 py-1.5 rounded-lg cursor-pointer group mb-[2px] transition-colors"
               :class="channelRowClass(channel)"
-              :draggable="isAdmin"
+              :draggable="canManageChannels"
               @click="handleChannelClick(channel)"
               @dragstart="handleDragStart(channel)"
               @dragover="handleDragOver($event, channel)"
@@ -895,7 +897,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
         </div>
       </div>
 
-      <div v-if="contextMenuVisible && isAdmin" class="channel-context-menu fixed z-50 w-56 rounded-xl border border-white/10 bg-zinc-950 shadow-2xl py-1 backdrop-blur-md" :style="{ left: `${contextMenuX}px`, top: `${contextMenuY}px` }">
+      <div v-if="contextMenuVisible && canManageChannels" class="channel-context-menu fixed z-50 w-56 rounded-xl border border-white/10 bg-zinc-950 shadow-2xl py-1 backdrop-blur-md" :style="{ left: `${contextMenuX}px`, top: `${contextMenuY}px` }">
         <button v-if="contextMenuChannel" class="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="deleteChannelFromContextMenu">
           <Trash2 class="w-4 h-4" />
           Delete channel
