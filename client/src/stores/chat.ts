@@ -3,6 +3,27 @@ import { ref, computed } from 'vue';
 import { useWebRtcStore } from './webrtc';
 import { readStoredAvatar, removeLegacyStoredAvatar, saveStoredAvatar } from '../utils/avatarStorage';
 import { cacheServerIcon, getCachedServerIcon, removeCachedServerIcon } from '../utils/serverIconCache';
+import {
+  ADMIN_ROLE_KEY,
+  ALL_SERVER_PERMISSIONS,
+  ALL_USERS_ROLE_KEY,
+  SERVER_PERMISSION_CATEGORY_LABELS,
+  SERVER_PERMISSION_KEYS,
+  SERVER_PERMISSION_METADATA,
+  canGrantPermissions as canGrantServerPermissions,
+  canGrantRole,
+  getHighestRolePosition as getHighestPermissionRolePosition,
+  isAdminRoleKey,
+  isAllUsersRoleKey,
+  isRoleLowerThanHighest,
+  normalizeServerPermissions,
+  resolveUserPermissions,
+  rolesIncludeAdmin,
+  userHasServerPermission,
+  type ServerPermission
+} from '../utils/serverPermissions';
+
+export type { ServerPermission } from '../utils/serverPermissions';
 
 const NEW_NOTIFICATION_SOUND_DEBOUNCE_MS = 1000;
 
@@ -206,6 +227,7 @@ export interface ServerRole {
   key: string;
   name: string;
   color: string | null;
+  permissions: ServerPermission[];
   isDefault: boolean;
   isDeletable: boolean;
   position: number;
@@ -217,6 +239,7 @@ type ServerRoleFormInput = {
   id: string;
   name: string;
   color: string | null;
+  permissions?: ServerPermission[];
 };
 
 export interface ActiveMainPanel {
@@ -606,6 +629,7 @@ export const useChatStore = defineStore('chat', () => {
       key,
       name: normalizedName || key,
       color: /^#([0-9a-fA-F]{6})$/.test(rawColor) ? rawColor.toLowerCase() : null,
+      permissions: normalizeServerPermissions(key, role.permissions, { fallbackToLegacy: true }),
       isDefault: role.isDefault === true || role.is_default === true || role.is_default === 1,
       isDeletable: role.isDeletable === true || role.is_deletable === true || role.is_deletable === 1,
       position: Number.isFinite(Number(role.position)) ? Number(role.position) : 0,
@@ -712,33 +736,119 @@ export const useChatStore = defineStore('chat', () => {
     send('set_presence', { status: normalizedStatus });
   };
 
-  const getPrimaryServerRole = (user: User | null | undefined) => {
+  const createFallbackRole = (roleKey: string): ServerRole => ({
+    id: roleKey,
+    serverId: server.value?.id || '',
+    key: roleKey,
+    name: roleKey,
+    color: null,
+    permissions: normalizeServerPermissions(roleKey, null, { fallbackToLegacy: true }),
+    isDefault: roleKey === ADMIN_ROLE_KEY || roleKey === ALL_USERS_ROLE_KEY,
+    isDeletable: false,
+    position: isAdminRoleKey(roleKey) ? Number.MAX_SAFE_INTEGER : 0,
+    createdAt: null,
+    updatedAt: null
+  });
+
+  const resolveUserServerRoles = (user: User | null | undefined): ServerRole[] => {
     if (!user) {
-      return null;
+      return [];
+    }
+
+    const userRoles = Array.isArray(user.roles) ? user.roles : [];
+    if (userRoles.length > 0) {
+      return userRoles;
     }
 
     const userRoleIds = Array.isArray(user.role_ids) ? user.role_ids : [];
-    const userRoles = Array.isArray(user.roles) ? user.roles : [];
-    const resolvedRoles = userRoles.length > 0
-      ? userRoles
-      : serverRoles.value.filter((role) => userRoleIds.includes(role.id));
+    const rolesById = userRoleIds.length > 0
+      ? serverRoles.value.filter((role) => userRoleIds.includes(role.id))
+      : [];
+    if (rolesById.length > 0) {
+      return rolesById;
+    }
 
-    return resolvedRoles.find((role) => role.key !== 'all_users')
+    const fallbackRoleKey = user.role || 'user';
+    const fallbackRole = getServerRoleByKey(fallbackRoleKey);
+    return [fallbackRole || createFallbackRole(fallbackRoleKey)];
+  };
+
+  const getPrimaryServerRole = (user: User | null | undefined) => {
+    const resolvedRoles = resolveUserServerRoles(user);
+    return [...resolvedRoles]
+      .filter((role) => !isAllUsersRoleKey(role.key))
+      .sort((a, b) => b.position - a.position || a.name.localeCompare(b.name))[0]
       || resolvedRoles[0]
-      || getServerRoleByKey(user.role)
       || null;
   };
 
   const getUserRoleKeys = (user: User | null | undefined): string[] => {
     const primaryRole = user?.role || 'user';
-    const roles = Array.isArray(user?.roles) ? user.roles : [];
-    const keys = roles.map((role) => role.key).filter(Boolean);
+    const keys = resolveUserServerRoles(user).map((role) => role.key).filter(Boolean);
     return Array.from(new Set([primaryRole, ...keys]));
   };
 
   const userHasRole = (user: User | null | undefined, roleKeys: string[]) => {
     const keys = new Set(getUserRoleKeys(user));
     return roleKeys.some((roleKey) => keys.has(roleKey));
+  };
+
+  const userIsAdmin = (user: User | null | undefined) => rolesIncludeAdmin(resolveUserServerRoles(user));
+
+  const getUserServerPermissions = (user: User | null | undefined): ServerPermission[] => {
+    return resolveUserPermissions(resolveUserServerRoles(user));
+  };
+
+  const userHasPermission = (user: User | null | undefined, permission: ServerPermission) => {
+    return userHasServerPermission(resolveUserServerRoles(user), permission);
+  };
+
+  const currentUserHasPermission = (permission: ServerPermission) => userHasPermission(currentUser.value, permission);
+
+  const currentUserIsAdmin = computed(() => userIsAdmin(currentUser.value));
+
+  const currentUserPermissions = computed(() => getUserServerPermissions(currentUser.value));
+
+  const getUserHighestRolePosition = (user: User | null | undefined) => {
+    return getHighestPermissionRolePosition(resolveUserServerRoles(user));
+  };
+
+  const canManageServerRole = (role: ServerRole | null | undefined, actor: User | null | undefined = currentUser.value) => {
+    if (!role) {
+      return false;
+    }
+
+    const actorRoles = resolveUserServerRoles(actor);
+    return userHasServerPermission(actorRoles, 'manage_roles') && isRoleLowerThanHighest(actorRoles, role);
+  };
+
+  const canManageTargetUser = (
+    targetUser: User | null | undefined,
+    permission: ServerPermission = 'manage_roles',
+    actor: User | null | undefined = currentUser.value
+  ) => {
+    if (!targetUser || !actor || targetUser.id === actor.id) {
+      return false;
+    }
+
+    const actorRoles = resolveUserServerRoles(actor);
+    if (!userHasServerPermission(actorRoles, permission)) {
+      return false;
+    }
+
+    return getHighestPermissionRolePosition(resolveUserServerRoles(targetUser)) < getHighestPermissionRolePosition(actorRoles);
+  };
+
+  const getAssignableRoles = (actor: User | null | undefined = currentUser.value) => {
+    const actorRoles = resolveUserServerRoles(actor);
+    return serverRoles.value.filter((role) => !isAllUsersRoleKey(role.key) && canGrantRole(actorRoles, role));
+  };
+
+  const canGrantRolePermissions = (
+    permissions: readonly string[] | string | null | undefined,
+    actor: User | null | undefined = currentUser.value
+  ) => {
+    return canGrantServerPermissions(resolveUserServerRoles(actor), permissions);
   };
 
   const getServerRoleByKey = (roleKey: string | null | undefined) => {
@@ -1095,19 +1205,26 @@ export const useChatStore = defineStore('chat', () => {
         const emoji = typeof (reaction as { emoji?: unknown }).emoji === 'string'
           ? (reaction as { emoji: string }).emoji.trim()
           : '';
+        const userIds = Array.isArray((reaction as { user_ids?: unknown }).user_ids)
+          ? (reaction as { user_ids: unknown[] }).user_ids.filter((userId): userId is string => typeof userId === 'string' && userId.trim().length > 0)
+          : [];
         const rawCount = (reaction as { count?: unknown }).count;
         const count = typeof rawCount === 'number' && Number.isFinite(rawCount)
           ? Math.max(0, Math.floor(rawCount))
-          : 0;
+          : userIds.length;
 
         if (!emoji || count <= 0) {
           return null;
         }
 
+        const currentUserId = currentUser.value?.id;
+        const reactedByCurrentUser = (reaction as { reacted_by_current_user?: unknown }).reacted_by_current_user === true
+          || Boolean(currentUserId && userIds.includes(currentUserId));
+
         return {
           emoji,
           count,
-          reacted_by_current_user: (reaction as { reacted_by_current_user?: unknown }).reacted_by_current_user === true
+          reacted_by_current_user: reactedByCurrentUser
         };
       })
       .filter((reaction): reaction is MessageReaction => Boolean(reaction))
@@ -1859,7 +1976,7 @@ export const useChatStore = defineStore('chat', () => {
         if (payload.server) {
           applyServerState(payload.server);
         }
-        if ((payload.user.role || 'user') === 'admin') {
+        if (userHasPermission(currentUser.value, 'manage_storage_settings')) {
           requestServerStorageSettings();
         }
         requestServerRoles();
@@ -1911,8 +2028,29 @@ export const useChatStore = defineStore('chat', () => {
 
       case 'server_roles_list':
       case 'server_roles_updated':
+      case 'server_roles_reordered':
         applyServerRoles(payload.roles);
         break;
+
+      case 'server_role_created':
+      case 'server_role_updated': {
+        const normalizedRole = normalizeServerRole(payload.role);
+        if (normalizedRole) {
+          const nextRoles = serverRoles.value.some((role) => role.id === normalizedRole.id)
+            ? serverRoles.value.map((role) => role.id === normalizedRole.id ? normalizedRole : role)
+            : [...serverRoles.value, normalizedRole];
+          serverRoles.value = normalizeServerRoles(nextRoles);
+        }
+        break;
+      }
+
+      case 'server_role_deleted': {
+        const roleId = typeof payload.roleId === 'string' ? payload.roleId : '';
+        if (roleId) {
+          serverRoles.value = serverRoles.value.filter((role) => role.id !== roleId);
+        }
+        break;
+      }
         
       case 'member_list':
         users.value = Array.isArray(payload.members) ? payload.members.map((member: any) => normalizeUser(member)) : [];
@@ -2563,12 +2701,49 @@ export const useChatStore = defineStore('chat', () => {
     });
   };
 
-  const updateServerRole = (serverId: string, roleId: string, name: string, color: string | null) => {
+  const createServerRole = (
+    serverId: string,
+    name: string,
+    color: string | null,
+    permissions: ServerPermission[] = [],
+    position?: number | null
+  ) => {
+    send('create_server_role', {
+      serverId,
+      name,
+      color,
+      permissions,
+      ...(typeof position === 'number' ? { position } : {})
+    });
+  };
+
+  const updateServerRole = (
+    serverId: string,
+    roleId: string,
+    name: string,
+    color: string | null,
+    permissions?: ServerPermission[]
+  ) => {
     send('update_server_role', {
       serverId,
       roleId,
       name,
-      color
+      color,
+      ...(Array.isArray(permissions) ? { permissions } : {})
+    });
+  };
+
+  const deleteServerRole = (serverId: string, roleId: string) => {
+    send('delete_server_role', {
+      serverId,
+      roleId
+    });
+  };
+
+  const reorderServerRoles = (serverId: string, roles: Array<{ id: string; position: number }>) => {
+    send('reorder_server_roles', {
+      serverId,
+      roles
     });
   };
 
@@ -2581,14 +2756,18 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   const updateServerRoles = async (roles: ServerRoleFormInput[]) => {
-    const normalizedRoles = roles.map((role) => ({
-      id: role.id,
-      name: role.name.trim(),
-      color: (() => {
-        const normalizedColor = (role.color || '').trim().toLowerCase();
-        return /^#([0-9a-f]{6})$/.test(normalizedColor) ? normalizedColor : null;
-      })()
-    }));
+    const normalizedRoles = roles.map((role) => {
+      const existingRole = serverRoles.value.find((entry) => entry.id === role.id);
+      return {
+        id: role.id,
+        name: role.name.trim(),
+        color: (() => {
+          const normalizedColor = (role.color || '').trim().toLowerCase();
+          return /^#([0-9a-f]{6})$/.test(normalizedColor) ? normalizedColor : null;
+        })(),
+        permissions: normalizeServerPermissions(existingRole?.key, role.permissions || [], { fallbackToLegacy: false })
+      };
+    });
 
     const existingRoles = normalizedRoles.map((role) => serverRoles.value.find((existingRole) => existingRole.id === role.id));
     const invalidRole = normalizedRoles.find((role) => !role.name);
@@ -2606,7 +2785,9 @@ export const useChatStore = defineStore('chat', () => {
         return false;
       }
 
-      return role.name !== existingRole.name || role.color !== existingRole.color;
+      const currentPermissions = existingRole.permissions.join('\u0000');
+      const nextPermissions = role.permissions.join('\u0000');
+      return role.name !== existingRole.name || role.color !== existingRole.color || nextPermissions !== currentPermissions;
     });
 
     const activeServerId = server.value?.id?.trim();
@@ -2615,7 +2796,7 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     for (const role of changedRoles) {
-      updateServerRole(activeServerId, role.id, role.name, role.color);
+      updateServerRole(activeServerId, role.id, role.name, role.color, role.permissions);
     }
 
     return changedRoles.length;
@@ -2946,17 +3127,36 @@ export const useChatStore = defineStore('chat', () => {
     reorderChannels,
     updateServerSettings,
     requestServerRoles,
+    createServerRole,
     updateServerRole,
     updateServerRoles,
+    deleteServerRole,
+    reorderServerRoles,
     assignMemberRoles,
     isUserEffectivelyOnline,
     getUserPresenceStatus,
     setPresenceStatus,
+    serverPermissionKeys: SERVER_PERMISSION_KEYS,
+    allServerPermissions: ALL_SERVER_PERMISSIONS,
+    serverPermissionMetadata: SERVER_PERMISSION_METADATA,
+    serverPermissionCategoryLabels: SERVER_PERMISSION_CATEGORY_LABELS,
     getServerRoleByKey,
     getServerRoleColor,
     getPrimaryServerRole,
+    resolveUserServerRoles,
     getUserRoleKeys,
     userHasRole,
+    userIsAdmin,
+    getUserServerPermissions,
+    userHasPermission,
+    currentUserHasPermission,
+    currentUserIsAdmin,
+    currentUserPermissions,
+    getUserHighestRolePosition,
+    canManageServerRole,
+    canManageTargetUser,
+    getAssignableRoles,
+    canGrantRolePermissions,
     testServerStorageSettings,
     requestServerStorageSettings,
     requestServerRefresh,

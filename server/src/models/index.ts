@@ -1,8 +1,18 @@
-import { db } from '../db';
+import { db, normalizeStoredServerRolePositions } from '../db';
 import crypto from 'node:crypto';
 import { type MessageWithUserAndEmbeds, withMessageEmbeds } from '../messages/embeds';
 import { buildUserAvatarClientUrl } from '../storage/userAvatarStorage';
 import type { S3StorageConfig } from '../storage/s3Storage';
+import {
+  ADMIN_ROLE_KEY,
+  ALL_SERVER_PERMISSIONS,
+  ALL_USERS_ROLE_KEY,
+  getHighestRole,
+  normalizeRoleKey,
+  normalizeServerRolePermissions,
+  serializeServerRolePermissions,
+  type ServerPermission
+} from '../permissions';
 
 let persistedS3ConfigResolver: (() => Promise<S3StorageConfig | null>) | null = null;
 
@@ -115,6 +125,7 @@ export interface ServerRole {
   key: string;
   name: string;
   color: string | null;
+  permissions: ServerPermission[];
   isDefault: boolean;
   isDeletable: boolean;
   position: number;
@@ -170,18 +181,22 @@ const mapServerStorageSettings = (row: any): ServerStorageSettings => ({
   storageMigrationUpdatedAt: row.storage_migration_updated_at || null
 });
 
-const mapServerRoleRow = (row: any): ServerRole => ({
-  id: row.id,
-  serverId: row.server_id,
-  key: row.key,
-  name: row.name,
-  color: row.color || null,
-  isDefault: Boolean(row.is_default),
-  isDeletable: Boolean(row.is_deletable),
-  position: Number.isFinite(Number(row.position)) ? Number(row.position) : 0,
-  createdAt: row.created_at || null,
-  updatedAt: row.updated_at || null
-});
+const mapServerRoleRow = (row: any): ServerRole => {
+  const key = normalizeRoleKey(row.key);
+  return {
+    id: row.id,
+    serverId: row.server_id,
+    key,
+    name: row.name,
+    color: row.color || null,
+    permissions: normalizeServerRolePermissions(key, row.permissions, { fallbackToLegacy: true }),
+    isDefault: Boolean(row.is_default),
+    isDeletable: Boolean(row.is_deletable),
+    position: Number.isFinite(Number(row.position)) ? Number(row.position) : 0,
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null
+  };
+};
 
 export const getServer = async (): Promise<Server | undefined> => {
   const row = await dbGet<any>('SELECT * FROM servers LIMIT 1');
@@ -200,24 +215,24 @@ export const createServer = async (name: string, welcomeChannelId?: string): Pro
 export const ensureDefaultRolesForServer = async (serverId: string): Promise<void> => {
   await dbRun(
     `
-      INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, position)
-      SELECT ?, ?, 'all_users', 'User', NULL, 1, 0, 0
+      INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, permissions, position)
+      SELECT ?, ?, ?, 'User', NULL, 1, 0, ?, 0
       WHERE NOT EXISTS (
-        SELECT 1 FROM server_roles WHERE server_id = ? AND key = 'all_users'
+        SELECT 1 FROM server_roles WHERE server_id = ? AND key = ?
       )
     `,
-    [crypto.randomUUID(), serverId, serverId]
+    [crypto.randomUUID(), serverId, ALL_USERS_ROLE_KEY, JSON.stringify([]), serverId, ALL_USERS_ROLE_KEY]
   );
 
   await dbRun(
     `
-      INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, position)
-      SELECT ?, ?, 'admin', 'Admin', '#c41717', 1, 0, 1
+      INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, permissions, position)
+      SELECT ?, ?, ?, 'Admin', '#c41717', 1, 0, ?, 1
       WHERE NOT EXISTS (
-        SELECT 1 FROM server_roles WHERE server_id = ? AND key = 'admin'
+        SELECT 1 FROM server_roles WHERE server_id = ? AND key = ?
       )
     `,
-    [crypto.randomUUID(), serverId, serverId]
+    [crypto.randomUUID(), serverId, ADMIN_ROLE_KEY, JSON.stringify(ALL_SERVER_PERMISSIONS), serverId, ADMIN_ROLE_KEY]
   );
 
   await dbRun(
@@ -225,26 +240,44 @@ export const ensureDefaultRolesForServer = async (serverId: string): Promise<voi
       UPDATE server_roles
       SET
         name = CASE
-          WHEN key = 'all_users' THEN 'User'
-          WHEN key = 'admin' THEN 'Admin'
+          WHEN key = ? THEN 'User'
+          WHEN key = ? THEN 'Admin'
           ELSE name
         END,
         color = CASE
-          WHEN key = 'admin' THEN '#c41717'
+          WHEN key = ? THEN '#c41717'
           ELSE color
         END,
-        is_default = CASE WHEN key IN ('all_users', 'admin') THEN 1 ELSE is_default END,
-        is_deletable = CASE WHEN key IN ('all_users', 'admin') THEN 0 ELSE is_deletable END,
-        position = CASE
-          WHEN key = 'all_users' THEN 0
-          WHEN key = 'admin' THEN 1
-          ELSE position
+        is_default = CASE WHEN key IN (?, ?) THEN 1 ELSE is_default END,
+        is_deletable = CASE WHEN key IN (?, ?) THEN 0 ELSE is_deletable END,
+        permissions = CASE
+          WHEN key = ? THEN ?
+          WHEN key = ? THEN ?
+          ELSE COALESCE(NULLIF(permissions, ''), ?)
         END,
         updated_at = CURRENT_TIMESTAMP
-      WHERE server_id = ? AND key IN ('all_users', 'admin')
+      WHERE server_id = ? AND key IN (?, ?)
     `,
-    [serverId]
+    [
+      ALL_USERS_ROLE_KEY,
+      ADMIN_ROLE_KEY,
+      ADMIN_ROLE_KEY,
+      ALL_USERS_ROLE_KEY,
+      ADMIN_ROLE_KEY,
+      ALL_USERS_ROLE_KEY,
+      ADMIN_ROLE_KEY,
+      ALL_USERS_ROLE_KEY,
+      JSON.stringify([]),
+      ADMIN_ROLE_KEY,
+      JSON.stringify(ALL_SERVER_PERMISSIONS),
+      JSON.stringify([]),
+      serverId,
+      ALL_USERS_ROLE_KEY,
+      ADMIN_ROLE_KEY
+    ]
   );
+
+  await normalizeStoredServerRolePositions(serverId);
 };
 
 export const getServerRoles = async (serverId: string): Promise<ServerRole[]> => {
@@ -269,6 +302,59 @@ const getServerRolesByIds = async (serverId: string, roleIds: string[]): Promise
   return rows.map(mapServerRoleRow);
 };
 
+const getNextServerRolePosition = async (serverId: string): Promise<number> => {
+  const row = await dbGet<{ maxPosition: number | null }>(
+    `
+      SELECT MAX(position) AS maxPosition
+      FROM server_roles
+      WHERE server_id = ? AND key NOT IN (?, ?)
+    `,
+    [serverId, ALL_USERS_ROLE_KEY, ADMIN_ROLE_KEY]
+  );
+
+  const maxPosition = Number(row?.maxPosition ?? 0);
+  return Math.max(1, Number.isFinite(maxPosition) ? maxPosition + 1 : 1);
+};
+
+export const createServerRole = async (input: {
+  serverId: string;
+  name: string;
+  color: string | null;
+  permissions?: ServerPermission[] | string[] | null;
+  position?: number | null;
+}): Promise<ServerRole> => {
+  await ensureDefaultRolesForServer(input.serverId);
+  const id = crypto.randomUUID();
+  const key = `custom_${id.replace(/-/g, '')}`;
+  const requestedPosition = Number(input.position);
+  const position = Number.isInteger(requestedPosition) && requestedPosition > 0
+    ? requestedPosition
+    : await getNextServerRolePosition(input.serverId);
+
+  await dbRun(
+    `
+      INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, permissions, position)
+      VALUES (?, ?, ?, ?, ?, 0, 1, ?, ?)
+    `,
+    [
+      id,
+      input.serverId,
+      key,
+      input.name,
+      input.color,
+      serializeServerRolePermissions(key, input.permissions || []),
+      position
+    ]
+  );
+
+  await normalizeStoredServerRolePositions(input.serverId);
+  const created = await getServerRoleById(input.serverId, id);
+  if (!created) {
+    throw new Error('Role not found');
+  }
+  return created;
+};
+
 export const getUserServerRoleIds = async (serverId: string, userId: string, legacyRole?: string | null): Promise<string[]> => {
   await ensureDefaultRolesForServer(serverId);
   const rows = await dbAll<{ id: string; key: string }>(
@@ -288,8 +374,8 @@ export const getUserServerRoleIds = async (serverId: string, userId: string, leg
   }
 
   const fallbackRoles = await getServerRoles(serverId);
-  const defaultRoleIds = fallbackRoles.filter((role) => role.key === 'all_users').map((role) => role.id);
-  const legacyKey = (legacyRole || '').trim();
+  const defaultRoleIds = fallbackRoles.filter((role) => role.key === ALL_USERS_ROLE_KEY).map((role) => role.id);
+  const legacyKey = normalizeRoleKey(legacyRole || '');
   const legacyRoleIds = legacyKey && legacyKey !== 'user'
     ? fallbackRoles.filter((role) => role.key === legacyKey).map((role) => role.id)
     : [];
@@ -307,7 +393,7 @@ export const setUserServerRoles = async (serverId: string, userId: string, roleI
   const availableRoles = await getServerRoles(serverId);
   const roleById = new Map(availableRoles.map((role) => [role.id, role]));
   const normalizedRoleIds = Array.from(new Set(roleIds.filter((roleId) => roleById.has(roleId))));
-  const defaultRoleIds = availableRoles.filter((role) => role.key === 'all_users').map((role) => role.id);
+  const defaultRoleIds = availableRoles.filter((role) => role.key === ALL_USERS_ROLE_KEY).map((role) => role.id);
   const finalRoleIds = Array.from(new Set([...defaultRoleIds, ...normalizedRoleIds]));
 
   await dbRun('BEGIN TRANSACTION');
@@ -327,7 +413,7 @@ export const setUserServerRoles = async (serverId: string, userId: string, roleI
       await dbRun('INSERT OR IGNORE INTO user_server_roles (user_id, server_role_id) VALUES (?, ?)', [userId, roleId]);
     }
 
-    const adminAssigned = finalRoleIds.some((roleId) => roleById.get(roleId)?.key === 'admin');
+    const adminAssigned = finalRoleIds.some((roleId) => roleById.get(roleId)?.key === ADMIN_ROLE_KEY);
     await updateUserRole(userId, adminAssigned ? 'admin' : 'user');
     await dbRun('COMMIT');
   } catch (error) {
@@ -344,9 +430,10 @@ export const setUserServerRoles = async (serverId: string, userId: string, roleI
 
 export const hydrateUserWithServerRoles = async (serverId: string, user: User): Promise<UserWithServerRoles> => {
   const roles = await getUserServerRoles(serverId, user.id, user.role);
+  const highestRole = getHighestRole(roles.filter((entry) => entry.key !== ALL_USERS_ROLE_KEY));
   return {
     ...user,
-    role: roles.find((entry) => entry.key !== 'all_users')?.key || roles[0]?.key || user.role || 'user',
+    role: highestRole?.key || roles.find((entry) => entry.key === ALL_USERS_ROLE_KEY)?.key || user.role || 'user',
     role_ids: roles.map((role) => role.id),
     roles
   };
@@ -365,8 +452,8 @@ export const userHasServerRoleKey = async (serverId: string, user: User | undefi
     return false;
   }
 
-  const normalizedRoleKeys = new Set(roleKeys.map((key) => key.trim()).filter(Boolean));
-  if (normalizedRoleKeys.has(user.role)) {
+  const normalizedRoleKeys = new Set(roleKeys.map(normalizeRoleKey).filter(Boolean));
+  if (normalizedRoleKeys.has(normalizeRoleKey(user.role))) {
     return true;
   }
 
@@ -385,23 +472,113 @@ export const updateServerRole = async (input: {
   roleId: string;
   name: string;
   color: string | null;
+  permissions?: ServerPermission[] | string[] | null;
 }): Promise<ServerRole> => {
   await ensureDefaultRolesForServer(input.serverId);
+  const existing = await getServerRoleById(input.serverId, input.roleId);
+  if (!existing) {
+    throw new Error('Role not found');
+  }
+
   await dbRun(
     `
       UPDATE server_roles
-      SET name = ?, color = ?, updated_at = CURRENT_TIMESTAMP
+      SET name = ?, color = ?, permissions = ?, updated_at = CURRENT_TIMESTAMP
       WHERE server_id = ? AND id = ?
     `,
-    [input.name, input.color, input.serverId, input.roleId]
+    [
+      input.name,
+      input.color,
+      serializeServerRolePermissions(existing.key, input.permissions ?? existing.permissions),
+      input.serverId,
+      input.roleId
+    ]
   );
 
+  await normalizeStoredServerRolePositions(input.serverId);
   const updated = await getServerRoleById(input.serverId, input.roleId);
   if (!updated) {
     throw new Error('Role not found');
   }
 
   return updated;
+};
+
+export const deleteServerRole = async (serverId: string, roleId: string): Promise<void> => {
+  await ensureDefaultRolesForServer(serverId);
+  const role = await getServerRoleById(serverId, roleId);
+  if (!role) {
+    throw new Error('Role not found');
+  }
+  if (!role.isDeletable || role.key === ADMIN_ROLE_KEY || role.key === ALL_USERS_ROLE_KEY) {
+    throw new Error('Role cannot be deleted');
+  }
+
+  await dbRun('BEGIN TRANSACTION');
+  try {
+    await dbRun('DELETE FROM user_server_roles WHERE server_role_id = ?', [roleId]);
+    await dbRun('DELETE FROM server_roles WHERE server_id = ? AND id = ?', [serverId, roleId]);
+    await dbRun('COMMIT');
+  } catch (error) {
+    try {
+      await dbRun('ROLLBACK');
+    } catch {
+      // no-op
+    }
+    throw error;
+  }
+
+  await normalizeStoredServerRolePositions(serverId);
+};
+
+export const reorderServerRoles = async (
+  serverId: string,
+  updates: Array<{ roleId: string; position: number }>
+): Promise<ServerRole[]> => {
+  await ensureDefaultRolesForServer(serverId);
+  if (!updates.length) {
+    return getServerRoles(serverId);
+  }
+
+  const roles = await getServerRoles(serverId);
+  const roleById = new Map(roles.map((role) => [role.id, role]));
+  const seenRoleIds = new Set<string>();
+
+  await dbRun('BEGIN TRANSACTION');
+  try {
+    for (const update of updates) {
+      const role = roleById.get(update.roleId);
+      if (!role) {
+        throw new Error('Role not found');
+      }
+      if (role.key === ADMIN_ROLE_KEY || role.key === ALL_USERS_ROLE_KEY) {
+        continue;
+      }
+
+      const normalizedPosition = Math.max(1, Math.floor(Number(update.position)));
+      if (!Number.isFinite(normalizedPosition) || seenRoleIds.has(role.id)) {
+        throw new Error('Invalid role reorder payload');
+      }
+
+      await dbRun(
+        'UPDATE server_roles SET position = ?, updated_at = CURRENT_TIMESTAMP WHERE server_id = ? AND id = ?',
+        [normalizedPosition, serverId, role.id]
+      );
+      seenRoleIds.add(role.id);
+    }
+
+    await dbRun('COMMIT');
+  } catch (error) {
+    try {
+      await dbRun('ROLLBACK');
+    } catch {
+      // no-op
+    }
+    throw error;
+  }
+
+  await normalizeStoredServerRolePositions(serverId);
+  return getServerRoles(serverId);
 };
 
 export const updateServerSettings = async (

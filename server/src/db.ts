@@ -2,6 +2,23 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import {
+  ADMIN_ROLE_KEY,
+  ALL_SERVER_PERMISSIONS,
+  ALL_USERS_ROLE_KEY,
+  LEGACY_SERVER_ROLE_KEYS,
+  getDefaultPermissionsForRoleKey,
+  normalizeRoleKey,
+  serializeServerRolePermissions
+} from './permissions';
+
+const EMPTY_PERMISSIONS_JSON = JSON.stringify([]);
+const ADMIN_PERMISSIONS_JSON = JSON.stringify(ALL_SERVER_PERMISSIONS);
+const LEGACY_ROLE_METADATA: Record<string, { name: string; color: string | null; position: number }> = {
+  owner: { name: 'Owner', color: '#f59e0b', position: 3 },
+  moderator: { name: 'Moderator', color: '#3b82f6', position: 2 },
+  mod: { name: 'Mod', color: '#3b82f6', position: 1 }
+};
 
 export const dataDir = path.join(__dirname, '..', 'data');
 if (!fs.existsSync(dataDir)) {
@@ -56,6 +73,58 @@ export const db = new sqlite3.Database(dbPath, (err) => {
     initializeDatabase();
   }
 });
+
+const dbRunAsync = (sql: string, params: any[] = []): Promise<void> => {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+};
+
+const dbAllAsync = <T>(sql: string, params: any[] = []): Promise<T[]> => {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows as T[]);
+    });
+  });
+};
+
+export const normalizeStoredServerRolePositions = async (serverId?: string): Promise<void> => {
+  const scopedWhere = serverId ? 'WHERE server_id = ?' : '';
+  const scopedParams = serverId ? [serverId] : [];
+
+  await dbRunAsync(
+    `
+      UPDATE server_roles
+      SET position = CASE
+        WHEN key = ? THEN 0
+        ELSE CASE WHEN COALESCE(position, 0) < 1 THEN 1 ELSE COALESCE(position, 0) END
+      END
+      ${scopedWhere}
+    `,
+    [ALL_USERS_ROLE_KEY, ...scopedParams]
+  );
+
+  await dbRunAsync(
+    `
+      UPDATE server_roles
+      SET position = (
+        SELECT COALESCE(MAX(CASE
+          WHEN other.key != ? THEN COALESCE(other.position, 0)
+          ELSE 0
+        END), 0) + 1
+        FROM server_roles other
+        WHERE other.server_id = server_roles.server_id
+      )
+      WHERE key = ?
+      ${serverId ? 'AND server_id = ?' : ''}
+    `,
+    [ADMIN_ROLE_KEY, ADMIN_ROLE_KEY, ...scopedParams]
+  );
+};
 
 function initializeDatabase() {
   db.serialize(() => {
@@ -157,6 +226,7 @@ function initializeDatabase() {
         color TEXT,
         is_default INTEGER NOT NULL DEFAULT 0,
         is_deletable INTEGER NOT NULL DEFAULT 1,
+        permissions TEXT NOT NULL DEFAULT '[]',
         position INTEGER NOT NULL DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1075,6 +1145,7 @@ function migrateServerRolesTableSchema(done: (error?: Error) => void) {
     const hasColor = columns.some((column) => column.name === 'color');
     const hasIsDefault = columns.some((column) => column.name === 'is_default');
     const hasIsDeletable = columns.some((column) => column.name === 'is_deletable');
+    const hasPermissions = columns.some((column) => column.name === 'permissions');
     const hasPosition = columns.some((column) => column.name === 'position');
     const hasCreatedAt = columns.some((column) => column.name === 'created_at');
     const hasUpdatedAt = columns.some((column) => column.name === 'updated_at');
@@ -1086,141 +1157,192 @@ function migrateServerRolesTableSchema(done: (error?: Error) => void) {
     if (!hasColor) pendingAlterStatements.push('ALTER TABLE server_roles ADD COLUMN color TEXT');
     if (!hasIsDefault) pendingAlterStatements.push('ALTER TABLE server_roles ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0');
     if (!hasIsDeletable) pendingAlterStatements.push('ALTER TABLE server_roles ADD COLUMN is_deletable INTEGER NOT NULL DEFAULT 1');
+    if (!hasPermissions) pendingAlterStatements.push("ALTER TABLE server_roles ADD COLUMN permissions TEXT NOT NULL DEFAULT '[]'");
     if (!hasPosition) pendingAlterStatements.push('ALTER TABLE server_roles ADD COLUMN position INTEGER NOT NULL DEFAULT 0');
     if (!hasCreatedAt) pendingAlterStatements.push('ALTER TABLE server_roles ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP');
     if (!hasUpdatedAt) pendingAlterStatements.push('ALTER TABLE server_roles ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP');
 
-    const finalizeMigration = () => {
-      db.run(
+    const finalizeMigration = async () => {
+      await dbRunAsync(
         `
           UPDATE server_roles
           SET
             name = CASE
-              WHEN key = 'all_users' THEN 'User'
-              WHEN key = 'admin' THEN 'Admin'
+              WHEN key = ? THEN 'User'
+              WHEN key = ? THEN 'Admin'
               ELSE COALESCE(NULLIF(TRIM(name), ''), 'Role')
             END,
             color = CASE
-              WHEN key = 'admin' THEN '#c41717'
+              WHEN key = ? THEN '#c41717'
               WHEN color IS NULL OR TRIM(color) = '' THEN NULL
               ELSE color
             END,
-            is_default = CASE WHEN COALESCE(is_default, 0) != 0 THEN 1 ELSE 0 END,
-            is_deletable = CASE WHEN COALESCE(is_deletable, 1) != 0 THEN 1 ELSE 0 END,
+            is_default = CASE WHEN key IN (?, ?) THEN 1 WHEN COALESCE(is_default, 0) != 0 THEN 1 ELSE 0 END,
+            is_deletable = CASE WHEN key IN (?, ?) THEN 0 WHEN COALESCE(is_deletable, 1) != 0 THEN 1 ELSE 0 END,
+            permissions = COALESCE(NULLIF(permissions, ''), ?),
             position = COALESCE(position, 0),
             created_at = COALESCE(created_at, CURRENT_TIMESTAMP),
             updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)
         `,
-        (updateErr) => done(updateErr || undefined)
+        [
+          ALL_USERS_ROLE_KEY,
+          ADMIN_ROLE_KEY,
+          ADMIN_ROLE_KEY,
+          ALL_USERS_ROLE_KEY,
+          ADMIN_ROLE_KEY,
+          ALL_USERS_ROLE_KEY,
+          ADMIN_ROLE_KEY,
+          EMPTY_PERMISSIONS_JSON
+        ]
       );
-    };
 
-    const runNextAlter = (index: number) => {
-      if (index >= pendingAlterStatements.length) {
-        finalizeMigration();
-        return;
+      const rows = await dbAllAsync<{ id: string; key: string | null; permissions: string | null }>(
+        'SELECT id, key, permissions FROM server_roles'
+      );
+
+      for (const row of rows) {
+        await dbRunAsync(
+          'UPDATE server_roles SET permissions = ? WHERE id = ?',
+          [serializeServerRolePermissions(row.key, row.permissions, { fallbackToLegacy: true }), row.id]
+        );
       }
 
-      db.run(pendingAlterStatements[index], (alterErr) => {
-        if (alterErr) {
-          done(alterErr);
-          return;
-        }
-        runNextAlter(index + 1);
-      });
+      await normalizeStoredServerRolePositions();
     };
 
-    runNextAlter(0);
+    const runMigration = async () => {
+      for (const statement of pendingAlterStatements) {
+        await dbRunAsync(statement);
+      }
+      await finalizeMigration();
+    };
+
+    runMigration().then(() => done()).catch((error) => done(error));
   });
 }
 
-function ensureDefaultServerRoles(done: (error?: Error) => void) {
-  db.all('SELECT id, name FROM servers', (serversErr, servers: Array<{ id: string; name: string }>) => {
-    if (serversErr) {
-      done(serversErr);
-      return;
+const getLegacyRoleKeysRequiredByUsers = async (): Promise<string[]> => {
+  const rows = await dbAllAsync<{ role: string | null }>(
+    `
+      SELECT DISTINCT LOWER(TRIM(COALESCE(role, ''))) AS role
+      FROM users
+      WHERE LOWER(TRIM(COALESCE(role, ''))) IN ('owner', 'mod', 'moderator')
+    `
+  );
+
+  const supportedLegacyKeys = new Set(LEGACY_SERVER_ROLE_KEYS);
+  return rows
+    .map((row) => normalizeRoleKey(row.role))
+    .filter((role) => supportedLegacyKeys.has(role));
+};
+
+const ensureStoredDefaultRolesForServer = async (serverId: string, legacyRoleKeys: string[] = []): Promise<void> => {
+  await dbRunAsync(
+    `
+      INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, permissions, position)
+      SELECT ?, ?, ?, 'User', NULL, 1, 0, ?, 0
+      WHERE NOT EXISTS (
+        SELECT 1 FROM server_roles WHERE server_id = ? AND key = ?
+      )
+    `,
+    [crypto.randomUUID(), serverId, ALL_USERS_ROLE_KEY, EMPTY_PERMISSIONS_JSON, serverId, ALL_USERS_ROLE_KEY]
+  );
+
+  await dbRunAsync(
+    `
+      INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, permissions, position)
+      SELECT ?, ?, ?, 'Admin', '#c41717', 1, 0, ?, 1
+      WHERE NOT EXISTS (
+        SELECT 1 FROM server_roles WHERE server_id = ? AND key = ?
+      )
+    `,
+    [crypto.randomUUID(), serverId, ADMIN_ROLE_KEY, ADMIN_PERMISSIONS_JSON, serverId, ADMIN_ROLE_KEY]
+  );
+
+  const uniqueLegacyRoleKeys = Array.from(new Set(legacyRoleKeys.map(normalizeRoleKey)));
+  for (const legacyRoleKey of uniqueLegacyRoleKeys) {
+    const metadata = LEGACY_ROLE_METADATA[legacyRoleKey];
+    if (!metadata) {
+      continue;
     }
 
-    const ensureForServer = (index: number) => {
-      if (index >= servers.length) {
-        done();
-        return;
-      }
+    await dbRunAsync(
+      `
+        INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, permissions, position)
+        SELECT ?, ?, ?, ?, ?, 0, 1, ?, ?
+        WHERE NOT EXISTS (
+          SELECT 1 FROM server_roles WHERE server_id = ? AND key = ?
+        )
+      `,
+      [
+        crypto.randomUUID(),
+        serverId,
+        legacyRoleKey,
+        metadata.name,
+        metadata.color,
+        JSON.stringify(getDefaultPermissionsForRoleKey(legacyRoleKey)),
+        metadata.position,
+        serverId,
+        legacyRoleKey
+      ]
+    );
+  }
 
-      const server = servers[index];
-      db.serialize(() => {
-        db.run(
-          `
-            INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, position)
-            SELECT ?, ?, 'all_users', 'User', NULL, 1, 0, 0
-            WHERE NOT EXISTS (
-              SELECT 1 FROM server_roles WHERE server_id = ? AND key = 'all_users'
-            )
-          `,
-          [crypto.randomUUID(), server.id, server.id],
-          (allUsersErr) => {
-            if (allUsersErr) {
-              done(allUsersErr);
-              return;
-            }
+  await dbRunAsync(
+    `
+      UPDATE server_roles
+      SET
+        name = CASE
+          WHEN key = ? THEN 'User'
+          WHEN key = ? THEN 'Admin'
+          ELSE name
+        END,
+        color = CASE
+          WHEN key = ? THEN '#c41717'
+          ELSE color
+        END,
+        is_default = CASE WHEN key IN (?, ?) THEN 1 ELSE is_default END,
+        is_deletable = CASE WHEN key IN (?, ?) THEN 0 ELSE is_deletable END,
+        permissions = CASE
+          WHEN key = ? THEN ?
+          WHEN key = ? THEN ?
+          ELSE permissions
+        END,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE server_id = ? AND key IN (?, ?)
+    `,
+    [
+      ALL_USERS_ROLE_KEY,
+      ADMIN_ROLE_KEY,
+      ADMIN_ROLE_KEY,
+      ALL_USERS_ROLE_KEY,
+      ADMIN_ROLE_KEY,
+      ALL_USERS_ROLE_KEY,
+      ADMIN_ROLE_KEY,
+      ALL_USERS_ROLE_KEY,
+      EMPTY_PERMISSIONS_JSON,
+      ADMIN_ROLE_KEY,
+      ADMIN_PERMISSIONS_JSON,
+      serverId,
+      ALL_USERS_ROLE_KEY,
+      ADMIN_ROLE_KEY
+    ]
+  );
 
-            db.run(
-              `
-                INSERT INTO server_roles (id, server_id, key, name, color, is_default, is_deletable, position)
-                SELECT ?, ?, 'admin', 'Admin', '#c41717', 1, 0, 1
-                WHERE NOT EXISTS (
-                  SELECT 1 FROM server_roles WHERE server_id = ? AND key = 'admin'
-                )
-              `,
-              [crypto.randomUUID(), server.id, server.id],
-              (adminInsertErr) => {
-                if (adminInsertErr) {
-                  done(adminInsertErr);
-                  return;
-                }
+  await normalizeStoredServerRolePositions(serverId);
+};
 
-                db.run(
-                  `
-                    UPDATE server_roles
-                    SET
-                      name = CASE
-                        WHEN key = 'all_users' THEN 'User'
-                        WHEN key = 'admin' THEN 'Admin'
-                        ELSE name
-                      END,
-                      color = CASE
-                        WHEN key = 'admin' THEN '#c41717'
-                        ELSE color
-                      END,
-                      is_default = CASE WHEN key IN ('all_users', 'admin') THEN 1 ELSE is_default END,
-                      is_deletable = CASE WHEN key IN ('all_users', 'admin') THEN 0 ELSE is_deletable END,
-                      position = CASE
-                        WHEN key = 'all_users' THEN 0
-                        WHEN key = 'admin' THEN 1
-                        ELSE position
-                      END,
-                      updated_at = CURRENT_TIMESTAMP
-                    WHERE server_id = ? AND key IN ('all_users', 'admin')
-                  `,
-                  [server.id],
-                  (updateErr) => {
-                    if (updateErr) {
-                      done(updateErr);
-                      return;
-                    }
+function ensureDefaultServerRoles(done: (error?: Error) => void) {
+  const runEnsure = async () => {
+    const servers = await dbAllAsync<{ id: string; name: string }>('SELECT id, name FROM servers');
+    const legacyRoleKeys = await getLegacyRoleKeysRequiredByUsers();
 
-                    ensureForServer(index + 1);
-                  }
-                );
-              }
-            );
-          }
-        );
-      });
-    };
+    for (const server of servers) {
+      await ensureStoredDefaultRolesForServer(server.id, legacyRoleKeys);
+    }
+  };
 
-    ensureForServer(0);
-  });
+  runEnsure().then(() => done()).catch((error) => done(error));
 }
 
 function migrateUserServerRolesTableSchema(done: (error?: Error) => void) {
