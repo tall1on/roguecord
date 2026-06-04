@@ -1095,19 +1095,26 @@ export const useChatStore = defineStore('chat', () => {
         const emoji = typeof (reaction as { emoji?: unknown }).emoji === 'string'
           ? (reaction as { emoji: string }).emoji.trim()
           : '';
+        const userIds = Array.isArray((reaction as { user_ids?: unknown }).user_ids)
+          ? (reaction as { user_ids: unknown[] }).user_ids.filter((userId): userId is string => typeof userId === 'string' && userId.trim().length > 0)
+          : [];
         const rawCount = (reaction as { count?: unknown }).count;
         const count = typeof rawCount === 'number' && Number.isFinite(rawCount)
           ? Math.max(0, Math.floor(rawCount))
-          : 0;
+          : userIds.length;
 
         if (!emoji || count <= 0) {
           return null;
         }
 
+        const currentUserId = currentUser.value?.id;
+        const reactedByCurrentUser = (reaction as { reacted_by_current_user?: unknown }).reacted_by_current_user === true
+          || Boolean(currentUserId && userIds.includes(currentUserId));
+
         return {
           emoji,
           count,
-          reacted_by_current_user: (reaction as { reacted_by_current_user?: unknown }).reacted_by_current_user === true
+          reacted_by_current_user: reactedByCurrentUser
         };
       })
       .filter((reaction): reaction is MessageReaction => Boolean(reaction))
