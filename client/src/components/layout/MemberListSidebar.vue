@@ -21,11 +21,10 @@ const contextMenu = ref<{ visible: boolean; x: number; y: number; member: User |
 const blacklistIdentity = ref(true)
 const blacklistIp = ref(false)
 
-const isAdmin = computed(() => chatStore.userHasRole(chatStore.currentUser, ['admin']))
+const canManageRoles = computed(() => chatStore.currentUserHasPermission('manage_roles'))
+const canModerateMembers = computed(() => chatStore.currentUserHasPermission('moderate_members'))
 
-const assignableRoles = computed(() => {
-  return chatStore.serverRoles.filter((role) => role.key !== 'all_users')
-})
+const assignableRoles = computed(() => chatStore.getAssignableRoles())
 
 const roleMap = computed(() => {
   const map = new Map<string, ServerRole>()
@@ -86,11 +85,14 @@ const isHiddenSystemMember = (user: User) => {
   return chatStore.userHasRole(user, ['system']) || (chatStore.userHasRole(user, ['bot']) && user.username === 'RSS Bot')
 }
 
-const canModerate = (user: User) => {
-  if (!isAdmin.value || !chatStore.currentUser) return false
-  if (chatStore.currentUser.id === user.id) return false
-  return true
+const canModerate = (user: User) => chatStore.canManageTargetUser(user, 'moderate_members') && canModerateMembers.value
+
+const canAssignRolesToMember = (user: User | null | undefined) => {
+  if (!user || !canManageRoles.value) return false
+  return chatStore.canManageTargetUser(user, 'manage_roles')
 }
+
+const canOpenMemberContextMenu = (user: User) => canModerate(user) || canAssignRolesToMember(user)
 
 const resetModerationForm = () => {
   reason.value = ''
@@ -115,7 +117,10 @@ const isRoleAssignedToMember = (user: User | null, roleId: string) => {
 
 const toggleRoleAssignment = async (roleId: string) => {
   const member = contextMenu.value.member
-  if (!member || !chatStore.server?.id || isAssigningRoles.value) return
+  if (!member || !chatStore.server?.id || isAssigningRoles.value || !canAssignRolesToMember(member)) return
+
+  const role = assignableRoles.value.find((entry) => entry.id === roleId)
+  if (!role) return
 
   const currentRoleIds = Array.isArray(member.role_ids) ? member.role_ids : []
   const nextRoleIds = currentRoleIds.includes(roleId)
@@ -144,7 +149,7 @@ const getRoleButtonClass = (assigned: boolean) => {
 }
 
 const openContextMenu = (event: MouseEvent, user: User) => {
-  if (!canModerate(user)) {
+  if (!canOpenMemberContextMenu(user)) {
     closeContextMenu()
     return
   }
@@ -235,10 +240,10 @@ const groupedMembers = computed(() => {
     if ((roleA?.key || a) === 'admin') return -1
     if ((roleB?.key || b) === 'admin') return 1
 
-    const positionA = roleA?.position ?? Number.MAX_SAFE_INTEGER
-    const positionB = roleB?.position ?? Number.MAX_SAFE_INTEGER
+    const positionA = roleA?.position ?? 0
+    const positionB = roleB?.position ?? 0
     if (positionA !== positionB) {
-      return positionA - positionB
+      return positionB - positionA
     }
 
     return (roleA?.name || a || 'all users').localeCompare(roleB?.name || b || 'all users')
@@ -330,7 +335,7 @@ onUnmounted(() => {
       :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
       @click.stop
     >
-      <div v-if="contextMenu.member && assignableRoles.length > 0" class="px-1 py-1 border-b border-white/5 mb-1">
+      <div v-if="contextMenu.member && canAssignRolesToMember(contextMenu.member) && assignableRoles.length > 0" class="px-1 py-1 border-b border-white/5 mb-1">
         <div class="px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-zinc-500">Roles</div>
         <button
           v-for="role in assignableRoles"
@@ -348,12 +353,14 @@ onUnmounted(() => {
         </button>
       </div>
       <button
+        v-if="contextMenu.member && canModerate(contextMenu.member)"
         class="w-full text-left px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-zinc-900 font-medium transition-colors"
         @click="openModerationFromContextMenu('kick')"
       >
         Kick
       </button>
       <button
+        v-if="contextMenu.member && canModerate(contextMenu.member)"
         class="w-full text-left px-3 py-2 text-sm text-red-400 hover:text-red-300 hover:bg-zinc-900 font-medium transition-colors"
         @click="openModerationFromContextMenu('ban')"
       >
