@@ -1,20 +1,21 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { RouterView } from 'vue-router'
 import { useRouter } from 'vue-router'
 import { Minus, Square, X, AlertCircle } from 'lucide-vue-next'
-import { useChatStore } from '../stores/chat'
+import { useChatStore, type ServerPermission } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
 import LoginModal from '../components/layout/modals/LoginModal.vue'
 import CreateServerModal from '../components/layout/modals/CreateServerModal.vue'
 import CreateChannelModal from '../components/layout/modals/CreateChannelModal.vue'
-import ServerSettingsModal from '../components/layout/modals/ServerSettingsModal.vue'
 import UserSettingsModal from '../components/layout/modals/UserSettingsModal.vue'
 import InviteModal from '../components/layout/modals/InviteModal.vue'
 import ServerListSidebar from '../components/layout/ServerListSidebar.vue'
 import ChannelListSidebar from '../components/layout/ChannelListSidebar.vue'
 import MemberListSidebar from '../components/layout/MemberListSidebar.vue'
 import { isTauri } from '../utils/isTauri'
+
+const ServerSettingsModal = defineAsyncComponent(() => import('../components/layout/modals/ServerSettingsModal.vue'))
 
 type ServerSettingsNavGroup = {
   id: string
@@ -72,6 +73,7 @@ const serverSettingsForm = ref({
     key: string
     name: string
     color: string
+    permissions: ServerPermission[]
     isDefault: boolean
     isDeletable: boolean
     position: number
@@ -107,7 +109,34 @@ const serverSettingsNavGroups = ref<ServerSettingsNavGroup[]>([
   }
 ])
 
-const isAdmin = computed(() => chatStore.currentUserRole === 'admin')
+const isServerSettingsSectionAllowed = (sectionId: string) => {
+  if (sectionId === 'general-settings') return canManageServerSettings.value
+  if (sectionId === 'role-settings') return canManageRoles.value
+  if (sectionId === 'storage-settings') return canManageStorageSettings.value
+  return false
+}
+
+const visibleServerSettingsNavGroups = computed(() => serverSettingsNavGroups.value
+  .map((group) => ({
+    ...group,
+    items: group.items.filter((item) => isServerSettingsSectionAllowed(item.id))
+  }))
+  .filter((group) => group.items.length > 0)
+)
+
+const getDefaultServerSettingsSection = () => {
+  if (canManageServerSettings.value) return 'general-settings'
+  if (canManageRoles.value) return 'role-settings'
+  if (canManageStorageSettings.value) return 'storage-settings'
+  return 'general-settings'
+}
+
+const isAdmin = computed(() => chatStore.currentUserIsAdmin)
+const canManageServerSettings = computed(() => chatStore.currentUserHasPermission('manage_server_settings'))
+const canManageStorageSettings = computed(() => chatStore.currentUserHasPermission('manage_storage_settings'))
+const canManageChannels = computed(() => chatStore.currentUserHasPermission('manage_channels'))
+const canManageRoles = computed(() => chatStore.currentUserHasPermission('manage_roles'))
+const canOpenServerSettings = computed(() => canManageServerSettings.value || canManageStorageSettings.value || canManageRoles.value)
 const shouldShowMemberList = computed(() => chatStore.activeMainPanel.type !== 'voice')
 const createChannelModalTitle = computed(() => creatingCategory.value ? 'Create Category' : 'Create Channel')
 const createChannelNameLabel = computed(() => creatingCategory.value ? 'Category Name' : 'Channel Name')
@@ -150,6 +179,7 @@ const populateServerRoleSettingsForm = () => {
     key: role.key,
     name: role.name,
     color: role.color || '#9ca3af',
+    permissions: [...role.permissions],
     isDefault: role.isDefault,
     isDeletable: role.isDeletable,
     position: role.position
@@ -239,8 +269,10 @@ const hasRoleSettingsChanges = computed(() => {
     const nextName = nextRole.name.trim()
     const nextColor = (nextRole.color || '').trim().toLowerCase()
     const currentColor = (role.color || '').trim().toLowerCase()
+    const currentPermissions = role.permissions.join('\u0000')
+    const nextPermissions = nextRole.permissions.join('\u0000')
 
-    return nextName !== role.name || nextColor !== currentColor
+    return nextName !== role.name || nextColor !== currentColor || nextPermissions !== currentPermissions || nextRole.position !== role.position
   })
 })
 
@@ -328,7 +360,7 @@ const handleCreateServer = async () => {
 }
 
 const openCreateChannelModal = (payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' | 'folder'; createCategory?: boolean }) => {
-  if (!isAdmin.value) return
+  if (!canManageChannels.value) return
 
   createChannelError.value = null
   chatStore.clearError()
@@ -345,7 +377,7 @@ const openCreateChannelModal = (payload: { categoryId: string | null; type?: 'te
 }
 
 const handleCreateChannel = () => {
-  if (!isAdmin.value) return
+  if (!canManageChannels.value) return
 
   const trimmedName = newChannelName.value.trim()
   const trimmedFeedUrl = newChannelFeedUrl.value.trim()
@@ -374,6 +406,8 @@ const handleCreateChannel = () => {
 }
 
 const handleTestStorageConnection = async () => {
+  if (!canManageStorageSettings.value) return
+
   serverSettingsSaveError.value = null
   serverSettingsSaveMessage.value = null
   s3ConnectionTestState.value = 'testing'
@@ -407,6 +441,60 @@ const handleTestStorageConnection = async () => {
   s3LastSuccessfulFingerprint.value = null
 }
 
+const getRoleReorderUpdates = () => {
+  return serverSettingsForm.value.roles
+    .filter((role) => !role.isDefault && role.key !== 'admin' && role.key !== 'all_users')
+    .filter((role) => {
+      const currentRole = chatStore.serverRoles.find((entry) => entry.id === role.id)
+      return currentRole && currentRole.position !== role.position
+    })
+    .map((role) => ({
+      id: role.id,
+      position: role.position
+    }))
+}
+
+const handleCreateServerRole = (payload: { name: string; color: string | null; permissions: ServerPermission[] }) => {
+  if (!chatStore.server?.id || !canManageRoles.value) return
+
+  serverSettingsSaveError.value = null
+  serverSettingsSaveMessage.value = 'Creating role...'
+  chatStore.createServerRole(chatStore.server.id, payload.name, payload.color, payload.permissions)
+}
+
+const handleDeleteServerRole = (roleId: string) => {
+  if (!chatStore.server?.id || !canManageRoles.value) return
+
+  serverSettingsSaveError.value = null
+  serverSettingsSaveMessage.value = 'Deleting role...'
+  chatStore.deleteServerRole(chatStore.server.id, roleId)
+}
+
+const handleMoveServerRole = (payload: { roleId: string; direction: 'up' | 'down' }) => {
+  if (!canManageRoles.value) return
+
+  const rolesByPosition = [...serverSettingsForm.value.roles]
+    .filter((role) => !role.isDefault && role.key !== 'admin' && role.key !== 'all_users')
+    .sort((left, right) => left.position - right.position || left.name.localeCompare(right.name))
+  const currentIndex = rolesByPosition.findIndex((role) => role.id === payload.roleId)
+  const targetIndex = payload.direction === 'up' ? currentIndex + 1 : currentIndex - 1
+  const movingRole = rolesByPosition[currentIndex]
+  const targetRole = rolesByPosition[targetIndex]
+
+  if (!movingRole || !targetRole) return
+
+  const movingServerRole = chatStore.serverRoles.find((role) => role.id === movingRole.id)
+  const targetServerRole = chatStore.serverRoles.find((role) => role.id === targetRole.id)
+  if (!chatStore.canManageServerRole(movingServerRole) || !chatStore.canManageServerRole(targetServerRole)) {
+    return
+  }
+
+  const movingPosition = movingRole.position
+  movingRole.position = targetRole.position
+  targetRole.position = movingPosition
+  serverSettingsForm.value.roles = [...serverSettingsForm.value.roles].sort((left, right) => left.position - right.position || left.name.localeCompare(right.name))
+}
+
 const saveServerSettings = async () => {
   if (!chatStore.server) {
     return
@@ -419,7 +507,26 @@ const saveServerSettings = async () => {
   serverSettingsSaveError.value = null
   serverSettingsSaveMessage.value = null
 
-  const nextStoragePayload = hasStorageSettingsChanges.value
+  const wantsGeneralSave = hasGeneralSettingsChanges.value || Boolean(serverIconDataUrl.value) || removeServerIcon.value
+  const wantsStorageSave = hasStorageSettingsChanges.value
+  const wantsRoleSave = hasRoleSettingsChanges.value
+
+  if (wantsGeneralSave && !canManageServerSettings.value) {
+    serverSettingsSaveError.value = 'You do not have permission to change general server settings.'
+    return
+  }
+
+  if (wantsStorageSave && !canManageStorageSettings.value) {
+    serverSettingsSaveError.value = 'You do not have permission to change storage settings.'
+    return
+  }
+
+  if (wantsRoleSave && !canManageRoles.value) {
+    serverSettingsSaveError.value = 'You do not have permission to manage roles.'
+    return
+  }
+
+  const nextStoragePayload = wantsStorageSave
       ? {
         storageType: serverSettingsForm.value.storage.storageType,
         s3: serverSettingsForm.value.storage.storageType === 's3'
@@ -448,32 +555,46 @@ const saveServerSettings = async () => {
   }
 
   try {
-    const updatedRoleCount = await chatStore.updateServerRoles(
-      serverSettingsForm.value.roles.map((role) => ({
-        id: role.id,
-        name: role.name,
-        color: role.color || null
-      }))
-    )
+    const roleReorderUpdates = canManageRoles.value ? getRoleReorderUpdates() : []
+    if (roleReorderUpdates.length > 0) {
+      chatStore.reorderServerRoles(chatStore.server.id, roleReorderUpdates)
+    }
 
-    chatStore.updateServerSettings(
-      chatStore.server.id,
-      serverSettingsForm.value.title,
-      serverSettingsForm.value.rulesChannelId || null,
-      serverSettingsForm.value.welcomeChannelId || null,
-      nextStoragePayload,
-      {
-        iconDataUrl: serverIconDataUrl.value,
-        removeIcon: removeServerIcon.value
-      }
-    )
+    const updatedRoleCount = canManageRoles.value
+      ? await chatStore.updateServerRoles(
+          serverSettingsForm.value.roles.map((role) => ({
+            id: role.id,
+            name: role.name,
+            color: role.color || null,
+            permissions: role.permissions
+          }))
+        )
+      : 0
+
+    if (wantsGeneralSave || wantsStorageSave) {
+      chatStore.updateServerSettings(
+        chatStore.server.id,
+        serverSettingsForm.value.title,
+        serverSettingsForm.value.rulesChannelId || null,
+        serverSettingsForm.value.welcomeChannelId || null,
+        nextStoragePayload,
+        {
+          iconDataUrl: serverIconDataUrl.value,
+          removeIcon: removeServerIcon.value
+        }
+      )
+    }
 
     serverSettingsForm.value.storage.accessKey = ''
     serverSettingsForm.value.storage.secretKey = ''
 
-    serverSettingsSaveMessage.value = updatedRoleCount > 0
-      ? 'Saving settings and roles...'
-      : 'Saving settings...'
+    if (updatedRoleCount > 0 || roleReorderUpdates.length > 0) {
+      serverSettingsSaveMessage.value = wantsGeneralSave || wantsStorageSave ? 'Saving settings and roles...' : 'Saving roles...'
+    } else if (wantsGeneralSave || wantsStorageSave) {
+      serverSettingsSaveMessage.value = 'Saving settings...'
+    } else {
+      serverSettingsSaveMessage.value = 'No changes to save.'
+    }
   } catch (error) {
     serverSettingsSaveError.value = error instanceof Error ? error.message : 'Failed to prepare role changes'
     serverSettingsSaveMessage.value = null
@@ -482,6 +603,8 @@ const saveServerSettings = async () => {
 }
 
 const handleServerIconSelected = (file: File) => {
+  if (!canManageServerSettings.value) return
+
   serverIconError.value = null
 
   if (!file.type.startsWith('image/')) {
@@ -508,6 +631,8 @@ const handleServerIconSelected = (file: File) => {
 }
 
 const handleRemoveServerIcon = () => {
+  if (!canManageServerSettings.value) return
+
   serverIconError.value = null
   serverIconDataUrl.value = null
   serverIconPreviewUrl.value = null
@@ -535,10 +660,10 @@ const handleChatStoreMessage = (message: any) => {
     return
   }
 
-  if (message.type === 'server_role_updated') {
+  if (message.type === 'server_role_created' || message.type === 'server_role_updated' || message.type === 'server_role_deleted' || message.type === 'server_roles_reordered') {
     serverSettingsSaveError.value = null
-    if (!serverSettingsSaveMessage.value) {
-      serverSettingsSaveMessage.value = 'Saving roles...'
+    if (!serverSettingsSaveMessage.value || serverSettingsSaveMessage.value === 'Creating role...' || serverSettingsSaveMessage.value === 'Deleting role...') {
+      serverSettingsSaveMessage.value = 'Roles saved.'
     }
     return
   }
@@ -577,6 +702,7 @@ const toggleServerSettingsGroup = (groupId: string) => {
 }
 
 const selectServerSettingsSection = (sectionId: string) => {
+  if (!isServerSettingsSectionAllowed(sectionId)) return
   activeServerSettingsSection.value = sectionId
 }
 
@@ -631,8 +757,10 @@ watch(autoConnectLastServer, (value) => {
 
 watch(showServerSettingsModal, (newVal) => {
   if (newVal && chatStore.server) {
-    activeServerSettingsSection.value = 'general-settings'
-    chatStore.requestServerStorageSettings()
+    activeServerSettingsSection.value = getDefaultServerSettingsSection()
+    if (canManageStorageSettings.value) {
+      chatStore.requestServerStorageSettings()
+    }
     chatStore.requestServerRoles()
     serverSettingsNavGroups.value = serverSettingsNavGroups.value.map((group) => ({
       ...group,
@@ -668,6 +796,8 @@ watch(
         id: role.id,
         name: role.name,
         color: role.color,
+        permissions: role.permissions,
+        position: role.position,
         updatedAt: role.updatedAt
       }))
     )
@@ -676,6 +806,8 @@ watch(
         id: role.id,
         name: role.name,
         color: role.color,
+        permissions: role.permissions,
+        position: role.position,
         updatedAt: role.updatedAt
       }))
     )
@@ -845,10 +977,13 @@ onUnmounted(() => {
       v-model:visible="showServerSettingsModal"
       v-model:form="serverSettingsForm"
       :active-section="activeServerSettingsSection"
-      :nav-groups="serverSettingsNavGroups"
+      :nav-groups="visibleServerSettingsNavGroups"
       :save-disabled="serverSettingsSaveDisabled"
       :save-label="serverSettingsSaveButtonLabel"
       :has-unsaved-changes="hasServerSettingsChanges"
+      :can-manage-general-settings="canManageServerSettings"
+      :can-manage-storage-settings="canManageStorageSettings"
+      :can-manage-roles="canManageRoles"
       :s3-test-state="s3ConnectionTestState"
       :s3-test-message="s3ConnectionTestMessage"
       :save-message="serverSettingsSaveMessage"
@@ -863,6 +998,9 @@ onUnmounted(() => {
       @test-storage="handleTestStorageConnection"
       @select-icon="handleServerIconSelected"
       @remove-icon="handleRemoveServerIcon"
+      @create-role="handleCreateServerRole"
+      @delete-role="handleDeleteServerRole"
+      @move-role="handleMoveServerRole"
       @save="saveServerSettings"
     />
 
@@ -909,10 +1047,12 @@ onUnmounted(() => {
 
       <ChannelListSidebar
         :is-admin="isAdmin"
-        @open-server-settings="showServerSettingsModal = true"
+        :can-open-server-settings="canOpenServerSettings"
+        :can-manage-channels="canManageChannels"
+        @open-server-settings="canOpenServerSettings ? showServerSettingsModal = true : undefined"
         @open-invite="showInviteModal = true"
         @remove-server="handleRemoveServer"
-        @open-admin="openSettings(isAdmin ? 'server' : 'general')"
+        @open-admin="openSettings(canOpenServerSettings ? 'server' : 'general')"
         @open-create-channel="openCreateChannelModal"
       />
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { useChatStore, type ServerStorageSettings } from '../../../stores/chat'
+import { useChatStore, type ServerPermission, type ServerStorageSettings } from '../../../stores/chat'
 
 type ServerSettingsNavItem = {
   id: string
@@ -19,11 +19,12 @@ const form = defineModel<{
   title: string
   rulesChannelId: string
   welcomeChannelId: string
-  roles: Array<{
+    roles: Array<{
     id: string
     key: string
     name: string
     color: string
+    permissions: ServerPermission[]
     isDefault: boolean
     isDeletable: boolean
     position: number
@@ -60,6 +61,9 @@ const props = defineProps<{
   iconPreviewUrl: string | null
   iconError: string | null
   canRemoveIcon: boolean
+  canManageGeneralSettings: boolean
+  canManageStorageSettings: boolean
+  canManageRoles: boolean
 }>()
 
 const emit = defineEmits<{
@@ -68,11 +72,84 @@ const emit = defineEmits<{
   (e: 'test-storage'): void
   (e: 'select-icon', file: File): void
   (e: 'remove-icon'): void
+  (e: 'create-role', payload: { name: string; color: string | null; permissions: ServerPermission[] }): void
+  (e: 'delete-role', roleId: string): void
+  (e: 'move-role', payload: { roleId: string; direction: 'up' | 'down' }): void
   (e: 'save'): void
 }>()
 
 const chatStore = useChatStore()
 const textChannels = computed(() => chatStore.activeServerChannels.filter((c) => c.type === 'text'))
+const newRoleName = ref('')
+const newRoleColor = ref('#9ca3af')
+const newRoleError = ref<string | null>(null)
+const roleList = computed(() => [...form.value.roles].sort((left, right) => right.position - left.position || left.name.localeCompare(right.name)))
+const permissionGroups = computed(() => Object.entries(chatStore.serverPermissionCategoryLabels).map(([category, label]) => ({
+  category,
+  label,
+  permissions: chatStore.serverPermissionMetadata.filter((permission) => permission.category === category)
+})))
+const rolePreviewStyle = (color: string) => ({
+  backgroundColor: color || '#9ca3af'
+})
+const getRoleById = (roleId: string) => form.value.roles.find((role) => role.id === roleId) || null
+const getServerRoleById = (roleId: string) => chatStore.serverRoles.find((role) => role.id === roleId) || null
+const isAdminRole = (role: { key: string }) => role.key === 'admin'
+const isAllUsersRole = (role: { key: string }) => role.key === 'all_users'
+const canEditRole = (role: { id: string; key: string }) => props.canManageRoles && chatStore.canManageServerRole(getServerRoleById(role.id))
+const canDeleteRole = (role: { id: string; key: string; isDeletable: boolean }) => role.isDeletable && canEditRole(role)
+const rolePermissionIsEnabled = (role: { key: string; permissions: ServerPermission[] }, permission: ServerPermission) => {
+  return isAdminRole(role) || role.permissions.includes(permission)
+}
+const canToggleRolePermission = (role: { id: string; key: string }, permission: ServerPermission) => {
+  return canEditRole(role) && chatStore.currentUserHasPermission(permission)
+}
+const toggleRolePermission = (roleId: string, permission: ServerPermission) => {
+  const role = getRoleById(roleId)
+  if (!role || !canToggleRolePermission(role, permission)) return
+
+  const permissions = new Set(role.permissions)
+  if (permissions.has(permission)) {
+    permissions.delete(permission)
+  } else {
+    permissions.add(permission)
+  }
+  role.permissions = chatStore.serverPermissionKeys.filter((entry) => permissions.has(entry))
+}
+const createRole = () => {
+  if (!props.canManageRoles) return
+
+  const name = newRoleName.value.trim()
+  if (!name) {
+    newRoleError.value = 'Role name is required.'
+    return
+  }
+
+  const color = /^#([0-9a-fA-F]{6})$/.test(newRoleColor.value.trim()) ? newRoleColor.value.trim().toLowerCase() : null
+  emit('create-role', { name, color, permissions: [] })
+  newRoleName.value = ''
+  newRoleColor.value = '#9ca3af'
+  newRoleError.value = null
+}
+const deleteRole = (roleId: string) => {
+  const role = getRoleById(roleId)
+  if (!role || !canDeleteRole(role)) return
+  if (!window.confirm(`Delete role "${role.name}"? Members will lose this role.`)) return
+  emit('delete-role', roleId)
+}
+const canMoveRole = (role: { id: string; key: string; isDefault: boolean }, direction: 'up' | 'down') => {
+  if (!canEditRole(role) || role.isDefault) return false
+  const customRoles = roleList.value.filter((entry) => !entry.isDefault && !isAdminRole(entry) && !isAllUsersRole(entry))
+  const currentIndex = customRoles.findIndex((entry) => entry.id === role.id)
+  const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
+  const targetRole = customRoles[targetIndex]
+  return Boolean(targetRole && chatStore.canManageServerRole(getServerRoleById(targetRole.id)))
+}
+const moveRole = (roleId: string, direction: 'up' | 'down') => {
+  const role = getRoleById(roleId)
+  if (!role || !canMoveRole(role, direction)) return
+  emit('move-role', { roleId, direction })
+}
 const storageStatusLabel = computed(() => {
   if (form.value.storage.status === 's3') {
     return props.storageSettings.s3.provider === 'cloudflare_r2' ? 'Cloudflare R2 enabled' : 'Generic S3 enabled'
@@ -84,9 +161,6 @@ const isS3Selected = computed(() => form.value.storage.storageType === 's3')
 const isCloudflareR2Selected = computed(() => isS3Selected.value && form.value.storage.provider === 'cloudflare_r2')
 const migration = computed(() => props.storageSettings.migration)
 const migrationVisible = computed(() => migration.value.status === 'running' || migration.value.status === 'failed')
-const rolePreviewStyle = (color: string) => ({
-  backgroundColor: color || '#9ca3af'
-})
 const migrationProgressPercent = computed(() => {
   if (migration.value.total <= 0) {
     return 0
@@ -294,27 +368,52 @@ const onIconInputChange = (event: Event) => {
             </div>
           </div>
 
-          <div v-else-if="activeSection === 'role-settings'" class="space-y-6 max-w-3xl">
+          <div v-else-if="activeSection === 'role-settings'" class="space-y-6 max-w-5xl">
             <div class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm">
-              <p class="text-sm font-semibold text-white">Server roles</p>
-              <p class="mt-1 text-xs text-zinc-500">Default roles <span class="font-semibold text-zinc-300">all users</span> and <span class="font-semibold text-zinc-300">admin</span> always exist and cannot be deleted. Update display names and colors to control member list presentation live.</p>
+              <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <p class="text-sm font-semibold text-white">Server roles</p>
+                  <p class="mt-1 text-xs text-zinc-500">Larger role positions are higher. <span class="font-semibold text-zinc-300">all users</span> is lowest and never manually assigned; <span class="font-semibold text-zinc-300">admin</span> is protected and always has every permission. You can only edit lower roles.</p>
+                </div>
+                <div v-if="canManageRoles" class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] lg:min-w-[28rem]">
+                  <input
+                    v-model="newRoleName"
+                    type="text"
+                    maxlength="64"
+                    class="bg-zinc-950 text-white p-2 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 text-sm font-medium"
+                    placeholder="New role name"
+                    @keyup.enter="createRole"
+                  />
+                  <input v-model="newRoleColor" type="color" class="h-10 w-14 bg-zinc-950 rounded-lg border border-white/10 cursor-pointer" />
+                  <button type="button" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded-lg text-sm font-medium transition-colors" @click="createRole">Create role</button>
+                  <p v-if="newRoleError" class="sm:col-span-3 text-xs text-rose-300">{{ newRoleError }}</p>
+                </div>
+              </div>
             </div>
 
             <div class="space-y-4">
               <div
-                v-for="role in form.roles"
+                v-for="role in roleList"
                 :key="role.id"
-                class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm space-y-4"
+                class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm space-y-5"
+                :class="!canEditRole(role) ? 'opacity-80' : ''"
               >
-                <div class="flex items-center justify-between gap-4">
+                <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                   <div class="flex items-center gap-3 min-w-0">
                     <span class="w-3 h-3 rounded-full border border-white/10 shrink-0" :style="rolePreviewStyle(role.color)" />
                     <div class="min-w-0">
                       <p class="text-sm font-semibold truncate" :style="{ color: role.color || '#e4e4e7' }">{{ role.name || role.key }}</p>
-                      <p class="text-xs text-zinc-500">{{ role.isDefault ? 'Default role' : 'Custom role' }}</p>
+                      <p class="text-xs text-zinc-500">{{ isAdminRole(role) ? 'Protected administrator role' : isAllUsersRole(role) ? 'Base role for everyone' : `Position ${role.position}` }}</p>
                     </div>
                   </div>
-                  <span v-if="!role.isDeletable" class="rounded-full border border-white/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-300">Protected</span>
+
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span v-if="!role.isDeletable" class="rounded-full border border-white/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-300">Protected</span>
+                    <span v-if="!canEditRole(role) && !isAdminRole(role) && !isAllUsersRole(role)" class="rounded-full border border-amber-400/20 bg-amber-400/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-amber-200">Above your role</span>
+                    <button type="button" class="rounded-lg border border-white/10 px-2.5 py-1 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed" :disabled="!canMoveRole(role, 'up')" @click="moveRole(role.id, 'up')">Move up</button>
+                    <button type="button" class="rounded-lg border border-white/10 px-2.5 py-1 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed" :disabled="!canMoveRole(role, 'down')" @click="moveRole(role.id, 'down')">Move down</button>
+                    <button v-if="role.isDeletable" type="button" class="rounded-lg border border-rose-400/20 px-2.5 py-1 text-xs font-semibold text-rose-300 hover:bg-rose-400/10 disabled:opacity-40 disabled:cursor-not-allowed" :disabled="!canDeleteRole(role)" @click="deleteRole(role.id)">Delete</button>
+                  </div>
                 </div>
 
                 <div class="grid gap-4 md:grid-cols-[1fr_auto]">
@@ -324,8 +423,9 @@ const onIconInputChange = (event: Event) => {
                       v-model="role.name"
                       type="text"
                       maxlength="64"
-                      class="w-full bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all font-medium"
+                      class="w-full bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all font-medium disabled:opacity-60 disabled:cursor-not-allowed"
                       :placeholder="role.key"
+                      :disabled="!canEditRole(role)"
                     />
                   </div>
 
@@ -335,15 +435,50 @@ const onIconInputChange = (event: Event) => {
                       <input
                         v-model="role.color"
                         type="color"
-                        class="h-11 w-14 bg-zinc-950 rounded-lg border border-white/10 cursor-pointer"
+                        class="h-11 w-14 bg-zinc-950 rounded-lg border border-white/10 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                        :disabled="!canEditRole(role)"
                       />
                       <input
                         v-model="role.color"
                         type="text"
                         maxlength="7"
-                        class="w-28 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all font-mono text-sm uppercase"
+                        class="w-28 bg-zinc-950 text-white p-2.5 rounded-lg border border-white/10 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all font-mono text-sm uppercase disabled:opacity-60 disabled:cursor-not-allowed"
                         placeholder="#9CA3AF"
+                        :disabled="!canEditRole(role)"
                       />
+                    </div>
+                  </div>
+                </div>
+
+                <div class="space-y-4">
+                  <div class="flex items-center justify-between gap-3">
+                    <div>
+                      <p class="text-xs font-bold text-zinc-400 uppercase tracking-wider">Permissions</p>
+                      <p class="mt-1 text-xs text-zinc-500">{{ isAdminRole(role) ? 'Administrator is locked to all rights.' : 'You can only grant permissions you already have.' }}</p>
+                    </div>
+                    <span v-if="isAdminRole(role)" class="rounded-full bg-indigo-500/15 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-indigo-200">All rights</span>
+                  </div>
+
+                  <div class="grid gap-4 xl:grid-cols-3">
+                    <div v-for="group in permissionGroups" :key="group.category" class="rounded-xl border border-white/5 bg-zinc-950/50 p-4 space-y-3">
+                      <p class="text-xs font-bold uppercase tracking-wider text-zinc-300">{{ group.label }}</p>
+                      <button
+                        v-for="permission in group.permissions"
+                        :key="permission.key"
+                        type="button"
+                        class="w-full rounded-lg border p-3 text-left transition-colors disabled:cursor-not-allowed"
+                        :class="rolePermissionIsEnabled(role, permission.key) ? 'border-indigo-400/30 bg-indigo-500/10' : 'border-white/5 bg-zinc-950/60 hover:bg-zinc-900/80'"
+                        :disabled="!canToggleRolePermission(role, permission.key)"
+                        @click="toggleRolePermission(role.id, permission.key)"
+                      >
+                        <div class="flex items-start gap-3">
+                          <span class="mt-0.5 flex h-5 w-5 items-center justify-center rounded border text-[11px] font-bold" :class="rolePermissionIsEnabled(role, permission.key) ? 'border-indigo-300 bg-indigo-500 text-white' : 'border-white/10 text-zinc-600'">{{ rolePermissionIsEnabled(role, permission.key) ? '✓' : '' }}</span>
+                          <span class="min-w-0">
+                            <span class="block text-sm font-semibold text-zinc-100">{{ permission.label }}</span>
+                            <span class="mt-1 block text-xs leading-5 text-zinc-500">{{ permission.description }}</span>
+                          </span>
+                        </div>
+                      </button>
                     </div>
                   </div>
                 </div>

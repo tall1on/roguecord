@@ -72,9 +72,7 @@ const activeFolderFiles = computed<FolderChannelFile[]>(() => {
   return chatStore.folderFiles[channelId] || []
 })
 
-const canManageFolderFiles = computed(() => {
-  return chatStore.userHasRole(chatStore.currentUser, ['admin', 'owner'])
-})
+const canManageFolderFiles = computed(() => chatStore.currentUserHasPermission('manage_folder_files'))
 
 const canUploadToFolder = computed(() => canManageFolderFiles.value)
 
@@ -292,7 +290,7 @@ const openScreenContextMenu = (event: MouseEvent, userId: string) => {
 
 const canDeleteMessage = (message: Message) => {
   const currentUserId = chatStore.currentUser?.id
-  return message.user_id === currentUserId || chatStore.userHasRole(chatStore.currentUser, ['admin', 'owner'])
+  return message.user_id === currentUserId || chatStore.currentUserHasPermission('manage_messages')
 }
 
 const canReplyToMessage = (message: Message) => {
@@ -622,15 +620,12 @@ onMounted(() => {
   window.addEventListener('keydown', onGlobalKeyDown)
 })
 
-const privilegedRoles = new Set(['admin', 'owner', 'mod', 'moderator', 'bot', 'system'])
-
 const isReadOnlyRssChannel = computed(() => {
   if (!activeTextChannel.value || activeTextChannel.value.type !== 'rss') {
     return false
   }
 
-  const roleKeys = chatStore.getUserRoleKeys(chatStore.currentUser)
-  return !roleKeys.some((role) => privilegedRoles.has(role))
+  return !chatStore.currentUserHasPermission('send_rss_messages')
 })
 
 const messagePlaceholder = computed(() => {
@@ -1223,8 +1218,8 @@ const getMessageDayKey = (dateString: string) => {
 }
 
 const getMessageRoleColor = (message: Message) => {
-  const roleKey = message.user?.role || 'all_users'
-  return chatStore.getServerRoleColor(roleKey)
+  const role = chatStore.getPrimaryServerRole(message.user)
+  return role?.color || chatStore.getServerRoleColor(message.user?.role || 'all_users')
 }
 
 type RenderEntry =
@@ -1731,7 +1726,7 @@ watch(
           </div>
         </div>
         <p v-if="isReadOnlyRssChannel" class="mt-2 text-xs text-gray-400">
-          RSS feed channels are read-only for normal users.
+          RSS feed channels are read-only without the send RSS messages permission.
         </p>
       </div>
     </template>
