@@ -1,4 +1,13 @@
 # RogueCord
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/tall1on/roguecord)](https://github.com/tall1on/roguecord/releases)
+[![Build Server](https://img.shields.io/github/actions/workflow/status/tall1on/roguecord/server-build.yml?branch=main&label=build%20server)](https://github.com/tall1on/roguecord/actions/workflows/server-build.yml)
+[![Build Tauri Client](https://img.shields.io/github/actions/workflow/status/tall1on/roguecord/tauri-client-build.yml?branch=main&label=build%20client)](https://github.com/tall1on/roguecord/actions/workflows/tauri-client-build.yml)
+[![License](https://img.shields.io/github/license/tall1on/roguecord)](LICENSE)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D18-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![Vue.js](https://img.shields.io/badge/Vue.js-3-4FC08D?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-6.0-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![GitHub issues](https://img.shields.io/github/issues/tall1on/roguecord)](https://github.com/tall1on/roguecord/issues)
+[![GitHub last commit](https://img.shields.io/github/last-commit/tall1on/roguecord)](https://github.com/tall1on/roguecord/commits/main)
 
 RogueCord is a self-hosted, real-time communication platform where communities can run their own standalone server instances. This repository contains both the web client and the Node.js backend.
 
@@ -34,7 +43,7 @@ npm ci
 
 | Linux / Mac | Windows (PowerShell) |
 |-------------|----------------------|
-| <pre><code class="language-bash">cp .env.example .env<br>nano .env</code></pre> | <pre><code class="language-powershell">copy .env.example .env<br>notepad .env</code></pre> |
+| <pre><code class="language-bash">cp .env.example .env && nano .env</code></pre> | <pre><code class="language-powershell">copy .env.example .env && notepad .env</code></pre> |
 5. Run server
 ```bash
 npm run start
