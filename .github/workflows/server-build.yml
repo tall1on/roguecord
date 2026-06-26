@@ -45,3 +45,4 @@ jobs:
           name: server-linux
           path: server-linux.tar.gz
           if-no-files-found: error
+          compression-level: 0
