@@ -1,0 +1,47 @@
+name: Build Server
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - server/**
+      - .github/workflows/server-build.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build server archive
+    runs-on:
+      - self-hosted
+      - linux
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create server tarball
+        # Source-only archive. Dependencies are installed on the target server
+        # with npm install, so node_modules is excluded from the tarball.
+        run: |
+          tar -czf server-linux.tar.gz \
+            --exclude='server/node_modules' \
+            --exclude='server/.env' \
+            --exclude='server/data/*.db' \
+            --exclude='server/tsc_output.txt' \
+            --exclude='server/dist' \
+            server
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-linux
+          path: server-linux.tar.gz
+          if-no-files-found: error
