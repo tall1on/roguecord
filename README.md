@@ -4,11 +4,45 @@ RogueCord is a self-hosted, real-time communication platform where communities c
 
 The current implementation focuses on real-time text and voice communication using WebSocket signaling, Mediasoup-based media transport, and SQLite-backed persistence.
 
-## Quick Links
+![RogueCord Preview](assets/preview.png)
+
+## Quick Start
+
+### Testing
 
 - Test site available at: https://rc.exatek.de/
 - Test server WebSocket endpoint: wss://rc1.exatek.de:1337
-- Latest client builds available: https://github.com/tall1on/roguecord/actions
+- Latest client and server builds available: https://github.com/tall1on/roguecord/releases
+
+
+### Client
+
+1. Download latest client build from releases: https://github.com/tall1on/roguecord/releases
+2. Install for your operating system and run
+
+### Server
+
+Runs best on latest Linux v6 kernel based servers
+
+1. Download latest server build from releases: https://github.com/tall1on/roguecord/releases
+2. Unpack and open terminal inside the server folder
+3. Install dependencies
+```bash
+npm ci
+```
+4. Setup environment variables
+
+| Linux / Mac | Windows (PowerShell) |
+|-------------|----------------------|
+| <pre><code class="language-bash">cp .env.example .env<br>nano .env</code></pre> | <pre><code class="language-powershell">copy .env.example .env<br>notepad .env</code></pre> |
+5. Run server
+```bash
+npm run start
+```
+6. Make sure to save your single-use admin key from console output to set up your server later
+7. Connect to your server using the client (default: YOUR_SERVER_IP:1337)
+
+All your data will be stored in the `SERVER_FOLDER/data` folder by default. Make sure to back up this folder regularly.
 
 ## Current Feature Status
 
