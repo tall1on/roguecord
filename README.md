@@ -42,6 +42,8 @@ npm run start
 6. Make sure to save your single-use admin key from console output to set up your server later
 7. Connect to your server using the client (default: YOUR_SERVER_IP:1337)
 
+All your data will be stored in the `SERVER_FOLDER/data` folder by default. Make sure to back up this folder regularly.
+
 ## Current Feature Status
 
 ### Implemented
