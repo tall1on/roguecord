@@ -18,7 +18,7 @@
     "mediasoup-client": "3.21.0",
     "pinia": "3.0.4",
     "twemoji": "14.0.2",
-    "vue": "3.5.35",
+    "vue": "3.5.39",
     "vue-router": "5.1.0",
     "vue3-twemoji-picker-final": "^0.0.15"
   },
