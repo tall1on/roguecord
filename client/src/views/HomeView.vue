@@ -10,6 +10,7 @@ import { openExternalUrl } from '../utils/openExternalUrl'
 
 const MessageAttachmentVideoPlayer = defineAsyncComponent(() => import('../components/chat/MessageAttachmentVideoPlayer.vue'))
 const MessageReactionChip = defineAsyncComponent(() => import('../components/chat/MessageReactionChip.vue'))
+const CallDurationLabel = defineAsyncComponent(() => import('../components/voice/CallDurationLabel.vue'))
 
 type TwemojiPickerSelection = {
   i?: string
@@ -1881,6 +1882,11 @@ watch(
         <h2 class="font-bold text-white flex items-center">
           <span v-twemoji="'🔊'" class="text-zinc-500 text-xl mr-2 inline-flex items-center"></span>
           {{ activeVoiceChannel.name }}
+          <CallDurationLabel
+            v-if="webrtcStore.getCallStartedAt(activeVoiceChannel.id)"
+            :channel-id="activeVoiceChannel.id"
+            class="ml-3"
+          />
         </h2>
       </header>
 

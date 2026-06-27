@@ -67,6 +67,7 @@ import {
   registerPersistedS3ConfigResolver
 } from '../models';
 import { getOrCreateRoom, getPeer, createWebRtcTransport, rooms } from '../mediasoup';
+import { logVoiceCallEnded } from '../voice/callTimer';
 import crypto from 'node:crypto';
 import { consumeAdminKey, setAdminKeyEnabled } from '../admin';
 import fs from 'node:fs';
@@ -2203,7 +2204,11 @@ const handleGetChannels = async (client: ClientConnection) => {
   }));
 
   const voiceParticipants: Record<string, any[]> = {};
+  const callStartTimes: Record<string, number> = {};
   for (const [channelId, room] of rooms.entries()) {
+    if (room.callStartedAt != null) {
+      callStartTimes[channelId] = room.callStartedAt;
+    }
     const users = [];
     for (const [userId, peer] of room.peers.entries()) {
       const user = await getUserById(userId);
@@ -2232,7 +2237,7 @@ const handleGetChannels = async (client: ClientConnection) => {
 
   client.ws.send(JSON.stringify({
     type: 'voice_participants_list',
-    payload: { participants: voiceParticipants }
+    payload: { participants: voiceParticipants, callStartTimes }
   }));
 };
 
@@ -2553,6 +2558,7 @@ const handleDeleteChannel = async (client: ClientConnection, payload: { channel_
             transport.close();
           }
         }
+        logVoiceCallEnded(channel_id, room);
         rooms.delete(channel_id);
       }
     }
@@ -3483,14 +3489,29 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
   const user = await getUserById(client.userId);
   if (!user) return;
 
+  // Call-start detection (idempotent): callStartedAt is null ONLY when this is the first member of an empty channel.
+  // Re-joins by an existing member, or additional members joining an active call, leave it untouched (timer persists).
+  let callJustStarted = false;
+  if (room.callStartedAt == null) {
+    room.callStartedAt = Date.now();
+    callJustStarted = true;
+  }
+
   // Notify all authenticated users
   connectionManager.broadcastToAuthenticated({
     type: 'user_joined_voice',
-    payload: { 
-      channel_id, 
-      user: { id: user.id, username: user.username, avatar_url: (await getResolvedUser(user.id))?.avatar_url || user.avatar_url, isMuted: peer.isMuted, isDeafened: peer.isDeafened } 
+    payload: {
+      channel_id,
+      user: { id: user.id, username: user.username, avatar_url: (await getResolvedUser(user.id))?.avatar_url || user.avatar_url, isMuted: peer.isMuted, isDeafened: peer.isDeafened }
     }
   });
+
+  if (callJustStarted) {
+    connectionManager.broadcastToAuthenticated({
+      type: 'voice_call_started',
+      payload: { channel_id, started_at: room.callStartedAt }
+    });
+  }
 
   const users = [];
   for (const [userId, p] of room.peers.entries()) {
@@ -3505,7 +3526,8 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
     payload: {
       channel_id,
       rtpCapabilities: room.router.rtpCapabilities,
-      users
+      users,
+      started_at: room.callStartedAt
     }
   }));
 };
@@ -3737,7 +3759,12 @@ const handleLeaveVoiceChannel = async (client: ClientConnection, payload: { chan
   });
 
   if (room.peers.size === 0) {
+    logVoiceCallEnded(channel_id, room);
     rooms.delete(channel_id);
+    connectionManager.broadcastToAuthenticated({
+      type: 'voice_call_ended',
+      payload: { channel_id }
+    });
   }
 };
 
