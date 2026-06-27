@@ -22,12 +22,24 @@ type ScreenStreamVolumePreference = {
   lastNonZeroVolume: number;
 };
 
+type VoiceParticipantVolumePreference = {
+  volume: number;
+  muted: boolean;
+  lastNonZeroVolume: number;
+};
+
 const DEFAULT_SCREEN_STREAM_PREFERENCE: ScreenStreamPreference = {
   fps: 30,
   resolution: 'source'
 };
 
 const DEFAULT_SCREEN_STREAM_VOLUME_PREFERENCE: ScreenStreamVolumePreference = {
+  volume: 1,
+  muted: false,
+  lastNonZeroVolume: 1
+};
+
+const DEFAULT_VOICE_PARTICIPANT_VOLUME_PREFERENCE: VoiceParticipantVolumePreference = {
   volume: 1,
   muted: false,
   lastNonZeroVolume: 1
@@ -78,6 +90,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const lastActiveVoiceChannelId = ref<string | null>(null);
   const voiceParticipants = ref<any[]>([]);
   const channelParticipants = ref<Map<string, any[]>>(new Map());
+  const callStartedAt = ref<Map<string, number>>(new Map());
+  const getCallStartedAt = (channelId: string): number | null => callStartedAt.value.get(channelId) ?? null;
   const localStream = shallowRef<MediaStream | null>(null);
   const remoteStreams = shallowRef<Map<string, MediaStream>>(new Map());
   const audioElements = new Map<string, HTMLAudioElement>();
@@ -91,7 +105,11 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const screenStreamPreferenceState = ref<Map<string, ScreenStreamPreference>>(new Map());
   const screenStreamVolumeState = ref<Map<string, number>>(new Map());
   const screenStreamLastNonZeroVolumeState = ref<Map<string, number>>(new Map());
+  const voiceParticipantMuteState = ref<Map<string, boolean>>(new Map());
+  const voiceParticipantVolumeState = ref<Map<string, number>>(new Map());
+  const voiceParticipantLastNonZeroVolumeState = ref<Map<string, number>>(new Map());
   const screenAudioConsumersByUser = new Map<string, Set<string>>();
+  const voiceAudioConsumersByUser = new Map<string, Set<string>>();
 
   const closeConsumer = (consumerId: string, reason: string) => {
     const producerId = consumerToProducer.get(consumerId);
@@ -124,6 +142,16 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         consumerIds.delete(consumerId);
         if (consumerIds.size === 0) {
           screenAudioConsumersByUser.delete(userId);
+        }
+      }
+    }
+
+    if (source === 'mic' && userId) {
+      const consumerIds = voiceAudioConsumersByUser.get(userId);
+      if (consumerIds) {
+        consumerIds.delete(consumerId);
+        if (consumerIds.size === 0) {
+          voiceAudioConsumersByUser.delete(userId);
         }
       }
     }
@@ -185,7 +213,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
   const applyScreenStreamAudioState = (userId: string) => {
     const volume = getScreenStreamVolume(userId);
-    const muted = isScreenStreamMuted(userId) || volume <= 0;
+    const muted = isDeafened.value || isScreenStreamMuted(userId) || volume <= 0;
+    const effectiveVolume = (outputVolume.value / 100) * volume;
 
     const consumerIds = screenAudioConsumersByUser.get(userId);
     if (!consumerIds) {
@@ -195,9 +224,112 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     for (const consumerId of consumerIds) {
       const audio = audioElements.get(consumerId);
       if (!audio) continue;
-      audio.volume = volume;
+      audio.volume = effectiveVolume;
       audio.muted = muted;
     }
+  };
+
+  const isVoiceParticipantMuted = (userId: string) => {
+    return voiceParticipantMuteState.value.get(userId) === true;
+  };
+
+  const getVoiceParticipantVolume = (userId: string) => {
+    return voiceParticipantVolumeState.value.get(userId) ?? DEFAULT_VOICE_PARTICIPANT_VOLUME_PREFERENCE.volume;
+  };
+
+  const getVoiceParticipantLastNonZeroVolume = (userId: string) => {
+    return voiceParticipantLastNonZeroVolumeState.value.get(userId) ?? DEFAULT_VOICE_PARTICIPANT_VOLUME_PREFERENCE.lastNonZeroVolume;
+  };
+
+  const clampVoiceParticipantVolume = (volume: number) => {
+    if (!Number.isFinite(volume)) return DEFAULT_VOICE_PARTICIPANT_VOLUME_PREFERENCE.volume;
+    return Math.min(2, Math.max(0, volume));
+  };
+
+  const applyVoiceParticipantAudioState = (userId: string) => {
+    const volume = getVoiceParticipantVolume(userId);
+    const muted = isDeafened.value || isVoiceParticipantMuted(userId) || volume <= 0;
+    const effectiveVolume = (outputVolume.value / 100) * volume;
+
+    const consumerIds = voiceAudioConsumersByUser.get(userId);
+    if (!consumerIds) {
+      return;
+    }
+
+    for (const consumerId of consumerIds) {
+      const audio = audioElements.get(consumerId);
+      if (!audio) continue;
+      audio.volume = effectiveVolume;
+      audio.muted = muted;
+    }
+  };
+
+  const applyAllRemoteAudioState = () => {
+    for (const userId of screenAudioConsumersByUser.keys()) {
+      applyScreenStreamAudioState(userId);
+    }
+
+    for (const userId of voiceAudioConsumersByUser.keys()) {
+      applyVoiceParticipantAudioState(userId);
+    }
+
+    for (const [consumerId, audio] of audioElements.entries()) {
+      const producerId = consumerToProducer.get(consumerId);
+      const userId = producerId ? producerToUser.get(producerId) : null;
+      const source = producerId ? producerToSource.get(producerId) : null;
+      if ((source === 'screen' || source === 'mic') && userId) continue;
+      audio.volume = outputVolume.value / 100;
+      audio.muted = isDeafened.value;
+    }
+  };
+
+  const setVoiceParticipantVolume = (userId: string, volume: number) => {
+    const clampedVolume = clampVoiceParticipantVolume(volume);
+
+    if (clampedVolume === DEFAULT_VOICE_PARTICIPANT_VOLUME_PREFERENCE.volume) {
+      voiceParticipantVolumeState.value.delete(userId);
+    } else {
+      voiceParticipantVolumeState.value.set(userId, clampedVolume);
+    }
+    voiceParticipantVolumeState.value = new Map(voiceParticipantVolumeState.value);
+
+    if (clampedVolume > 0) {
+      voiceParticipantLastNonZeroVolumeState.value.set(userId, clampedVolume);
+      voiceParticipantLastNonZeroVolumeState.value = new Map(voiceParticipantLastNonZeroVolumeState.value);
+      if (isVoiceParticipantMuted(userId)) {
+        voiceParticipantMuteState.value.delete(userId);
+        voiceParticipantMuteState.value = new Map(voiceParticipantMuteState.value);
+      }
+    } else if (!isVoiceParticipantMuted(userId)) {
+      voiceParticipantMuteState.value.set(userId, true);
+      voiceParticipantMuteState.value = new Map(voiceParticipantMuteState.value);
+    }
+
+    applyVoiceParticipantAudioState(userId);
+  };
+
+  const setVoiceParticipantMuted = (userId: string, isMuted: boolean) => {
+    if (isMuted) {
+      voiceParticipantMuteState.value.set(userId, true);
+      const currentVolume = getVoiceParticipantVolume(userId);
+      if (currentVolume > 0) {
+        voiceParticipantLastNonZeroVolumeState.value.set(userId, currentVolume);
+        voiceParticipantLastNonZeroVolumeState.value = new Map(voiceParticipantLastNonZeroVolumeState.value);
+      }
+    } else {
+      voiceParticipantMuteState.value.delete(userId);
+      if (getVoiceParticipantVolume(userId) <= 0) {
+        const restoredVolume = getVoiceParticipantLastNonZeroVolume(userId);
+        if (restoredVolume === DEFAULT_VOICE_PARTICIPANT_VOLUME_PREFERENCE.volume) {
+          voiceParticipantVolumeState.value.delete(userId);
+        } else {
+          voiceParticipantVolumeState.value.set(userId, restoredVolume);
+        }
+        voiceParticipantVolumeState.value = new Map(voiceParticipantVolumeState.value);
+      }
+    }
+    voiceParticipantMuteState.value = new Map(voiceParticipantMuteState.value);
+    applyVoiceParticipantAudioState(userId);
   };
 
   const setScreenStreamVolume = (userId: string, volume: number) => {
@@ -940,9 +1072,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
   const setOutputVolume = (value: number) => {
     outputVolume.value = Math.max(0, Math.min(100, value));
-    audioElements.forEach(audio => {
-      audio.volume = outputVolume.value / 100;
-    });
+    applyAllRemoteAudioState();
   };
 
   const setNoiseGateEnabled = (enabled: boolean) => {
@@ -1187,11 +1317,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       // If deafened, clicking mute will undeafen but keep muted
       isDeafened.value = false;
       isMuted.value = true;
-      
-      // Unmute all incoming audio
-      audioElements.forEach(audio => {
-        audio.muted = false;
-      });
+      applyAllRemoteAudioState();
       
       // Mic stays disabled because isMuted is true
       if (localStream.value) {
@@ -1241,11 +1367,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       if (producer.value) {
         producer.value.pause();
       }
-      
-      // Mute all incoming audio
-      audioElements.forEach(audio => {
-        audio.muted = true;
-      });
+      applyAllRemoteAudioState();
     } else {
       // Restore mic state
       if (localStream.value) {
@@ -1260,11 +1382,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           producer.value.resume();
         }
       }
-      
-      // Unmute all incoming audio
-      audioElements.forEach(audio => {
-        audio.muted = false;
-      });
+      applyAllRemoteAudioState();
     }
 
     if (activeVoiceChannelId.value) {
@@ -1338,6 +1456,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       audio.srcObject = null;
     });
     audioElements.clear();
+    screenAudioConsumersByUser.clear();
+    voiceAudioConsumersByUser.clear();
     
     producerToUser.clear();
     producerToSource.clear();
@@ -1391,9 +1511,19 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           newMap.set(channelId, normalizeParticipants(users as any[]));
         }
         channelParticipants.value = newMap;
+
+        const times = new Map<string, number>();
+        for (const [channelId, startedAt] of Object.entries(payload.callStartTimes || {})) {
+          times.set(channelId, startedAt as number);
+        }
+        callStartedAt.value = times;
         break;
 
       case 'voice_channel_joined':
+        if (payload.started_at != null) {
+          callStartedAt.value.set(payload.channel_id, payload.started_at);
+          callStartedAt.value = new Map(callStartedAt.value);
+        }
         if (payload.channel_id !== activeVoiceChannelId.value) return;
         await initDevice(payload.rtpCapabilities);
         voiceParticipants.value = normalizeParticipants(payload.users);
@@ -1405,6 +1535,17 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         chatStore.send('create_webrtc_transport', { channel_id: payload.channel_id, direction: 'recv' });
         
         startStatsCollection();
+        break;
+
+      case 'voice_call_started':
+        callStartedAt.value.set(payload.channel_id, payload.started_at);
+        callStartedAt.value = new Map(callStartedAt.value);
+        break;
+
+      case 'voice_call_ended':
+        if (callStartedAt.value.delete(payload.channel_id)) {
+          callStartedAt.value = new Map(callStartedAt.value);
+        }
         break;
         
       case 'user_joined_voice':
@@ -1428,6 +1569,9 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           const newParticipants = participants.filter(u => u.id !== payload.user_id);
           if (newParticipants.length === 0) {
             channelParticipants.value.delete(payload.channel_id);
+            if (callStartedAt.value.delete(payload.channel_id)) {
+              callStartedAt.value = new Map(callStartedAt.value);
+            }
           } else {
             channelParticipants.value.set(payload.channel_id, newParticipants);
           }
@@ -1478,6 +1622,10 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       case 'channel_deleted':
         channelParticipants.value.delete(payload.channel_id);
         channelParticipants.value = new Map(channelParticipants.value);
+
+        if (callStartedAt.value.delete(payload.channel_id)) {
+          callStartedAt.value = new Map(callStartedAt.value);
+        }
 
         if (payload.channel_id === activeVoiceChannelId.value) {
           leaveVoiceChannel();
@@ -1742,21 +1890,26 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
             audio.srcObject = stream;
             audio.autoplay = true;
             audio.volume = outputVolume.value / 100;
-          if (isDeafened.value) {
-            audio.muted = true;
-          }
-          await applyOutputSettingsToAudioElement(audio as AudioElementWithSinkId);
+            audio.muted = isDeafened.value;
+            await applyOutputSettingsToAudioElement(audio as AudioElementWithSinkId);
             if (remoteSource === 'screen' && remoteUserId) {
               if (!screenAudioConsumersByUser.has(remoteUserId)) {
                 screenAudioConsumersByUser.set(remoteUserId, new Set());
               }
               screenAudioConsumersByUser.get(remoteUserId)!.add(consumer.id);
+            } else if (remoteSource === 'mic' && remoteUserId) {
+              if (!voiceAudioConsumersByUser.has(remoteUserId)) {
+                voiceAudioConsumersByUser.set(remoteUserId, new Set());
+              }
+              voiceAudioConsumersByUser.get(remoteUserId)!.add(consumer.id);
             }
             audio.play().catch(e => console.error('Audio play failed:', e));
             audioElements.set(consumer.id, audio);
 
             if (remoteSource === 'screen' && remoteUserId) {
               applyScreenStreamAudioState(remoteUserId);
+            } else if (remoteSource === 'mic' && remoteUserId) {
+              applyVoiceParticipantAudioState(remoteUserId);
             }
           }
           
@@ -1826,6 +1979,7 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
         leaveVoiceChannel();
       }
       channelParticipants.value = new Map();
+      callStartedAt.value = new Map();
     }
   });
 
@@ -1844,6 +1998,8 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
     activeVoiceChannelId,
     voiceParticipants,
     channelParticipants,
+    callStartedAt,
+    getCallStartedAt,
     speakingUserIds,
     localStream,
     remoteStreams,
@@ -1860,6 +2016,8 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
     screenStreamMuteState,
     screenStreamPreferenceState,
     screenStreamVolumeState,
+    voiceParticipantMuteState,
+    voiceParticipantVolumeState,
     availableInputDevices,
     availableOutputDevices,
     selectedInputDeviceId,
@@ -1884,6 +2042,10 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
     getScreenStreamPreference,
     getScreenStreamFps,
     getScreenStreamResolution,
+    isVoiceParticipantMuted,
+    getVoiceParticipantVolume,
+    setVoiceParticipantVolume,
+    setVoiceParticipantMuted,
     setScreenStreamFps,
     setScreenStreamResolution,
     toggleMute,

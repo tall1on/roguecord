@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp, Folder, ChevronDown, ChevronRight, Moon, MinusCircle, Circle, EyeOff } from 'lucide-vue-next'
 import AppAvatar from '../common/AppAvatar.vue'
 import { useChatStore, type Channel, type PresenceStatus, type User } from '../../stores/chat'
@@ -24,6 +24,8 @@ const emit = defineEmits<{
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
 
+const CallDurationLabel = defineAsyncComponent(() => import('../voice/CallDurationLabel.vue'))
+
 const showVoiceStats = ref(false)
 const voiceStatsContainerRef = ref<HTMLElement | null>(null)
 
@@ -44,6 +46,11 @@ const userStatusMenuVisible = ref(false)
 const userStatusMenuX = ref(0)
 const userStatusMenuY = ref(0)
 const userStatusMenuRef = ref<HTMLElement | null>(null)
+const voiceMemberMenuVisible = ref(false)
+const voiceMemberMenuX = ref(0)
+const voiceMemberMenuY = ref(0)
+const voiceMemberMenuRef = ref<HTMLElement | null>(null)
+const voiceMemberMenuUser = ref<User | null>(null)
 
 const USER_STATUS_MENU_MARGIN = 8
 
@@ -63,6 +70,21 @@ const updateUserStatusMenuPosition = () => {
 
   userStatusMenuX.value = clamp(userStatusMenuX.value, USER_STATUS_MENU_MARGIN, maxX)
   userStatusMenuY.value = clamp(userStatusMenuY.value, USER_STATUS_MENU_MARGIN, maxY)
+}
+
+const updateVoiceMemberMenuPosition = () => {
+  if (!voiceMemberMenuVisible.value || !voiceMemberMenuRef.value || typeof window === 'undefined') {
+    return
+  }
+
+  const menuRect = voiceMemberMenuRef.value.getBoundingClientRect()
+  const viewportWidth = window.innerWidth
+  const viewportHeight = window.innerHeight
+  const maxX = Math.max(USER_STATUS_MENU_MARGIN, viewportWidth - menuRect.width - USER_STATUS_MENU_MARGIN)
+  const maxY = Math.max(USER_STATUS_MENU_MARGIN, viewportHeight - menuRect.height - USER_STATUS_MENU_MARGIN)
+
+  voiceMemberMenuX.value = clamp(voiceMemberMenuX.value, USER_STATUS_MENU_MARGIN, maxX)
+  voiceMemberMenuY.value = clamp(voiceMemberMenuY.value, USER_STATUS_MENU_MARGIN, maxY)
 }
 
 const COLLAPSED_CATEGORY_STORAGE_KEY = 'roguecord:collapsed-categories'
@@ -478,6 +500,63 @@ const getVoiceParticipantUser = (participant: User) => {
   return chatStore.users.find((user) => user.id === participant.id) || participant
 }
 
+const isVoiceParticipantInActiveChannel = (userId: string) => {
+  const activeVoiceChannelId = webrtcStore.activeVoiceChannelId
+  if (!activeVoiceChannelId) return false
+  return webrtcStore.channelParticipants.get(activeVoiceChannelId)?.some((participant) => participant.id === userId) === true
+}
+
+const canOpenVoiceMemberMenu = (participant: User) => {
+  return participant.id !== chatStore.currentUser?.id && isVoiceParticipantInActiveChannel(participant.id)
+}
+
+const closeVoiceMemberMenu = () => {
+  voiceMemberMenuVisible.value = false
+  voiceMemberMenuUser.value = null
+}
+
+const openVoiceMemberMenu = (event: MouseEvent, participant: User, channel: Channel) => {
+  if (channel.id !== webrtcStore.activeVoiceChannelId || !canOpenVoiceMemberMenu(participant)) {
+    closeVoiceMemberMenu()
+    return
+  }
+
+  event.preventDefault()
+  event.stopPropagation()
+  contextMenuVisible.value = false
+  userStatusMenuVisible.value = false
+  voiceMemberMenuUser.value = getVoiceParticipantUser(participant)
+  voiceMemberMenuX.value = event.clientX
+  voiceMemberMenuY.value = event.clientY
+  voiceMemberMenuVisible.value = true
+
+  nextTick(updateVoiceMemberMenuPosition)
+}
+
+const selectedVoiceMemberVolumePercent = computed(() => {
+  const userId = voiceMemberMenuUser.value?.id
+  if (!userId) return 100
+  return Math.round(webrtcStore.getVoiceParticipantVolume(userId) * 100)
+})
+
+const selectedVoiceMemberMuted = computed(() => {
+  const userId = voiceMemberMenuUser.value?.id
+  return userId ? webrtcStore.isVoiceParticipantMuted(userId) : false
+})
+
+const setSelectedVoiceMemberVolume = (event: Event) => {
+  const userId = voiceMemberMenuUser.value?.id
+  if (!userId) return
+  const target = event.target as HTMLInputElement
+  webrtcStore.setVoiceParticipantVolume(userId, Number(target.value) / 100)
+}
+
+const toggleSelectedVoiceMemberMuted = () => {
+  const userId = voiceMemberMenuUser.value?.id
+  if (!userId) return
+  webrtcStore.setVoiceParticipantMuted(userId, !webrtcStore.isVoiceParticipantMuted(userId))
+}
+
 const openUserStatusMenu = (event: MouseEvent) => {
   if (!hasCurrentUser.value) {
     return
@@ -548,22 +627,32 @@ const handleClickOutside = (event: MouseEvent) => {
       closeUserStatusMenu()
     }
   }
+
+  if (voiceMemberMenuVisible.value) {
+    const target = event.target as HTMLElement | null
+    if (!target?.closest('.voice-member-context-menu')) {
+      closeVoiceMemberMenu()
+    }
+  }
 }
 
 watch(() => webrtcStore.activeVoiceChannelId, (newVal) => {
   if (!newVal) {
     showVoiceStats.value = false
   }
+  closeVoiceMemberMenu()
 })
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
   window.addEventListener('resize', updateUserStatusMenuPosition)
+  window.addEventListener('resize', updateVoiceMemberMenuPosition)
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
   window.removeEventListener('resize', updateUserStatusMenuPosition)
+  window.removeEventListener('resize', updateVoiceMemberMenuPosition)
 })
 
 const isChannelActive = (channel: Channel) => {
@@ -808,10 +897,20 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
               <Folder v-else-if="channel.type === 'folder'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) ? 'text-white' : 'text-zinc-400 group-hover:text-zinc-300'" />
               <Volume2 v-else class="w-5 h-5 mr-1.5 text-zinc-400 group-hover:text-zinc-300" />
               <span class="truncate font-medium">{{ channel.name }}</span>
+              <CallDurationLabel
+                v-if="channel.type === 'voice' && webrtcStore.getCallStartedAt(channel.id)"
+                :channel-id="channel.id"
+                class="ml-auto pl-2 shrink-0 text-[11px]"
+              />
             </div>
 
               <div v-if="shouldShowVoiceParticipants(channel)" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
-              <div v-for="participant in webrtcStore.channelParticipants.get(channel.id)" :key="participant.id" class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50">
+              <div
+                v-for="participant in webrtcStore.channelParticipants.get(channel.id)"
+                :key="participant.id"
+                class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50"
+                @contextmenu.stop="openVoiceMemberMenu($event, participant, channel)"
+              >
                 <AppAvatar
                   :src="getVoiceParticipantUser(participant).avatar_url"
                   :fallback="getVoiceParticipantUser(participant).username"
@@ -869,10 +968,20 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
               <Folder v-else-if="channel.type === 'folder'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) ? 'text-white' : 'text-zinc-400 group-hover:text-zinc-300'" />
               <Volume2 v-else class="w-5 h-5 mr-1.5 text-zinc-400 group-hover:text-zinc-300" />
               <span class="truncate font-medium">{{ channel.name }}</span>
+              <CallDurationLabel
+                v-if="channel.type === 'voice' && webrtcStore.getCallStartedAt(channel.id)"
+                :channel-id="channel.id"
+                class="ml-auto pl-2 shrink-0 text-[11px]"
+              />
             </div>
 
             <div v-if="channel.type === 'voice' && webrtcStore.channelParticipants.get(channel.id)?.length" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
-              <div v-for="participant in webrtcStore.channelParticipants.get(channel.id)" :key="participant.id" class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50">
+              <div
+                v-for="participant in webrtcStore.channelParticipants.get(channel.id)"
+                :key="participant.id"
+                class="flex items-center text-zinc-300 text-[13px] hover:text-white cursor-pointer transition-colors px-1 py-0.5 rounded-md hover:bg-zinc-900/50"
+                @contextmenu.stop="openVoiceMemberMenu($event, participant, channel)"
+              >
                 <AppAvatar
                   :src="getVoiceParticipantUser(participant).avatar_url"
                   :fallback="getVoiceParticipantUser(participant).username"
@@ -928,6 +1037,43 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           Create category
         </button>
       </div>
+
+      <div
+        v-if="voiceMemberMenuVisible && voiceMemberMenuUser"
+        ref="voiceMemberMenuRef"
+        class="voice-member-context-menu fixed z-50 w-64 rounded-xl border border-white/10 bg-zinc-950 shadow-2xl py-3 backdrop-blur-md"
+        :style="{ left: `${voiceMemberMenuX}px`, top: `${voiceMemberMenuY}px` }"
+        @click.stop
+        @contextmenu.prevent.stop
+      >
+        <div class="px-3 pb-2 border-b border-white/5">
+          <div class="text-xs font-bold text-white truncate">{{ voiceMemberMenuUser.username }}</div>
+          <div class="text-[11px] font-medium text-zinc-500">Local voice settings</div>
+        </div>
+        <div class="px-3 py-3 border-b border-white/5">
+          <div class="flex items-center justify-between mb-2">
+            <label class="text-[11px] font-bold uppercase tracking-wider text-zinc-500">User Volume</label>
+            <span class="text-[11px] font-semibold text-zinc-300">{{ selectedVoiceMemberVolumePercent }}%</span>
+          </div>
+          <input
+            class="w-full accent-indigo-500"
+            type="range"
+            min="0"
+            max="200"
+            step="1"
+            :value="selectedVoiceMemberVolumePercent"
+            @input="setSelectedVoiceMemberVolume"
+          />
+        </div>
+        <button
+          class="w-full px-3 py-2 text-left text-sm font-medium transition-colors hover:bg-zinc-900/80 flex items-center justify-between"
+          :class="selectedVoiceMemberMuted ? 'text-red-300' : 'text-zinc-300 hover:text-white'"
+          @click="toggleSelectedVoiceMemberMuted"
+        >
+          <span>{{ selectedVoiceMemberMuted ? 'Unmute locally' : 'Mute locally' }}</span>
+          <span class="text-[11px] uppercase tracking-wider text-zinc-500">{{ selectedVoiceMemberMuted ? 'On' : 'Off' }}</span>
+        </button>
+      </div>
     </template>
     <template v-else>
       <div class="flex-1 flex items-center justify-center text-zinc-600 text-sm p-4 text-center font-medium">Select a connection to view channels</div>
@@ -941,7 +1087,14 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           </div>
           <div class="flex-1 min-w-0">
             <div class="text-xs font-bold uppercase tracking-wider truncate" :class="{ 'text-green-400': webrtcStore.connectionQuality === 'good', 'text-yellow-400': webrtcStore.connectionQuality === 'warning', 'text-red-400': webrtcStore.connectionQuality === 'bad' }">Voice Connected</div>
-            <div class="text-[11px] text-zinc-400 font-medium truncate mt-[1px]">{{ chatStore.activeServerChannels.find(c => c.id === webrtcStore.activeVoiceChannelId)?.name || 'Voice Channel' }}</div>
+            <div class="text-[11px] text-zinc-400 font-medium truncate mt-[1px] flex items-center gap-1.5">
+              <span class="truncate">{{ chatStore.activeServerChannels.find(c => c.id === webrtcStore.activeVoiceChannelId)?.name || 'Voice Channel' }}</span>
+              <CallDurationLabel
+                v-if="webrtcStore.activeVoiceChannelId && webrtcStore.getCallStartedAt(webrtcStore.activeVoiceChannelId)"
+                :channel-id="webrtcStore.activeVoiceChannelId!"
+                class="shrink-0 text-[11px]"
+              />
+            </div>
           </div>
         </div>
         <button class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-zinc-800 transition-colors" :class="webrtcStore.screenProducer ? 'text-green-400 hover:text-green-300' : 'text-zinc-400 hover:text-zinc-300'" :title="webrtcStore.screenProducer ? 'Stop sharing screen' : 'Share screen'" @click.stop="webrtcStore.screenProducer ? webrtcStore.stopScreenShare() : webrtcStore.startScreenShare()">

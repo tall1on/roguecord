@@ -134,6 +134,7 @@ export interface Room {
   id: string;
   router: Router;
   peers: Map<string, Peer>;
+  callStartedAt?: number; // epoch ms when the active call began (first member joined); undefined when no active call
 }
 
 export const rooms = new Map<string, Room>();
