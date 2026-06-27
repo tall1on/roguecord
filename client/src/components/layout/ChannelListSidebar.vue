@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp, Folder, ChevronDown, ChevronRight, Moon, MinusCircle, Circle, EyeOff } from 'lucide-vue-next'
 import AppAvatar from '../common/AppAvatar.vue'
 import { useChatStore, type Channel, type PresenceStatus, type User } from '../../stores/chat'
@@ -23,6 +23,8 @@ const emit = defineEmits<{
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
+
+const CallDurationLabel = defineAsyncComponent(() => import('../voice/CallDurationLabel.vue'))
 
 const showVoiceStats = ref(false)
 const voiceStatsContainerRef = ref<HTMLElement | null>(null)
@@ -808,6 +810,11 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
               <Folder v-else-if="channel.type === 'folder'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) ? 'text-white' : 'text-zinc-400 group-hover:text-zinc-300'" />
               <Volume2 v-else class="w-5 h-5 mr-1.5 text-zinc-400 group-hover:text-zinc-300" />
               <span class="truncate font-medium">{{ channel.name }}</span>
+              <CallDurationLabel
+                v-if="channel.type === 'voice' && webrtcStore.getCallStartedAt(channel.id)"
+                :channel-id="channel.id"
+                class="ml-auto pl-2 shrink-0 text-[11px]"
+              />
             </div>
 
               <div v-if="shouldShowVoiceParticipants(channel)" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
@@ -869,6 +876,11 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
               <Folder v-else-if="channel.type === 'folder'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) ? 'text-white' : 'text-zinc-400 group-hover:text-zinc-300'" />
               <Volume2 v-else class="w-5 h-5 mr-1.5 text-zinc-400 group-hover:text-zinc-300" />
               <span class="truncate font-medium">{{ channel.name }}</span>
+              <CallDurationLabel
+                v-if="channel.type === 'voice' && webrtcStore.getCallStartedAt(channel.id)"
+                :channel-id="channel.id"
+                class="ml-auto pl-2 shrink-0 text-[11px]"
+              />
             </div>
 
             <div v-if="channel.type === 'voice' && webrtcStore.channelParticipants.get(channel.id)?.length" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
@@ -941,7 +953,14 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           </div>
           <div class="flex-1 min-w-0">
             <div class="text-xs font-bold uppercase tracking-wider truncate" :class="{ 'text-green-400': webrtcStore.connectionQuality === 'good', 'text-yellow-400': webrtcStore.connectionQuality === 'warning', 'text-red-400': webrtcStore.connectionQuality === 'bad' }">Voice Connected</div>
-            <div class="text-[11px] text-zinc-400 font-medium truncate mt-[1px]">{{ chatStore.activeServerChannels.find(c => c.id === webrtcStore.activeVoiceChannelId)?.name || 'Voice Channel' }}</div>
+            <div class="text-[11px] text-zinc-400 font-medium truncate mt-[1px] flex items-center gap-1.5">
+              <span class="truncate">{{ chatStore.activeServerChannels.find(c => c.id === webrtcStore.activeVoiceChannelId)?.name || 'Voice Channel' }}</span>
+              <CallDurationLabel
+                v-if="webrtcStore.activeVoiceChannelId && webrtcStore.getCallStartedAt(webrtcStore.activeVoiceChannelId)"
+                :channel-id="webrtcStore.activeVoiceChannelId!"
+                class="shrink-0 text-[11px]"
+              />
+            </div>
           </div>
         </div>
         <button class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-zinc-800 transition-colors" :class="webrtcStore.screenProducer ? 'text-green-400 hover:text-green-300' : 'text-zinc-400 hover:text-zinc-300'" :title="webrtcStore.screenProducer ? 'Stop sharing screen' : 'Share screen'" @click.stop="webrtcStore.screenProducer ? webrtcStore.stopScreenShare() : webrtcStore.startScreenShare()">

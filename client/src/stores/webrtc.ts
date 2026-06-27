@@ -78,6 +78,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const lastActiveVoiceChannelId = ref<string | null>(null);
   const voiceParticipants = ref<any[]>([]);
   const channelParticipants = ref<Map<string, any[]>>(new Map());
+  const callStartedAt = ref<Map<string, number>>(new Map());
+  const getCallStartedAt = (channelId: string): number | null => callStartedAt.value.get(channelId) ?? null;
   const localStream = shallowRef<MediaStream | null>(null);
   const remoteStreams = shallowRef<Map<string, MediaStream>>(new Map());
   const audioElements = new Map<string, HTMLAudioElement>();
@@ -1391,9 +1393,19 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           newMap.set(channelId, normalizeParticipants(users as any[]));
         }
         channelParticipants.value = newMap;
+
+        const times = new Map<string, number>();
+        for (const [channelId, startedAt] of Object.entries(payload.callStartTimes || {})) {
+          times.set(channelId, startedAt as number);
+        }
+        callStartedAt.value = times;
         break;
 
       case 'voice_channel_joined':
+        if (payload.started_at != null) {
+          callStartedAt.value.set(payload.channel_id, payload.started_at);
+          callStartedAt.value = new Map(callStartedAt.value);
+        }
         if (payload.channel_id !== activeVoiceChannelId.value) return;
         await initDevice(payload.rtpCapabilities);
         voiceParticipants.value = normalizeParticipants(payload.users);
@@ -1405,6 +1417,17 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         chatStore.send('create_webrtc_transport', { channel_id: payload.channel_id, direction: 'recv' });
         
         startStatsCollection();
+        break;
+
+      case 'voice_call_started':
+        callStartedAt.value.set(payload.channel_id, payload.started_at);
+        callStartedAt.value = new Map(callStartedAt.value);
+        break;
+
+      case 'voice_call_ended':
+        if (callStartedAt.value.delete(payload.channel_id)) {
+          callStartedAt.value = new Map(callStartedAt.value);
+        }
         break;
         
       case 'user_joined_voice':
@@ -1428,6 +1451,9 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           const newParticipants = participants.filter(u => u.id !== payload.user_id);
           if (newParticipants.length === 0) {
             channelParticipants.value.delete(payload.channel_id);
+            if (callStartedAt.value.delete(payload.channel_id)) {
+              callStartedAt.value = new Map(callStartedAt.value);
+            }
           } else {
             channelParticipants.value.set(payload.channel_id, newParticipants);
           }
@@ -1478,6 +1504,10 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       case 'channel_deleted':
         channelParticipants.value.delete(payload.channel_id);
         channelParticipants.value = new Map(channelParticipants.value);
+
+        if (callStartedAt.value.delete(payload.channel_id)) {
+          callStartedAt.value = new Map(callStartedAt.value);
+        }
 
         if (payload.channel_id === activeVoiceChannelId.value) {
           leaveVoiceChannel();
@@ -1826,6 +1856,7 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
         leaveVoiceChannel();
       }
       channelParticipants.value = new Map();
+      callStartedAt.value = new Map();
     }
   });
 
@@ -1844,6 +1875,8 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
     activeVoiceChannelId,
     voiceParticipants,
     channelParticipants,
+    callStartedAt,
+    getCallStartedAt,
     speakingUserIds,
     localStream,
     remoteStreams,
