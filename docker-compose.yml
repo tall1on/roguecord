@@ -1,0 +1,67 @@
+# Example Docker Compose file for the RogueCord server (server only).
+#
+# Usage:
+#   1. Copy this file to docker-compose.override.yml or edit in place.
+#   2. Set MEDIASOUP_ANNOUNCED_IP to your server's public IP or domain name.
+#   3. (Optional) Set PORT and adjust the host port mapping.
+#   4. `docker compose up -d --build`
+#
+# The SQLite database and uploaded files are persisted on the host filesystem
+# at /srv/roguecord/data (mounted at /app/server/data inside the container).
+# Change the host path below to store data elsewhere.
+#
+# NOTE: The WebRTC port range (10000-10100) is published for both UDP and TCP.
+# Make sure your firewall allows these ports, and that the range matches the
+# `portRange` configured in server/src/mediasoup.ts.
+
+services:
+  roguecord-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # To use a prebuilt image instead of building locally, comment out `build`
+    # above and uncomment the image line:
+    # image: ghcr.io/<owner>/roguecord-server:latest
+    container_name: roguecord-server
+    restart: unless-stopped
+
+    environment:
+      # HTTP/WebSocket listener
+      LISTEN_IP: "0.0.0.0"
+      PORT: "1337"
+
+      # mediasoup WebRTC
+      MEDIASOUP_LISTEN_IP: "0.0.0.0"
+      # IMPORTANT: set this to your server's public IP or domain name so clients
+      # can reach the WebRTC media traffic.
+      MEDIASOUP_ANNOUNCED_IP: "127.0.0.1"
+
+      # Optional media bitrate tuning (see server/.env.example for defaults)
+      # MEDIA_VIDEO_START_BITRATE_KBPS: "6000"
+      # MEDIA_VIDEO_MAX_BITRATE_VP8_KBPS: "25000"
+      # MEDIA_WEBRTC_MAX_INCOMING_BITRATE_BPS: "50000000"
+
+      # Optional S3 defaults (documentation/UI only; per-server creds live in DB)
+      # S3_DEFAULT_ENDPOINT: "https://nbg1.your-objectstorage.com"
+      # S3_DEFAULT_REGION: "nbg1"
+      # S3_DEFAULT_BUCKET: "roguecord-files"
+      # S3_DEFAULT_PREFIX: ""
+
+    ports:
+      # HTTP / WebSocket
+      - "1337:1337"
+      # WebRTC media (UDP) - mediasoup port range 10000-10100
+      - "10000-10100:10000-10100/udp"
+      # WebRTC media (TCP) - only needed if UDP is blocked
+      - "10000-10100:10000-10100"
+
+    volumes:
+      # Persist the SQLite DB and uploaded files on the host filesystem.
+      # The container runs as the non-root `node` user (uid 1000); make sure
+      # /srv/roguecord/data is writable by that uid, e.g.:
+      #   sudo mkdir -p /srv/roguecord/data && sudo chown 1000:1000 /srv/roguecord/data
+      - /srv/roguecord/data:/app/server/data
+
+    # mediasoup needs elevated network privileges for ICE; using host networking
+    # is an alternative if you have trouble with the published port range:
+    #   network_mode: "host"
