@@ -19,15 +19,23 @@ ARG NODE_VERSION=22
 # ----------------------------------------------------------------------------
 FROM node:${NODE_VERSION}-bookworm-slim AS builder
 
-# mediasoup compiles a C++ worker -> needs a toolchain.
+# mediasoup compiles a C++ worker -> needs a toolchain. Its postinstall also
+# runs `python3 -m pip install ... invoke` and builds via meson/ninja, so we
+# need pip and the meson/ninja build tools. PIP_BREAK_SYSTEM_PACKAGES lets pip
+# install into the mediasoup worker dir on PEP-668 (externally-managed) systems.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 \
+        python3-pip \
         make \
         g++ \
         pkg-config \
+        meson \
+        ninja-build \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 WORKDIR /app
 
