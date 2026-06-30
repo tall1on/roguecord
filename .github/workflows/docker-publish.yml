@@ -1,24 +1,13 @@
 name: Publish Server Docker Image
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - server/**
-      - client/public/svg/**
-      - Dockerfile
-      - .dockerignore
-      - .github/workflows/docker-publish.yml
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
-
-concurrency:
-  group: docker-publish-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build-and-push:
@@ -46,9 +35,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/roguecord-server
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=short
-            type=raw,value={{date 'YYYYMMDD'}}
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+            type=sha,format=short,enable=${{ github.event_name != 'release' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6

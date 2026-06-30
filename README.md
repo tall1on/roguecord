@@ -285,9 +285,10 @@ The HTTP/WS port (`1337`) and the WebRTC media range (`10000–10100`, UDP + TCP
 
 ### Prebuilt image (CI)
 
-The [`docker-publish`](.github/workflows/docker-publish.yml:1) workflow builds and pushes the image to the GitHub Container Registry on pushes to `main`:
+The [`docker-publish`](.github/workflows/docker-publish.yml:1) workflow builds and pushes the image to the GitHub Container Registry **only when a new release/tag is published** (or via manual dispatch). Each release produces:
 
 ```
+ghcr.io/<owner>/roguecord-server:<tag>   # e.g. v1.2.3
 ghcr.io/<owner>/roguecord-server:latest
 ```
 
@@ -390,3 +391,4 @@ RogueCord uses a passwordless, public-key identity model: your private key never
 ## License
 
 This project is licensed under the **GNU AGPL v3**. See [`LICENSE`](LICENSE) for the full text.
+
