@@ -285,14 +285,23 @@ The HTTP/WS port (`1337`) and the WebRTC media range (`10000–10100`, UDP + TCP
 
 ### Prebuilt image (CI)
 
-The [`docker-publish`](.github/workflows/docker-publish.yml:1) workflow builds and pushes the image to the GitHub Container Registry **only when a new release/tag is published** (or via manual dispatch). Each release produces:
+The [`docker-publish`](.github/workflows/docker-publish.yml:1) workflow builds and pushes the image to **Docker Hub** **only when a new release/tag is published** (or via manual dispatch). Each release produces:
 
 ```
-ghcr.io/<owner>/roguecord-server:<tag>   # e.g. v1.2.3
-ghcr.io/<owner>/roguecord-server:latest
+<dockerhub-username>/roguecord-server:<tag>   # e.g. v1.2.3
+<dockerhub-username>/roguecord-server:latest
 ```
 
-To use the prebuilt image in Compose, comment out the `build:` block and uncomment the `image:` line in [`docker-compose.yml`](docker-compose.yml:1).
+#### One-time setup (Docker Hub credentials)
+
+The workflow authenticates to Docker Hub with two **repository secrets** (no PAT needed in the workflow itself beyond these):
+
+1. Create an access token at **hub.docker.com → Account Settings → Security → New Access Token** (scope: *Read & Write*).
+2. In the GitHub repo, go to **Settings → Secrets and variables → Actions → New repository secret** and add:
+   - `DOCKERHUB_USERNAME` — your Docker Hub account name (owner of the `roguecord-server` repo).
+   - `DOCKERHUB_TOKEN` — the access token from step 1.
+
+To use the prebuilt image in Compose, comment out the `build:` block and uncomment the `image:` line in [`docker-compose.yml`](docker-compose.yml:1) (replace `<dockerhub-username>`).
 
 ## Data Storage and Migrations
 
@@ -391,4 +400,15 @@ RogueCord uses a passwordless, public-key identity model: your private key never
 ## License
 
 This project is licensed under the **GNU AGPL v3**. See [`LICENSE`](LICENSE) for the full text.
+
+Contributions are welcome! Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request. The repository also includes [`AGENTS.md`](AGENTS.md), which documents the core project conventions — Vue 3 `<script setup>`, Vite, TypeScript, Node.js, SQLite, client-side code-splitting via dynamic `import()`, and the requirement to ship forward-safe migrations whenever the database schema changes.
+
+## Security
+
+RogueCord uses a passwordless, public-key identity model: your private key never leaves your device, and the server only ever stores public keys. If you discover a security vulnerability, please report it responsibly via the [issue tracker](https://github.com/tall1on/roguecord/issues), and avoid sharing exploit details publicly until a fix is available.
+
+## License
+
+This project is licensed under the **GNU AGPL v3**. See [`LICENSE`](LICENSE) for the full text.
+
 
