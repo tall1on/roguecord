@@ -1,4 +1,11 @@
-# RogueCord
+<div align="center">
+   <a href="https://axios.rest"><img src="client/public/roguecord.svg" alt="RogueCord" height="122px" style="height: 122px;"/></a><br>
+</div>
+
+<p align="center">RogueCord is a self-hosted, real-time communication platform where communities can run their own standalone server instances. This repository contains both the web client and the Node.js backend</p>
+
+<div align="center">
+
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/tall1on/roguecord)](https://github.com/tall1on/roguecord/releases)
 [![Build Server](https://img.shields.io/github/actions/workflow/status/tall1on/roguecord/server-build.yml?branch=main&label=build%20server)](https://github.com/tall1on/roguecord/actions/workflows/server-build.yml)
 [![Build Tauri Client](https://img.shields.io/github/actions/workflow/status/tall1on/roguecord/tauri-client-build.yml?branch=main&label=build%20client)](https://github.com/tall1on/roguecord/actions/workflows/tauri-client-build.yml)
@@ -9,7 +16,7 @@
 [![GitHub issues](https://img.shields.io/github/issues/tall1on/roguecord)](https://github.com/tall1on/roguecord/issues)
 [![GitHub last commit](https://img.shields.io/github/last-commit/tall1on/roguecord)](https://github.com/tall1on/roguecord/commits/main)
 
-RogueCord is a self-hosted, real-time communication platform where communities can run their own standalone server instances. This repository contains both the web client and the Node.js backend.
+</div>
 
 The current implementation focuses on real-time text and voice communication using WebSocket signaling, Mediasoup-based media transport, and SQLite-backed persistence.
 
