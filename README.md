@@ -256,6 +256,53 @@ All variables are optional and have safe code defaults. The defaults below are t
 - Set `MEDIASOUP_ANNOUNCED_IP` to the **public IP/hostname** clients use to reach the server; behind NAT this must be your public address, not `127.0.0.1`, or remote WebRTC media will fail to connect.
 - The server speaks plain **HTTP/WS**. For production, terminate TLS with a reverse proxy (e.g. Caddy, nginx, or Traefik) in front of it so clients can connect over `https://` / `wss://` — this is how the hosted test endpoint is served.
 
+## Docker (server only)
+
+The repo ships a multi-stage [`Dockerfile`](Dockerfile:1) that builds a server-only image (Node.js + the mediasoup native worker + the emoji SVG assets the server serves) and an example [`docker-compose.yml`](docker-compose.yml:1).
+
+### Build & run locally
+
+```bash
+docker build -t roguecord-server .
+sudo mkdir -p /srv/roguecord/data && sudo chown 1000:1000 /srv/roguecord/data
+docker run --rm -p 1337:1337 -p 10000-10100:10000-10100/udp \
+  -e MEDIASOUP_ANNOUNCED_IP=<your-public-ip> \
+  -v /srv/roguecord/data:/app/server/data roguecord-server
+```
+
+### With Docker Compose
+
+1. Edit [`docker-compose.yml`](docker-compose.yml:1) and set `MEDIASOUP_ANNOUNCED_IP` to your server's public IP or domain name.
+2. `docker compose up -d --build`
+
+The SQLite database and uploaded files are persisted on the host at `/srv/roguecord/data` (mounted at `/app/server/data`). The container runs as the non-root `node` user (uid 1000), so create the directory and hand it over before the first start:
+
+```bash
+sudo mkdir -p /srv/roguecord/data && sudo chown 1000:1000 /srv/roguecord/data
+```
+
+The HTTP/WS port (`1337`) and the WebRTC media range (`10000–10100`, UDP + TCP) are published; open the WebRTC range in your firewall.
+
+### Prebuilt image (CI)
+
+The [`docker-publish`](.github/workflows/docker-publish.yml:1) workflow builds and pushes the image to **Docker Hub** **only when a new release/tag is published** (or via manual dispatch). Each release produces:
+
+```
+<dockerhub-username>/roguecord-server:<tag>   # e.g. v1.2.3
+<dockerhub-username>/roguecord-server:latest
+```
+
+#### One-time setup (Docker Hub credentials)
+
+The workflow authenticates to Docker Hub with two **repository secrets** (no PAT needed in the workflow itself beyond these):
+
+1. Create an access token at **hub.docker.com → Account Settings → Security → New Access Token** (scope: *Read & Write*).
+2. In the GitHub repo, go to **Settings → Secrets and variables → Actions → New repository secret** and add:
+   - `DOCKERHUB_USERNAME` — your Docker Hub account name (owner of the `roguecord-server` repo).
+   - `DOCKERHUB_TOKEN` — the access token from step 1.
+
+To use the prebuilt image in Compose, comment out the `build:` block and uncomment the `image:` line in [`docker-compose.yml`](docker-compose.yml:1) (replace `<dockerhub-username>`).
+
 ## Data Storage and Migrations
 
 - All server state is persisted in SQLite at `server/data/roguecord.db` (the `data/` directory is created automatically on first run).
@@ -353,3 +400,15 @@ RogueCord uses a passwordless, public-key identity model: your private key never
 ## License
 
 This project is licensed under the **GNU AGPL v3**. See [`LICENSE`](LICENSE) for the full text.
+
+Contributions are welcome! Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request. The repository also includes [`AGENTS.md`](AGENTS.md), which documents the core project conventions — Vue 3 `<script setup>`, Vite, TypeScript, Node.js, SQLite, client-side code-splitting via dynamic `import()`, and the requirement to ship forward-safe migrations whenever the database schema changes.
+
+## Security
+
+RogueCord uses a passwordless, public-key identity model: your private key never leaves your device, and the server only ever stores public keys. If you discover a security vulnerability, please report it responsibly via the [issue tracker](https://github.com/tall1on/roguecord/issues), and avoid sharing exploit details publicly until a fix is available.
+
+## License
+
+This project is licensed under the **GNU AGPL v3**. See [`LICENSE`](LICENSE) for the full text.
+
+

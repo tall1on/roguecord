@@ -1,0 +1,40 @@
+# Version control / metadata
+.git
+.gitignore
+.github
+.idea
+.kilocode
+
+# Documentation
+*.md
+LICENSE
+SECURITY.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+
+# Client app (only the emoji SVGs are needed by the server)
+client/node_modules
+client/dist
+client/tauri
+client/.env
+client/FORCE_BUILD
+client/README.md
+client/tsconfig*.json
+client/vite.config.ts
+client/tailwind.config.js
+client/index.html
+client/src
+
+# Server build artifacts / runtime data
+server/node_modules
+server/dist
+server/data
+server/.env
+server/tsc_output.txt
+
+# Misc
+assets
+*.tar.gz
+Dockerfile
+.dockerignore
+docker-compose*.yml
