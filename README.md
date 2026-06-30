@@ -1,5 +1,5 @@
 <div align="center">
-   <a href="https://axios.rest"><img src="client/public/roguecord.svg" alt="RogueCord" height="122px" style="height: 122px;"/></a><br>
+   <a href="https://github.com/tall1on/roguecord"><img src="client/public/roguecord.svg" alt="RogueCord" height="122px" style="height: 122px;"/></a><br>
 </div>
 
 <p align="center">RogueCord is a self-hosted, real-time communication platform where communities can run their own standalone server instances</p>
