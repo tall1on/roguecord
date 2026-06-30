@@ -38,7 +38,7 @@ This repository contains both the web client and the Node.js backend. The curren
 
 ### Server
 
-Runs best on latest Linux v6 kernel based servers
+<img src="assets/runs_best_on_linux.png" alt="RogueCord" style="width: 200px;"/>
 
 1. Download latest server build from releases: https://github.com/tall1on/roguecord/releases
 2. Unpack and open terminal inside the server folder
