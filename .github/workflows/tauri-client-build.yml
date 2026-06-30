@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - client/**
+      - server/**
 
 permissions:
   contents: read
@@ -24,23 +25,33 @@ jobs:
               - windows
             artifact_name: tauri-client-windows
             bundle_glob: client/tauri/target/release/**/*.exe
+            build_args: ""
           - name: linux
             runner:
               - self-hosted
               - linux
             artifact_name: tauri-client-linux
             bundle_glob: client/tauri/target/release/bundle/**/*
+            build_args: ""
+          - name: cachyos
+            runner:
+              - self-hosted
+              - linux
+            artifact_name: tauri-client-cachyos
+            bundle_glob: client/tauri/target/pacman/*.pkg.tar.zst
+            build_args: "--no-bundle"
           - name: macos
             runner: macos-latest
             artifact_name: tauri-client-macos
             bundle_glob: client/tauri/target/release/bundle/**/*
+            build_args: ""
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
+      - name: Install Linux system dependencies (Debian/Ubuntu)
+        if: matrix.platform.name == 'linux' || matrix.platform.name == 'cachyos'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -53,7 +64,8 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            zstd
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -76,7 +88,77 @@ jobs:
 
       - name: Build Tauri client
         working-directory: client
-        run: npm run tauri:build
+        run: npm run tauri:build -- ${{ matrix.platform.build_args }}
+
+      - name: Build pacman package (CachyOS)
+        if: matrix.platform.name == 'cachyos'
+        working-directory: client/tauri
+        run: |
+          set -euo pipefail
+
+          VERSION=$(grep -m1 '"version"' tauri.conf.json | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+          PKGREL=1
+          ARCH=x86_64
+          PKGNAME=roguecord-client
+          PKGFILE="target/pacman/${PKGNAME}-${VERSION}-${PKGREL}-${ARCH}.pkg.tar.zst"
+
+          echo "Assembling pacman package ${PKGNAME}-${VERSION}-${PKGREL}-${ARCH}"
+
+          mkdir -p target/pacman
+          PKGROOT="$(mktemp -d)"
+
+          # Stage the payload: binary, icon and .desktop entry.
+          install -Dm755 target/release/roguecord-client "${PKGROOT}/usr/bin/roguecord-client"
+          install -Dm644 icons/128x128.png "${PKGROOT}/usr/share/icons/hicolor/128x128/apps/roguecord-client.png"
+          mkdir -p "${PKGROOT}/usr/share/applications"
+          cat > "${PKGROOT}/usr/share/applications/roguecord-client.desktop" <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Roguecord
+          Comment=Roguecord desktop client
+          Exec=roguecord-client
+          Icon=roguecord-client
+          Terminal=false
+          Categories=Network;InstantMessaging;
+          DESKTOP
+
+          # Installed size (bytes) of the payload, used for the .PKGINFO field.
+          INSTALLED_SIZE=$(find "${PKGROOT}" -type f -printf '%s\n' | awk '{s+=$1} END{print s+0}')
+
+          # .PKGINFO must be the FIRST entry in the archive. Each `depend =`
+          # line declares a runtime library pacman resolves from the repos at
+          # install time — nothing is bundled.
+          cat > "${PKGROOT}/.PKGINFO" <<PKGINFO
+          pkgname = ${PKGNAME}
+          pkgver = ${VERSION}-${PKGREL}
+          pkgdesc = Roguecord desktop client
+          url = https://github.com/roguecord/roguecord
+          builddate = $(date +%s)
+          packager = roguecord-ci
+          size = ${INSTALLED_SIZE}
+          arch = ${ARCH}
+          license = MIT
+          depend = webkit2gtk-4.1
+          depend = gtk3
+          depend = xdotool
+          depend = openssl
+          depend = libayatana-appindicator
+          depend = librsvg
+          depend = hicolor-icon-theme
+          depend = libnotify
+          depend = libsoup3
+          depend = cairo
+          depend = pango
+          depend = gdk-pixbuf2
+          depend = glib2
+          PKGINFO
+
+          # Build the .pkg.tar.zst: .PKGINFO first, then the payload, piped
+          # through zstd for max compression.
+          ( cd "${PKGROOT}" && tar -cf - .PKGINFO usr ) | zstd -19 -T0 -o "${PKGFILE}"
+
+          echo "Created ${PKGFILE}"
+          ls -lh "${PKGFILE}"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
