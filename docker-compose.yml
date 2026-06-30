@@ -20,8 +20,8 @@ services:
       context: .
       dockerfile: Dockerfile
     # To use a prebuilt image instead of building locally, comment out `build`
-    # above and uncomment the image line:
-    # image: ghcr.io/<owner>/roguecord-server:latest
+    # above and uncomment the image line (replace <dockerhub-username>):
+    # image: <dockerhub-username>/roguecord-server:latest
     container_name: roguecord-server
     restart: unless-stopped
 
