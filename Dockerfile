@@ -67,7 +67,20 @@ COPY server/package.json server/package-lock.json ./server/
 # binary compiled in the builder stage below.
 ENV MEDIASOUP_WORKER_BIN=/app/server/mediasoup-worker
 
-RUN cd server && npm ci --omit=dev
+# sqlite3's upstream prebuilt binaries are linked against a newer glibc than
+# Debian Bookworm provides, so force native modules to build from source in the
+# runtime image. Build tools are installed and purged in the same layer to keep
+# the final image small.
+ENV npm_config_build_from_source=true
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+        make \
+        g++ \
+    && cd server && npm ci --omit=dev \
+    && npm cache clean --force \
+    && apt-get purge -y --auto-remove python3 make g++ \
+    && rm -rf /var/lib/apt/lists/* /root/.cache /tmp/*
 
 # Copy the server source.
 COPY server/ ./server/
