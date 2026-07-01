@@ -1,14 +1,14 @@
-# Example Docker Compose file for the RogueCord server (server only).
+# Example Docker Compose file for the RogueCord server with an nginx reverse proxy.
 #
 # Usage:
-#   1. Copy this file to docker-compose.override.yml or edit in place.
-#   2. Set MEDIASOUP_ANNOUNCED_IP to your server's public IP or domain name.
-#   3. (Optional) Set PORT and adjust the host port mapping.
-#   4. `docker compose up -d --build`
+#   1. Set NGINX_SERVER_NAME and MEDIASOUP_ANNOUNCED_IP in your environment or
+#      in a `.env` file next to this compose file.
+#   2. Ensure the SSL certificate/key exist on the host under the paths used by
+#      nginx (defaults to Let's Encrypt: /etc/letsencrypt/live/<server_name>/).
+#   3. `docker compose up -d --build`
 #
 # The SQLite database and uploaded files are persisted on the host filesystem
-# at /srv/roguecord/data (mounted at /app/server/data inside the container).
-# Change the host path below to store data elsewhere.
+# at /srv/roguecord/data. Change the host path below to store data elsewhere.
 #
 # NOTE: The WebRTC port range (10000-10100) is published for both UDP and TCP.
 # Make sure your firewall allows these ports, and that the range matches the
@@ -26,15 +26,15 @@ services:
     restart: unless-stopped
 
     environment:
-      # HTTP/WebSocket listener
+      # HTTP/WebSocket listener (internal port, accessed through nginx)
       LISTEN_IP: "0.0.0.0"
-      PORT: "1337"
+      PORT: "1338"
 
       # mediasoup WebRTC
       MEDIASOUP_LISTEN_IP: "0.0.0.0"
-      # IMPORTANT: set this to your server's public IP or domain name so clients
-      # can reach the WebRTC media traffic.
-      MEDIASOUP_ANNOUNCED_IP: "127.0.0.1"
+      # IMPORTANT: set this to your server's public IP so clients can reach the
+      # WebRTC media traffic. This is NOT the nginx server_name.
+      MEDIASOUP_ANNOUNCED_IP: ${MEDIASOUP_ANNOUNCED_IP:-127.0.0.1}
 
       # Optional media bitrate tuning (see server/.env.example for defaults)
       # MEDIA_VIDEO_START_BITRATE_KBPS: "6000"
@@ -48,8 +48,6 @@ services:
       # S3_DEFAULT_PREFIX: ""
 
     ports:
-      # HTTP / WebSocket
-      - "1337:1337"
       # WebRTC media (UDP) - mediasoup port range 10000-10100
       - "10000-10100:10000-10100/udp"
       # WebRTC media (TCP) - only needed if UDP is blocked
@@ -59,9 +57,41 @@ services:
       # Persist the SQLite DB and uploaded files on the host filesystem.
       # The container runs as the non-root `node` user (uid 1000); make sure
       # /srv/roguecord is writable by that uid, e.g.:
-      #   sudo mkdir -p /srv/roguecord && sudo chown 1000:1000 /srv/roguecord
-      - /srv/roguecord:/app/server
+      #   sudo mkdir -p /srv/roguecord/data && sudo chown -R 1000:1000 /srv/roguecord
+      - /srv/roguecord/data:/app/server/data
 
     # mediasoup needs elevated network privileges for ICE; using host networking
     # is an alternative if you have trouble with the published port range:
     #   network_mode: "host"
+
+  nginx:
+    image: nginx:alpine
+    container_name: roguecord-nginx
+    restart: unless-stopped
+    depends_on:
+      - roguecord-server
+
+    ports:
+      # Public HTTPS/WebSocket entrypoint
+      - "1337:1337"
+
+    environment:
+      # Server name used in the nginx server block and for default LE cert paths.
+      NGINX_SERVER_NAME: ${NGINX_SERVER_NAME:-roguecord.example.com}
+
+      # Optional: override certificate paths. Defaults to Let's Encrypt:
+      # /etc/letsencrypt/live/${NGINX_SERVER_NAME}/fullchain.pem
+      # /etc/letsencrypt/live/${NGINX_SERVER_NAME}/privkey.pem
+      # NGINX_SSL_CERTIFICATE: /path/to/fullchain.pem
+      # NGINX_SSL_CERTIFICATE_KEY: /path/to/privkey.pem
+
+    volumes:
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/entrypoint.sh:/etc/nginx/entrypoint.sh:ro
+      # Mount the host certificate directory. Change this if you use custom cert
+      # paths that are not under /etc/letsencrypt.
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+
+    # The custom entrypoint fills in defaults (server_name + LE cert paths) and
+    # then delegates to the official nginx entrypoint for templating/start.
+    command: ["/bin/sh", "/etc/nginx/entrypoint.sh"]
