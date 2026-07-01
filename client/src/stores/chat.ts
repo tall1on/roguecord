@@ -2088,6 +2088,12 @@ export const useChatStore = defineStore('chat', () => {
       case 'presence_updated':
       case 'user_presence_updated': {
         const updatedUser = normalizeUser(payload.user);
+        const effectiveStatus = payload.user?.effective_presence_status;
+        if (effectiveStatus === 'online' || effectiveStatus === 'idle' || effectiveStatus === 'dnd') {
+          onlineUserIds.value.add(updatedUser.id);
+        } else if (effectiveStatus === 'offline' || effectiveStatus === 'invisible') {
+          onlineUserIds.value.delete(updatedUser.id);
+        }
         const existingIndex = users.value.findIndex((user) => user.id === updatedUser.id);
         if (existingIndex >= 0) {
           const nextUsers = [...users.value];
