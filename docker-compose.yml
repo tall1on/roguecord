@@ -58,9 +58,9 @@ services:
     volumes:
       # Persist the SQLite DB and uploaded files on the host filesystem.
       # The container runs as the non-root `node` user (uid 1000); make sure
-      # /srv/roguecord/data is writable by that uid, e.g.:
-      #   sudo mkdir -p /srv/roguecord/data && sudo chown 1000:1000 /srv/roguecord/data
-      - /srv/roguecord/data:/app/server/data
+      # /srv/roguecord is writable by that uid, e.g.:
+      #   sudo mkdir -p /srv/roguecord && sudo chown 1000:1000 /srv/roguecord
+      - /srv/roguecord:/app/server
 
     # mediasoup needs elevated network privileges for ICE; using host networking
     # is an alternative if you have trouble with the published port range:

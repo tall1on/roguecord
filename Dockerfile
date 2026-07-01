@@ -12,7 +12,7 @@
 #     -v /srv/roguecord/data:/app/server/data roguecord-server
 #
 
-ARG NODE_VERSION=22
+ARG NODE_VERSION=24
 
 # ----------------------------------------------------------------------------
 # Stage 1: build dependencies (compiles the mediasoup native worker)
