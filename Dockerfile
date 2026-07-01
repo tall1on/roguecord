@@ -40,11 +40,34 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 WORKDIR /app
 
 # Copy only the server manifest first to leverage layer caching for npm install.
-COPY server/package.json server/package-lock.json* ./server/
+COPY server/package.json server/package-lock.json ./server/
 
-# Install server dependencies. ts-node/typescript are in `dependencies`,
-# so a production install is sufficient and keeps the image lean.
-RUN cd server && npm install
+# Install server dependencies so the mediasoup C++ worker gets built/downloaded.
+RUN cd server && npm ci
+
+# ----------------------------------------------------------------------------
+# Stage 2: runtime image
+# ----------------------------------------------------------------------------
+FROM node:${NODE_VERSION}-bookworm-slim AS runtime
+
+# Minimal runtime deps; the mediasoup worker binary is copied from the builder.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install production dependencies in the runtime stage so native modules
+# (e.g. sqlite3) are built/downloaded for this glibc/toolchain environment.
+COPY server/package.json server/package-lock.json ./server/
+
+# Skip mediasoup's worker build/fetch during npm install; we provide the worker
+# binary compiled in the builder stage below.
+ENV MEDIASOUP_WORKER_BIN=/app/server/mediasoup-worker
+
+RUN cd server && npm ci --omit=dev
 
 # Copy the server source.
 COPY server/ ./server/
@@ -54,22 +77,9 @@ COPY server/ ./server/
 # assets must live at /app/server/client/public/svg to resolve correctly.
 COPY client/public/svg/ ./server/client/public/svg/
 
-# ----------------------------------------------------------------------------
-# Stage 2: runtime image
-# ----------------------------------------------------------------------------
-FROM node:${NODE_VERSION}-bookworm-slim AS runtime
-
-# Minimal runtime deps; mediasoup worker is already compiled in the builder.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        tini \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-# Copy installed node_modules, source, and bundled emoji SVGs from the builder.
-COPY --from=builder /app/server/ ./server/
+# Copy only the compiled mediasoup worker binary from the builder stage.
+COPY --from=builder /app/server/node_modules/mediasoup/worker/out/Release/mediasoup-worker /app/server/mediasoup-worker
+RUN chmod +x /app/server/mediasoup-worker
 
 # The SQLite database and uploaded files live under server/data. Persist it.
 RUN mkdir -p /app/server/data \
