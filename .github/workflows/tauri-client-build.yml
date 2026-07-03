@@ -86,6 +86,15 @@ jobs:
         working-directory: client
         run: npm ci
 
+      - name: Use CachyOS Tauri config
+        if: matrix.platform.name == 'cachyos'
+        working-directory: client/tauri
+        run: cp tauri.conf.cachyos.json tauri.conf.json
+
+      - name: Set CachyOS build flag
+        if: matrix.platform.name == 'cachyos'
+        run: echo "TAURI_CACHYOS_BUILD=true" >> $GITHUB_ENV
+
       - name: Build Tauri client
         working-directory: client
         run: npm run tauri:build -- ${{ matrix.platform.build_args }}
