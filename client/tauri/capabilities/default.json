@@ -5,7 +5,6 @@
   "windows": ["main"],
   "permissions": [
     "opener:default",
-    "media:default",
     "core:event:allow-listen",
     "core:window:allow-is-maximized",
     "core:window:allow-minimize",
