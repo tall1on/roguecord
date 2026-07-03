@@ -14,6 +14,7 @@ import ServerListSidebar from '../components/layout/ServerListSidebar.vue'
 import ChannelListSidebar from '../components/layout/ChannelListSidebar.vue'
 import MemberListSidebar from '../components/layout/MemberListSidebar.vue'
 import { isTauri } from '../utils/isTauri'
+import { isCachyOS } from '../utils/isCachyOS'
 
 const ServerSettingsModal = defineAsyncComponent(() => import('../components/layout/modals/ServerSettingsModal.vue'))
 
@@ -30,6 +31,7 @@ const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
 const router = useRouter()
 const isTauriApp = isTauri()
+const cachyOSBuild = isCachyOS()
 const tauriWindow = shallowRef<Awaited<ReturnType<typeof import('@tauri-apps/api/window')['getCurrentWindow']>> | null>(null)
 let unlistenWindowResized: null | (() => void) = null
 
@@ -913,7 +915,7 @@ onUnmounted(() => {
 <template>
   <div class="flex h-screen w-full flex-col overflow-hidden bg-zinc-950 text-zinc-300 font-sans">
     <div
-      v-if="isTauriApp"
+      v-if="isTauriApp && !cachyOSBuild"
       class="tauri-titlebar flex h-10 shrink-0 items-center border-b border-zinc-800 bg-zinc-900/95"
     >
       <div class="tauri-titlebar-drag-region flex min-w-0 flex-1 items-center px-4" data-tauri-drag-region>
