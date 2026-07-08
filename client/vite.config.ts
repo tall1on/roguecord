@@ -1,5 +1,6 @@
 import {defineConfig} from 'vite'
 import vue from '@vitejs/plugin-vue'
+import checker from "vite-plugin-checker";
 
 const EMOJI_CACHE_CONTROL_HEADER = 'public, max-age=31536000, immutable'
 
@@ -27,6 +28,9 @@ export default defineConfig({
     },
     plugins: [
         vue(),
+        checker({
+            vueTsc: true,
+        }),
         {
             name: 'roguecord-emoji-cache-headers',
             configureServer(server) {
