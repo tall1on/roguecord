@@ -11,16 +11,16 @@
   "author": "",
   "type": "commonjs",
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1077.0",
-    "@aws-sdk/s3-request-presigner": "3.1077.0",
-    "@types/node": "26.1.0",
-    "@types/ws": "^8.18.1",
+    "@aws-sdk/client-s3": "3.1081.0",
+    "@aws-sdk/s3-request-presigner": "3.1081.0",
+    "@types/node": "26.1.1",
+    "@types/ws": "8.18.1",
     "dotenv": "17.4.2",
-    "mediasoup": "3.20.10",
-    "selfsigned": "^5.5.0",
-    "sqlite3": "^6.0.1",
-    "tsx": "4.22.4",
-    "typescript": "7.0.1-rc",
-    "ws": "^8.20.0"
+    "mediasoup": "3.21.0",
+    "selfsigned": "5.5.0",
+    "sqlite3": "6.0.1",
+    "tsx": "4.23.0",
+    "typescript": "7.0.2",
+    "ws": "8.21.0"
   }
 }
