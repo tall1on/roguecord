@@ -45,11 +45,17 @@ const driverColor = (userId: string): string => {
   return color
 }
 const selfColor = (): string => chatStore.currentUser ? driverColor(chatStore.currentUser.id) : DRIVE_SELF_COLOR
+// Prefer the driver (car) avatar, then fall back to the RogueCord profile picture, then to the plain colored circle.
 const driverAvatarUrlFor = (userId: string): string | null => {
   if (userId === chatStore.currentUser?.id) {
-    return chatStore.getLocalDriverAvatar() ?? chatStore.currentUser?.driver_avatar_url ?? null
+    return chatStore.getLocalDriverAvatar()
+      ?? chatStore.currentUser?.driver_avatar_url
+      ?? chatStore.currentUser?.avatar_url
+      ?? chatStore.getLocalAvatar()
+      ?? null
   }
-  return participants.value.find((participant) => participant.id === userId)?.driver_avatar_url ?? null
+  const participant = participants.value.find((entry) => entry.id === userId)
+  return participant?.driver_avatar_url ?? participant?.avatar_url ?? null
 }
 const rankedParticipants = computed(() => rankDriveParticipants(participants.value,
   isJoined.value ? driveStore.locations : new Map(), destination.value))
@@ -355,7 +361,17 @@ const syncMap = (forceFit = false) => {
       }
       line.setStyle({ color, opacity: isSpeaking ? 1 : 0.85 }).bringToBack()
     }
-    const avatarUrl = isSelf && navMode.value ? null : driverAvatarUrlFor(point.user_id)
+    // In navigation close-up the triangle replaces the driver entirely, so drop any avatar/dot marker.
+    if (isSelf && navMode.value) {
+      const selfMarker = markers.get(point.user_id)
+      if (selfMarker) {
+        selfMarker.remove()
+        markers.delete(point.user_id)
+        driverMarkerSignatures.delete(point.user_id)
+      }
+      continue
+    }
+    const avatarUrl = driverAvatarUrlFor(point.user_id)
     const signature = `${color}|${isSpeaking ? 1 : 0}|${driverAvatarSignature(avatarUrl)}`
     let marker = markers.get(point.user_id)
     if (!marker) {
