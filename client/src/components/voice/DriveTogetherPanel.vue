@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Car, Flag, Headphones, LocateFixed, MapPin, Mic, MicOff, PhoneOff, Search, X } from 'lucide-vue-next'
-import type { CircleMarker, Map as LeafletMap, Polyline } from 'leaflet'
+import { Car, Flag, Headphones, LocateFixed, MapPin, Mic, MicOff, Navigation, PhoneOff, Search, X } from 'lucide-vue-next'
+import type { CircleMarker, Map as LeafletMap, Marker as LeafletMarker, Polyline } from 'leaflet'
 import { useChatStore } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 import { useDriveStore } from '../../stores/drive'
@@ -29,6 +29,13 @@ let lastSearchAt = 0
 const isJoined = computed(() => driveStore.joinedChannelId === props.channelId)
 const participants = computed(() => webrtcStore.channelParticipants.get(props.channelId) || [])
 const visibleLocations = computed(() => isJoined.value ? [...driveStore.locations.values()] : [])
+const selfLocation = computed(() => {
+  const userId = chatStore.currentUser?.id
+  return userId ? visibleLocations.value.find((point) => point.user_id === userId) ?? null : null
+})
+const navMode = ref(false)
+const canUseNav = computed(() => isJoined.value && driveStore.isSharing && !!selfLocation.value)
+watch(canUseNav, (value) => { if (!value) navMode.value = false })
 const rankedParticipants = computed(() => rankDriveParticipants(participants.value,
   isJoined.value ? driveStore.locations : new Map(), destination.value))
 const podiumClasses = [
@@ -82,6 +89,32 @@ const destinationLines = new Map<string, Polyline>()
 const linePositions = new Map<string, [number, number][]>()
 let lastMapCoordinates: [number, number][] | null = null
 let destinationMarker: CircleMarker | null = null
+const NAV_ZOOM = 17
+let directionArrow: LeafletMarker | null = null
+let directionArrowHeading: number | null = null
+const clearDirectionArrow = () => { directionArrow?.remove(); directionArrow = null; directionArrowHeading = null }
+const headingCenter = (point: { latitude: number; longitude: number }, heading: number, size: { x: number; y: number }): [number, number] => {
+  const latitude = point.latitude
+  const metersPerPixel = 156543.03392 * Math.cos(latitude * Math.PI / 180) / 2 ** NAV_ZOOM
+  const offsetMeters = Math.min(size.x, size.y) * 0.28 * metersPerPixel
+  const radians = heading * Math.PI / 180
+  const latitudeOffset = (Math.cos(radians) * offsetMeters) / 111320
+  const longitudeOffset = (Math.sin(radians) * offsetMeters) / (111320 * Math.max(0.01, Math.cos(latitude * Math.PI / 180)))
+  return [latitude + latitudeOffset, point.longitude + longitudeOffset]
+}
+const updateDirectionArrow = (point: { latitude: number; longitude: number }) => {
+  if (!map || !leaflet) return
+  const heading = driveStore.selfHeading
+  if (heading === null) { clearDirectionArrow(); return }
+  const latLng: [number, number] = [point.latitude, point.longitude]
+  if (directionArrow) directionArrow.setLatLng(latLng)
+  if (directionArrow && directionArrowHeading === heading) return
+  const html = `<span style="display:block;width:100%;height:100%;transform:rotate(${heading}deg);transform-origin:50% 50%"><svg viewBox="0 0 24 24" width="100%" height="100%" style="filter:drop-shadow(0 1px 2px rgba(0,0,0,.65))"><path d="M12 2 L20.5 21 L12 16.5 L3.5 21 Z" fill="#818cf8" stroke="#ffffff" stroke-width="1.4" stroke-linejoin="round"/></svg></span>`
+  const icon = leaflet.divIcon({ className: 'drive-direction-icon', html, iconSize: [30, 30], iconAnchor: [15, 15] })
+  directionArrowHeading = heading
+  if (directionArrow) directionArrow.setIcon(icon)
+  else directionArrow = leaflet.marker(latLng, { icon, interactive: false, keyboard: false, zIndexOffset: 1000 }).addTo(map)
+}
 
 const cancelSearch = () => {
   searchController?.abort()
@@ -222,6 +255,19 @@ const syncMap = (forceFit = false) => {
     if (marker.getTooltip()) marker.setTooltipContent(label)
     else marker.bindTooltip(label, { permanent: true, direction: 'top', offset: [0, -10] })
   }
+  if (navMode.value) {
+    const selfPoint = points.find((point) => point.user_id === chatStore.currentUser?.id)
+    if (selfPoint) {
+      updateDirectionArrow(selfPoint)
+      const size = map.getSize()
+      if (size.x <= 0 || size.y <= 0) return
+      const heading = driveStore.selfHeading
+      map.setView(heading === null ? [selfPoint.latitude, selfPoint.longitude] : headingCenter(selfPoint, heading, size), NAV_ZOOM, { animate: false })
+      lastMapCoordinates = null
+      return
+    }
+  }
+  clearDirectionArrow()
   if (!forceFit && coordinates === lastMapCoordinates) return
   const size = map.getSize()
   if (size.x <= 0 || size.y <= 0) return
@@ -234,7 +280,7 @@ const syncMap = (forceFit = false) => {
   lastMapCoordinates = coordinates
 }
 
-watch([visibleLocations, destination, routes, participants, () => [...webrtcStore.speakingUserIds]], () => syncMap(), { deep: true })
+watch([visibleLocations, destination, routes, participants, () => [...webrtcStore.speakingUserIds], navMode], () => syncMap(), { deep: true })
 onMounted(async () => {
   try {
     const [module] = await Promise.all([import('leaflet'), import('leaflet/dist/leaflet.css')])
@@ -263,6 +309,7 @@ onBeforeUnmount(() => {
   cancelSearch()
   cancelDestinationChange()
   resizeObserver?.disconnect()
+  clearDirectionArrow()
   map?.remove()
   map = null
   markers.clear()
@@ -286,6 +333,7 @@ onBeforeUnmount(() => {
         <button class="rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold transition-colors hover:bg-zinc-800" :class="[driveStore.isSharing ? 'text-indigo-300' : 'text-zinc-300', phoneLayout ? 'min-h-11 min-w-0 flex-1' : '']" :aria-label="driveStore.isSharing ? 'Stop sharing GPS' : 'Share GPS'" :aria-pressed="driveStore.isSharing" @click="driveStore.isSharing ? driveStore.stopSharing() : driveStore.startSharing()">
           <LocateFixed class="mr-1 inline h-4 w-4" />{{ driveStore.isSharing ? (phoneLayout ? 'GPS on' : 'Stop sharing GPS') : 'Share GPS' }}
         </button>
+        <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors disabled:cursor-not-allowed disabled:opacity-40" :class="[navMode ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :disabled="!canUseNav" :aria-pressed="navMode" :aria-label="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Start navigation close-up of your position') : 'Navigation close-up needs active GPS sharing'" :title="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Navigation close-up of your position') : 'Share your GPS to use navigation close-up'" @click="navMode = !navMode"><Navigation class="h-5 w-5" /></button>
         <button class="inline-flex items-center justify-center rounded-lg p-2 hover:bg-zinc-800" :class="[webrtcStore.isMuted || webrtcStore.isDeafened ? 'text-red-400' : 'text-zinc-300', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-label="webrtcStore.isMuted || webrtcStore.isDeafened ? 'Unmute microphone' : 'Mute microphone'" @click="webrtcStore.toggleMute()">
           <MicOff v-if="webrtcStore.isMuted || webrtcStore.isDeafened" class="h-5 w-5" /><Mic v-else class="h-5 w-5" />
         </button>
@@ -316,7 +364,6 @@ onBeforeUnmount(() => {
         <p v-else-if="destination" class="mt-2 text-[10px] text-zinc-500">Shared with everyone in this room.</p>
         <p v-if="destination && isJoined" class="mt-2 text-[11px] text-zinc-400" role="status">{{ routes.size }}/{{ visibleLocations.length }} street routes<span v-if="isRouting">, updating...</span></p>
         <div v-if="routingErrors.length" class="mt-2 max-h-24 space-y-1 overflow-y-auto" role="alert"><p v-for="entry in routingErrors" :key="entry.userId" class="text-xs text-amber-300">{{ entry.username }}: {{ entry.error }}</p></div>
-        <p class="mt-2 text-[10px] leading-relaxed text-zinc-500">Address search through your guild: <a href="https://photon.komoot.io" target="_blank" rel="noopener noreferrer" class="text-indigo-300 hover:underline">Photon / OpenStreetMap</a>. Street routes: <a href="https://project-osrm.org" target="_blank" rel="noopener noreferrer" class="text-indigo-300 hover:underline">OSRM</a>.</p>
       </div>
       <div v-if="(!visibleLocations.length && !destination) || mapError" class="pointer-events-none absolute inset-x-4 bottom-4 z-10 mx-auto max-w-md rounded-xl border border-white/10 bg-zinc-950/90 p-4 text-center shadow-xl backdrop-blur">
         <MapPin class="mx-auto mb-2 h-6 w-6 text-indigo-400" />
@@ -334,7 +381,6 @@ onBeforeUnmount(() => {
           <span v-if="driveStore.getSpeedLabel(entry.participant.id, channelId)" class="tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(entry.participant.id, channelId) }}</span>
         </span>
       </div>
-      <p class="text-[11px] leading-relaxed text-zinc-500">GPS sharing stops when you leave. For street routes, driver positions are sent through your guild to its configured OSRM server. Your guild does not save live GPS or routes; address results are cached in its database. Map tiles come from OpenStreetMap. Screen sharing is disabled.</p>
     </footer>
   </section>
 </template>
@@ -369,6 +415,10 @@ onBeforeUnmount(() => {
 }
 .drive-map {
   background: #18181b;
+}
+.drive-map :deep(.drive-direction-icon) {
+  background: transparent;
+  border: 0;
 }
 .drive-map :deep(.leaflet-tile-pane) {
   filter: invert(1) hue-rotate(180deg) brightness(0.75) saturate(0.65) contrast(1.1);
