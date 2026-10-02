@@ -1,18 +1,22 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Car, Flag, Headphones, LocateFixed, MapPin, Mic, MicOff, Navigation, PhoneOff, Search, X } from 'lucide-vue-next'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { Camera, CameraOff, Car, Flag, Headphones, LocateFixed, MapPin, Mic, MicOff, Navigation, PhoneOff, Search, X } from 'lucide-vue-next'
 import type { CircleMarker, LatLngBounds, Map as LeafletMap, Marker as LeafletMarker, Polyline } from 'leaflet'
 import { useChatStore } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 import { useDriveStore } from '../../stores/drive'
 import { useDriveRoutes } from '../../composables/useDriveRoutes'
+import { usePhoneLayout } from '../../composables/usePhoneLayout'
 import { DRIVE_SELF_COLOR, getDriveMapCoordinates, getRouteHeading, pickDriveColor, rankDriveParticipants, searchDriveDestinations, setDriveDestination, type DriveDestination } from '../../utils/driveNavigation'
 
+const DriveCameraStage = defineAsyncComponent(() => import('./DriveCameraStage.vue'))
 const props = withDefaults(defineProps<{ channelId: string; channelName: string; phoneLayout?: boolean }>(), { phoneLayout: false })
 const emit = defineEmits<{ (e: 'back'): void }>()
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
 const driveStore = useDriveStore()
+const isPhoneResponsive = usePhoneLayout()
+const cameraPhoneLayout = computed(() => props.phoneLayout || isPhoneResponsive.value)
 const mapElement = ref<HTMLElement | null>(null)
 const mapError = ref<string | null>(null)
 const navigationElement = ref<HTMLElement | null>(null)
@@ -29,6 +33,13 @@ let lastSearchAt = 0
 const isJoined = computed(() => driveStore.joinedChannelId === props.channelId)
 const participants = computed(() => webrtcStore.channelParticipants.get(props.channelId) || [])
 const visibleLocations = computed(() => isJoined.value ? [...driveStore.locations.values()] : [])
+const toggleCameraShare = () => webrtcStore.cameraProducer ? webrtcStore.stopCameraShare() : webrtcStore.startCameraShare()
+const cameraView = ref<'map' | 'split' | 'cameras'>('map')
+const desktopViews = [
+  { value: 'map', label: 'Map', ariaLabel: 'Show map only' },
+  { value: 'split', label: 'Map + cameras', ariaLabel: 'Show map and cameras side by side' },
+  { value: 'cameras', label: 'Cameras', ariaLabel: 'Show cameras only' }
+] as const
 const selfLocation = computed(() => {
   const userId = chatStore.currentUser?.id
   return userId ? visibleLocations.value.find((point) => point.user_id === userId) ?? null : null
@@ -439,6 +450,13 @@ const syncMap = (forceFit = false) => {
   lastFitSignature = fitSignature
 }
 
+watch([cameraView, cameraPhoneLayout, isJoined], async ([view, isPhone, joined]) => {
+  webrtcStore.setCameraReceivingEnabled(joined && !isPhone && view !== 'map')
+  await nextTick()
+  map?.invalidateSize({ animate: false, pan: false })
+  syncMap(true)
+}, { flush: 'post', immediate: true })
+
 watch([visibleLocations, destination, routes, participants, () => [...webrtcStore.speakingUserIds], navMode, () => chatStore.getLocalDriverAvatar(), () => chatStore.currentUser?.driver_avatar_url], () => syncMap(), { deep: true })
 onMounted(async () => {
   try {
@@ -471,6 +489,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   disposed = true
+  webrtcStore.setCameraReceivingEnabled(false)
   if (bearingFrame !== null) cancelAnimationFrame(bearingFrame)
   bearingFrame = null
   lastSelfPoint = null
@@ -493,9 +512,35 @@ onBeforeUnmount(() => {
   <section class="flex min-h-0 min-w-0 flex-1 flex-col bg-zinc-950" :class="{ 'phone-drive-panel': phoneLayout }">
     <header class="flex shrink-0 items-center gap-3 border-b border-white/5 px-4 py-3 md:px-6" :class="phoneLayout ? 'pl-12' : ''">
       <Car class="h-6 w-6 shrink-0 text-indigo-400" />
-      <div class="min-w-0">
+      <div class="min-w-0 flex-1">
         <h2 class="truncate font-bold text-white">{{ channelName }}</h2>
         <p class="text-xs text-zinc-400">Drive Together - {{ visibleLocations.length }} live locations</p>
+      </div>
+      <button
+        v-if="cameraPhoneLayout && isJoined"
+        type="button"
+        class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-white/10 p-2 transition-colors hover:bg-zinc-800 disabled:cursor-wait disabled:opacity-50"
+        :class="webrtcStore.cameraProducer ? 'text-indigo-300' : 'text-zinc-300'"
+        :disabled="webrtcStore.cameraShareStarting"
+        :aria-pressed="Boolean(webrtcStore.cameraProducer)"
+        :aria-label="webrtcStore.cameraShareStarting ? 'Starting camera share' : webrtcStore.cameraProducer ? 'Stop camera sharing' : 'Share camera'"
+        :title="webrtcStore.cameraShareStarting ? 'Starting camera...' : webrtcStore.cameraProducer ? 'Stop camera sharing' : 'Share your rear camera when available (low-bandwidth video)'"
+        @click="toggleCameraShare"
+      >
+        <CameraOff v-if="webrtcStore.cameraProducer" class="h-5 w-5" />
+        <Camera v-else class="h-5 w-5" :class="webrtcStore.cameraShareStarting ? 'animate-pulse' : ''" />
+      </button>
+      <div v-if="!cameraPhoneLayout" class="ml-auto flex shrink-0 items-center gap-1 rounded-xl border border-white/10 bg-zinc-900/80 p-1" role="group" aria-label="Drive Together view">
+        <button
+          v-for="view in desktopViews"
+          :key="view.value"
+          type="button"
+          class="rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors"
+          :class="cameraView === view.value ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:bg-white/5 hover:text-white'"
+          :aria-pressed="cameraView === view.value"
+          :aria-label="view.ariaLabel"
+          @click="cameraView = view.value"
+        >{{ view.label }}</button>
       </div>
     </header>
     <div class="drive-leaderboard shrink-0 border-b border-white/5 px-4 py-2 md:px-6">
@@ -513,33 +558,44 @@ onBeforeUnmount(() => {
       </div>
     </div>
     <p v-if="driveStore.locationError && isJoined" class="drive-location-error shrink-0 bg-amber-950/30 px-4 py-3 text-sm text-amber-200" role="alert">{{ driveStore.locationError }}</p>
-    <div class="drive-map-area relative min-h-[16rem] flex-1 isolate">
-      <div ref="mapElement" class="drive-map absolute inset-0 z-0" aria-label="Dark OpenStreetMap showing participant GPS locations" />
-      <div v-show="navPanelOpen" id="drive-navigation-panel" ref="navigationElement" class="drive-navigation absolute left-14 right-3 top-3 z-20 max-h-[calc(100%-1.5rem)] overflow-y-auto rounded-xl border border-white/10 bg-zinc-950/95 p-3 shadow-xl backdrop-blur md:right-auto md:w-80" @pointerdown.stop @dblclick.stop @wheel.stop>
-        <form class="flex items-center gap-2" @submit.prevent="searchAddress">
-          <label for="drive-destination-address" class="sr-only">Destination address</label>
-          <input id="drive-destination-address" v-model="addressQuery" type="search" maxlength="250" placeholder="Destination address" autocomplete="off" class="min-w-0 flex-1 rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-white outline-none placeholder:text-zinc-500 focus:border-indigo-400" :class="phoneLayout ? 'min-h-11 text-base' : 'text-xs'" />
-          <button type="submit" class="inline-flex shrink-0 items-center justify-center rounded-lg bg-indigo-600 p-2 text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50" :class="phoneLayout ? 'h-11 w-11' : ''" :disabled="isSearching || addressQuery.trim().length < 2" :aria-label="isSearching ? 'Searching for address' : 'Search address'"><Search class="h-4 w-4" :class="isSearching ? 'animate-pulse' : ''" /></button>
-        </form>
-        <p v-if="searchError" class="mt-2 text-xs text-amber-300" role="alert">{{ searchError }}</p>
-        <ul v-if="searchResults.length" class="mt-2 max-h-40 space-y-1 overflow-y-auto" aria-label="Matching destination addresses">
-          <li v-for="(result, index) in searchResults" :key="index"><button type="button" class="w-full rounded-lg px-2 py-2 text-left text-xs leading-relaxed text-zinc-300 hover:bg-zinc-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-50" :disabled="!isJoined || isSettingDestination" :title="!isJoined ? 'Join to set the room destination' : 'Set destination for everyone in the room'" @click="changeDestination(result)">{{ result.label }}</button></li>
-        </ul>
-        <div v-if="destination" class="mt-3 flex items-start gap-2 border-t border-white/10 pt-2">
-          <Flag class="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
-          <p class="min-w-0 flex-1 text-xs leading-relaxed text-zinc-200">{{ destination.label }}</p>
-          <button type="button" class="shrink-0 rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-white disabled:opacity-50" :disabled="!isJoined || isSettingDestination" aria-label="Clear destination" title="Clear the destination for everyone in the room" @click="changeDestination(null)"><X class="h-3.5 w-3.5" /></button>
+    <p v-if="webrtcStore.cameraShareError" class="drive-camera-error shrink-0 bg-amber-950/30 px-4 py-2 text-xs text-amber-200" role="alert">{{ webrtcStore.cameraShareError }}</p>
+    <div
+      class="drive-workspace min-h-0 min-w-0 flex-1"
+      :class="cameraPhoneLayout ? 'drive-workspace--phone' : `drive-workspace--${cameraView}`"
+    >
+      <div v-show="cameraPhoneLayout || cameraView !== 'cameras'" class="drive-map-area relative min-h-0 min-w-0 flex-1 isolate">
+        <div ref="mapElement" class="drive-map absolute inset-0 z-0" aria-label="Dark OpenStreetMap showing participant GPS locations" />
+        <div v-show="navPanelOpen" id="drive-navigation-panel" ref="navigationElement" class="drive-navigation absolute left-14 right-3 top-3 z-20 max-h-[calc(100%-1.5rem)] overflow-y-auto rounded-xl border border-white/10 bg-zinc-950/95 p-3 shadow-xl backdrop-blur md:right-auto md:w-80" @pointerdown.stop @dblclick.stop @wheel.stop>
+          <form class="flex items-center gap-2" @submit.prevent="searchAddress">
+            <label for="drive-destination-address" class="sr-only">Destination address</label>
+            <input id="drive-destination-address" v-model="addressQuery" type="search" maxlength="250" placeholder="Destination address" autocomplete="off" class="min-w-0 flex-1 rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-white outline-none placeholder:text-zinc-500 focus:border-indigo-400" :class="phoneLayout ? 'min-h-11 text-base' : 'text-xs'" />
+            <button type="submit" class="inline-flex shrink-0 items-center justify-center rounded-lg bg-indigo-600 p-2 text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50" :class="phoneLayout ? 'h-11 w-11' : ''" :disabled="isSearching || addressQuery.trim().length < 2" :aria-label="isSearching ? 'Searching for address' : 'Search address'"><Search class="h-4 w-4" :class="isSearching ? 'animate-pulse' : ''" /></button>
+          </form>
+          <p v-if="searchError" class="mt-2 text-xs text-amber-300" role="alert">{{ searchError }}</p>
+          <ul v-if="searchResults.length" class="mt-2 max-h-40 space-y-1 overflow-y-auto" aria-label="Matching destination addresses">
+            <li v-for="(result, index) in searchResults" :key="index"><button type="button" class="w-full rounded-lg px-2 py-2 text-left text-xs leading-relaxed text-zinc-300 hover:bg-zinc-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-50" :disabled="!isJoined || isSettingDestination" :title="!isJoined ? 'Join to set the room destination' : 'Set destination for everyone in the room'" @click="changeDestination(result)">{{ result.label }}</button></li>
+          </ul>
+          <div v-if="destination" class="mt-3 flex items-start gap-2 border-t border-white/10 pt-2">
+            <Flag class="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+            <p class="min-w-0 flex-1 text-xs leading-relaxed text-zinc-200">{{ destination.label }}</p>
+            <button type="button" class="shrink-0 rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-white disabled:opacity-50" :disabled="!isJoined || isSettingDestination" aria-label="Clear destination" title="Clear the destination for everyone in the room" @click="changeDestination(null)"><X class="h-3.5 w-3.5" /></button>
+          </div>
+          <p v-if="isSettingDestination" class="mt-2 text-[11px] text-indigo-300" role="status">Updating room destination...</p>
+          <p v-else-if="destination" class="mt-2 text-[10px] text-zinc-500">Shared with everyone in this room.</p>
+          <p v-if="destination && isJoined" class="mt-2 text-[11px] text-zinc-400" role="status">{{ routes.size }}/{{ visibleLocations.length }} street routes<span v-if="isRouting">, updating...</span></p>
+          <div v-if="routingErrors.length" class="mt-2 max-h-24 space-y-1 overflow-y-auto" role="alert"><p v-for="entry in routingErrors" :key="entry.userId" class="text-xs text-amber-300">{{ entry.username }}: {{ entry.error }}</p></div>
         </div>
-        <p v-if="isSettingDestination" class="mt-2 text-[11px] text-indigo-300" role="status">Updating room destination...</p>
-        <p v-else-if="destination" class="mt-2 text-[10px] text-zinc-500">Shared with everyone in this room.</p>
-        <p v-if="destination && isJoined" class="mt-2 text-[11px] text-zinc-400" role="status">{{ routes.size }}/{{ visibleLocations.length }} street routes<span v-if="isRouting">, updating...</span></p>
-        <div v-if="routingErrors.length" class="mt-2 max-h-24 space-y-1 overflow-y-auto" role="alert"><p v-for="entry in routingErrors" :key="entry.userId" class="text-xs text-amber-300">{{ entry.username }}: {{ entry.error }}</p></div>
+        <div v-if="(!visibleLocations.length && !destination) || mapError" class="pointer-events-none absolute inset-x-4 bottom-4 z-10 mx-auto max-w-md rounded-xl border border-white/10 bg-zinc-950/90 p-4 text-center shadow-xl backdrop-blur">
+          <MapPin class="mx-auto mb-2 h-6 w-6 text-indigo-400" />
+          <p class="text-sm font-medium text-white">{{ mapError || (isJoined ? 'Waiting for shared GPS locations' : 'Join to see and share live locations') }}</p>
+          <p class="mt-1 text-xs text-zinc-400">Voice works even if you do not share your location. The map always fits all known positions.</p>
+        </div>
       </div>
-      <div v-if="(!visibleLocations.length && !destination) || mapError" class="pointer-events-none absolute inset-x-4 bottom-4 z-10 mx-auto max-w-md rounded-xl border border-white/10 bg-zinc-950/90 p-4 text-center shadow-xl backdrop-blur">
-        <MapPin class="mx-auto mb-2 h-6 w-6 text-indigo-400" />
-        <p class="text-sm font-medium text-white">{{ mapError || (isJoined ? 'Waiting for shared GPS locations' : 'Join to see and share live locations') }}</p>
-        <p class="mt-1 text-xs text-zinc-400">Voice works even if you do not share your location. The map always fits all known positions.</p>
-      </div>
+      <DriveCameraStage
+        v-if="!cameraPhoneLayout && cameraView !== 'map'"
+        :streams="webrtcStore.userCameraStreams"
+        :participants="participants"
+      />
     </div>
     <footer class="drive-controls shrink-0 border-t border-white/5 px-4 py-3 md:px-6">
       <div class="flex items-center gap-2" :class="phoneLayout ? 'w-full' : 'justify-end'">
@@ -547,6 +603,24 @@ onBeforeUnmount(() => {
         <template v-if="isJoined">
           <button class="rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold transition-colors hover:bg-zinc-800" :class="[driveStore.isSharing ? 'text-indigo-300' : 'text-zinc-300', phoneLayout ? 'min-h-11 min-w-0 flex-1' : '']" :aria-label="driveStore.isSharing ? 'Stop sharing GPS' : 'Share GPS'" :aria-pressed="driveStore.isSharing" @click="driveStore.isSharing ? driveStore.stopSharing() : driveStore.startSharing()">
             <LocateFixed class="mr-1 inline h-4 w-4" />{{ driveStore.isSharing ? (phoneLayout ? 'GPS on' : 'Stop sharing GPS') : 'Share GPS' }}
+          </button>
+          <button
+            v-if="!cameraPhoneLayout"
+            type="button"
+            class="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/10 p-2 transition-colors hover:bg-zinc-800 disabled:cursor-wait disabled:opacity-50"
+            :class="[
+              webrtcStore.cameraProducer ? 'text-indigo-300' : 'text-zinc-300',
+              cameraPhoneLayout ? 'h-11 w-11 shrink-0' : 'px-3 text-xs font-semibold'
+            ]"
+            :disabled="webrtcStore.cameraShareStarting"
+            :aria-pressed="Boolean(webrtcStore.cameraProducer)"
+            :aria-label="webrtcStore.cameraShareStarting ? 'Starting camera share' : webrtcStore.cameraProducer ? 'Stop camera sharing' : 'Share camera'"
+            :title="webrtcStore.cameraShareStarting ? 'Starting camera...' : webrtcStore.cameraProducer ? 'Stop camera sharing' : 'Share your rear camera when available (low-bandwidth video)'"
+            @click="toggleCameraShare"
+          >
+            <CameraOff v-if="webrtcStore.cameraProducer" class="h-5 w-5" />
+            <Camera v-else class="h-5 w-5" :class="webrtcStore.cameraShareStarting ? 'animate-pulse' : ''" />
+            <span v-if="!cameraPhoneLayout">{{ webrtcStore.cameraShareStarting ? 'Starting camera...' : webrtcStore.cameraProducer ? 'Stop camera' : 'Share camera' }}</span>
           </button>
           <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors disabled:cursor-not-allowed disabled:opacity-40" :class="[navMode ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :disabled="!canUseNav" :aria-pressed="navMode" :aria-label="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Start navigation close-up of your position') : 'Navigation close-up needs active GPS sharing'" :title="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Navigation close-up of your position') : 'Share your GPS to use navigation close-up'" @click="navMode = !navMode"><Navigation class="h-5 w-5" /></button>
         </template>
@@ -570,7 +644,34 @@ onBeforeUnmount(() => {
 .phone-drive-panel .drive-map-area {
   min-height: 0;
 }
+.drive-workspace {
+  display: flex;
+}
+.drive-workspace--map .drive-map-area {
+  min-height: 16rem;
+}
+.drive-workspace--split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0.5rem;
+  padding: 0.5rem;
+}
+.drive-workspace--split > * {
+  min-height: 0;
+  min-width: 0;
+}
+.drive-workspace--cameras {
+  display: flex;
+}
+.drive-workspace--phone .drive-map-area {
+  min-height: 0;
+}
 .phone-drive-panel .drive-location-error {
+  max-height: 5rem;
+  overflow-y: auto;
+}
+.drive-camera-error {
   max-height: 5rem;
   overflow-y: auto;
 }

@@ -17,10 +17,15 @@ let getRouteHeading
 let DRIVE_SELF_COLOR
 let DRIVE_DRIVER_COLORS
 let usePhoneLayout
+let getDriveCameraCaptureConstraints
+let getDriveCameraProducerOptions
+let useDriveCameraShare
 before(async () => {
   server = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom' })
   ;({ useDriveStore, getGpsSpeed } = await server.ssrLoadModule('/src/stores/drive.ts'))
   ;({ getDriveMapCoordinates, searchDriveDestinations, getDriveRoute, setDriveDestination, rankDriveParticipants, pickDriveColor, getRouteHeading, DRIVE_SELF_COLOR, DRIVE_DRIVER_COLORS } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
+  ;({ getDriveCameraCaptureConstraints, getDriveCameraProducerOptions } = await server.ssrLoadModule('/src/utils/driveCamera.ts'))
+  ;({ useDriveCameraShare } = await server.ssrLoadModule('/src/composables/useDriveCameraShare.ts'))
   ;({ usePhoneLayout } = await server.ssrLoadModule('/src/composables/usePhoneLayout.ts'))
 })
 after(async () => server?.close())
@@ -473,6 +478,112 @@ test('each driver gets a distinct color while the local driver keeps neon green'
   const extras = Array.from({ length: 6 }, () => { const color = pickDriveColor(used, false); used.add(color); return color })
   assert.equal(new Set([...colors, ...extras]).size, colors.length + extras.length)
   assert.ok(extras.every((color) => /^hsl\(/.test(color)))
+})
+
+test('Drive camera capture prefers the rear camera and caps mobile upload quality', () => {
+  const constraints = getDriveCameraCaptureConstraints()
+  assert.equal(constraints.audio, false)
+  assert.deepEqual(constraints.video.facingMode, { ideal: 'environment' })
+  assert.deepEqual(constraints.video.width, { ideal: 640, max: 960 })
+  assert.deepEqual(constraints.video.height, { ideal: 360, max: 540 })
+  assert.deepEqual(constraints.video.frameRate, { ideal: 20, max: 24 })
+  assert.notEqual(getDriveCameraCaptureConstraints().video, constraints.video)
+
+  const producerOptions = getDriveCameraProducerOptions()
+  assert.deepEqual(producerOptions.encodings, [{ maxBitrate: 650_000, maxFramerate: 20 }])
+  assert.equal(producerOptions.codecOptions.videoGoogleStartBitrate, 350)
+})
+
+test('Drive camera publishes the camera source and releases its local track on stop', async (context) => {
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  let stoppedTracks = 0
+  let requestedConstraints
+  const videoTrack = { contentHint: '', onended: null, stop: () => { stoppedTracks++ } }
+  const stream = { getVideoTracks: () => [videoTrack], getTracks: () => [videoTrack] }
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { mediaDevices: { getUserMedia: async (constraints) => { requestedConstraints = constraints; return stream } } }
+  })
+  context.after(() => {
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
+    else delete globalThis.navigator
+  })
+
+  let producerOptions
+  const producer = {
+    id: 'camera-producer',
+    closed: false,
+    close() { this.closed = true },
+    on() {}
+  }
+  const transport = { produce: async (options) => { producerOptions = options; return producer } }
+  const streams = new Map()
+  const messages = []
+  const cameraShare = useDriveCameraShare({
+    getChannelId: () => 'drive',
+    isDriveChannel: () => true,
+    getSendTransport: () => transport,
+    getDevice: () => ({ canProduce: () => true }),
+    waitForSendTransport: async () => transport,
+    getUserId: () => 'driver',
+    setUserStream: (userId, userStream) => streams.set(userId, userStream),
+    deleteUserStream: (userId) => streams.delete(userId),
+    send: (type, payload) => messages.push({ type, payload })
+  })
+
+  await cameraShare.start()
+  assert.equal(videoTrack.contentHint, 'motion')
+  assert.equal(requestedConstraints.video.facingMode.ideal, 'environment')
+  assert.equal(producerOptions.track, videoTrack)
+  assert.equal(producerOptions.appData.source, 'camera')
+  assert.equal(streams.get('driver'), stream)
+  assert.equal(cameraShare.producer.value, producer)
+
+  cameraShare.stop()
+  assert.equal(producer.closed, true)
+  assert.equal(stoppedTracks, 1)
+  assert.equal(streams.has('driver'), false)
+  assert.deepEqual(messages, [{ type: 'close_producer', payload: { channel_id: 'drive', producer_id: 'camera-producer' } }])
+})
+
+test('Drive camera permission results arriving after leave are discarded', async (context) => {
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  let resolveCapture
+  let stoppedTracks = 0
+  let produceCalls = 0
+  const videoTrack = { contentHint: '', onended: null, stop: () => { stoppedTracks++ } }
+  const stream = { getVideoTracks: () => [videoTrack], getTracks: () => [videoTrack] }
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { mediaDevices: { getUserMedia: () => new Promise((resolve) => { resolveCapture = resolve }) } }
+  })
+  context.after(() => {
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
+    else delete globalThis.navigator
+  })
+
+  const transport = { produce: async () => { produceCalls++; return { id: 'stale-camera', close() {}, on() {} } } }
+  const cameraShare = useDriveCameraShare({
+    getChannelId: () => 'drive',
+    isDriveChannel: () => true,
+    getSendTransport: () => transport,
+    getDevice: () => ({ canProduce: () => true }),
+    waitForSendTransport: async () => transport,
+    getUserId: () => 'driver',
+    setUserStream: () => {},
+    deleteUserStream: () => {},
+    send: () => {}
+  })
+
+  const starting = cameraShare.start()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  cameraShare.cleanup(false)
+  resolveCapture(stream)
+  await starting
+
+  assert.equal(produceCalls, 0)
+  assert.equal(stoppedTracks, 1)
+  assert.equal(cameraShare.starting.value, false)
 })
 
 test('phone layout follows modern and legacy media changes and cleans up on unmount', (context) => {
