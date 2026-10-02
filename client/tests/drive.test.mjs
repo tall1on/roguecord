@@ -2,17 +2,19 @@ import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import { createServer } from 'vite'
 import { createPinia, defineStore, disposePinia, setActivePinia } from 'pinia'
-import { ref } from 'vue'
+import { effectScope, ref } from 'vue'
 
 let server
 let useDriveStore
 let getGpsSpeed
 let getDriveMapCoordinates
 let searchDriveDestinations
+let usePhoneLayout
 before(async () => {
   server = await createServer({ configFile: false, server: { middlewareMode: true }, appType: 'custom' })
   ;({ useDriveStore, getGpsSpeed } = await server.ssrLoadModule('/src/stores/drive.ts'))
   ;({ getDriveMapCoordinates, searchDriveDestinations } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
+  ;({ usePhoneLayout } = await server.ssrLoadModule('/src/composables/usePhoneLayout.ts'))
 })
 after(async () => server?.close())
 
@@ -312,4 +314,44 @@ test('selected targets survive navigation and GPS disconnects without being pers
   chat.isConnected = false
   assert.deepEqual(drive.destinations.get('server:trip'), destination)
   assert.equal(drive.destinations.has('other-server:trip'), false)
+})
+
+test('phone layout follows modern and legacy media changes and cleans up on unmount', (context) => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  let listener
+  let removed = false
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { matchMedia: (query) => {
+    assert.match(query, /pointer: coarse/)
+    return { matches: true,
+      addEventListener: (event, handler) => { assert.equal(event, 'change'); listener = handler },
+      removeEventListener: (event, handler) => { assert.equal(event, 'change'); assert.equal(handler, listener); removed = true }
+    }
+  } } })
+  const scope = effectScope()
+  context.after(() => {
+    scope.stop()
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+    else delete globalThis.window
+  })
+  const isPhone = scope.run(usePhoneLayout)
+  assert.equal(isPhone.value, true)
+  listener({ matches: false })
+  assert.equal(isPhone.value, false)
+  listener({ matches: true })
+  assert.equal(isPhone.value, true)
+  scope.stop()
+  assert.equal(removed, true)
+  removed = false
+  window.matchMedia = () => ({ matches: false,
+    addListener: (handler) => { listener = handler },
+    removeListener: (handler) => { assert.equal(handler, listener); removed = true }
+  })
+  const legacyScope = effectScope()
+  context.after(() => legacyScope.stop())
+  const legacyPhone = legacyScope.run(usePhoneLayout)
+  assert.equal(legacyPhone.value, false)
+  listener({ matches: true })
+  assert.equal(legacyPhone.value, true)
+  legacyScope.stop()
+  assert.equal(removed, true)
 })
