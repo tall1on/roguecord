@@ -110,6 +110,14 @@ import {
   type ParsedUserAvatarDataUrl
 } from '../storage/userAvatarStorage';
 import {
+  buildDriverAvatarClientUrl,
+  cleanupStaleS3DriverAvatars,
+  cleanupDriverAvatarReference,
+  parseDriverAvatarDataUrl,
+  storeDriverAvatar,
+  type ParsedDriverAvatarDataUrl
+} from '../storage/driverAvatarStorage';
+import {
   ADMIN_ROLE_KEY,
   ALL_USERS_ROLE_KEY,
   canGrantPermissions,
@@ -141,6 +149,7 @@ const filesRootDir = path.join(dataDir, 'files');
 const MAX_FOLDER_FILE_SIZE_BYTES = MAX_UPLOAD_FILE_SIZE_BYTES;
 const MAX_SERVER_ICON_SIZE_BYTES = 2 * 1024 * 1024;
 const MAX_USER_AVATAR_SIZE_BYTES = 10 * 1024 * 1024;
+const MAX_DRIVER_AVATAR_SIZE_BYTES = 10 * 1024 * 1024;
 const BLOCKED_FOLDER_UPLOAD_EXTENSIONS = new Set([
   'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx',
   'html', 'htm', 'php', 'phtml',
@@ -628,7 +637,16 @@ const getResolvedUser = async (userId: string) => {
     avatarMimeType: user.avatar_mime_type,
     persistedS3Config
   });
-  const resolvedUser = { ...user, avatar_url };
+  const driver_avatar_url = await buildDriverAvatarClientUrl({
+    userId: user.id,
+    driverAvatarUrl: user.driver_avatar_url,
+    driverAvatarStorageProvider: user.driver_avatar_storage_provider,
+    driverAvatarStorageKey: user.driver_avatar_storage_key,
+    driverAvatarStorageName: user.driver_avatar_storage_name,
+    driverAvatarMimeType: user.driver_avatar_mime_type,
+    persistedS3Config
+  });
+  const resolvedUser = { ...user, avatar_url, driver_avatar_url };
   const serverId = await getActiveServerId();
   if (!serverId) return { ...resolvedUser, role_ids: [], roles: [] };
   return hydrateUserWithServerRoles(serverId, resolvedUser as any);
@@ -691,6 +709,66 @@ const persistUserAvatar = async (input: {
     avatar_storage_provider: stored.storageProvider,
     avatar_storage_key: stored.storageKey,
     avatar_storage_name: stored.storageName
+  };
+};
+
+const persistDriverAvatar = async (input: {
+  userId: string;
+  parsedAvatar: ParsedDriverAvatarDataUrl | null;
+  existingUser: {
+    driver_avatar_url: string | null;
+    driver_avatar_storage_provider: 'data_dir' | 's3' | null;
+    driver_avatar_storage_key: string | null;
+    driver_avatar_storage_name: string | null;
+  };
+}) => {
+  const runtimeStorage = await getStorageRuntimeConfig();
+  const persistedS3Config = await getPersistedS3Config();
+
+  if (!input.parsedAvatar) {
+    await cleanupDriverAvatarReference({
+      userId: input.userId,
+      driverAvatarUrl: input.existingUser.driver_avatar_url,
+      driverAvatarStorageProvider: input.existingUser.driver_avatar_storage_provider,
+      driverAvatarStorageKey: input.existingUser.driver_avatar_storage_key,
+      driverAvatarStorageName: input.existingUser.driver_avatar_storage_name,
+      persistedS3Config
+    });
+    return {
+      driver_avatar_url: null,
+      driver_avatar_mime_type: null,
+      driver_avatar_storage_provider: null,
+      driver_avatar_storage_key: null,
+      driver_avatar_storage_name: null
+    };
+  }
+
+  const stored = await storeDriverAvatar({
+    userId: input.userId,
+    parsedAvatar: input.parsedAvatar,
+    storageType: runtimeStorage.storageType,
+    s3Config: runtimeStorage.s3Config
+  });
+
+  await cleanupDriverAvatarReference({
+    userId: input.userId,
+    driverAvatarUrl: input.existingUser.driver_avatar_url,
+    driverAvatarStorageProvider: input.existingUser.driver_avatar_storage_provider,
+    driverAvatarStorageKey: input.existingUser.driver_avatar_storage_key,
+    driverAvatarStorageName: input.existingUser.driver_avatar_storage_name,
+    persistedS3Config
+  });
+
+  if (stored.storageProvider === 's3' && runtimeStorage.s3Config) {
+    await cleanupStaleS3DriverAvatars({ userId: input.userId, s3Config: runtimeStorage.s3Config, activeKey: stored.storageKey });
+  }
+
+  return {
+    driver_avatar_url: null,
+    driver_avatar_mime_type: stored.mimeType,
+    driver_avatar_storage_provider: stored.storageProvider,
+    driver_avatar_storage_key: stored.storageKey,
+    driver_avatar_storage_name: stored.storageName
   };
 };
 
@@ -1968,7 +2046,7 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
   }
 };
 
-const handleAuthRequest = async (client: ClientConnection, payload: { username: string, publicKey: string, avatarUrl?: string | null, statusEmoji?: string | null, statusText?: string | null }) => {
+const handleAuthRequest = async (client: ClientConnection, payload: { username: string, publicKey: string, avatarUrl?: string | null, driverAvatarUrl?: string | null, statusEmoji?: string | null, statusText?: string | null }) => {
   const { username, publicKey } = payload;
   if (!username || !publicKey) return;
 
@@ -1989,6 +2067,27 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
     client.ws.send(JSON.stringify({
       type: 'error',
       payload: { message: 'Profile picture must be a PNG, JPG, or GIF image data URL.' }
+    }));
+    return;
+  }
+
+  let normalizedDriverAvatar: ParsedDriverAvatarDataUrl | null = null;
+  try {
+    normalizedDriverAvatar = payload.driverAvatarUrl == null || payload.driverAvatarUrl === ''
+      ? null
+      : parseDriverAvatarDataUrl(payload.driverAvatarUrl, MAX_DRIVER_AVATAR_SIZE_BYTES);
+  } catch (error) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message: error instanceof Error ? error.message : 'Invalid driver avatar.' }
+    }));
+    return;
+  }
+
+  if (payload.driverAvatarUrl && !normalizedDriverAvatar) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message: 'Driver avatar must be a PNG or JPG image data URL.' }
     }));
     return;
   }
@@ -2031,6 +2130,24 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
           avatar_storage_key: null,
           avatar_storage_name: null
         };
+    const driverAvatarFields = normalizedDriverAvatar
+      ? await persistDriverAvatar({
+          userId: newUserId,
+          parsedAvatar: normalizedDriverAvatar,
+          existingUser: {
+            driver_avatar_url: null,
+            driver_avatar_storage_provider: null,
+            driver_avatar_storage_key: null,
+            driver_avatar_storage_name: null
+          }
+        })
+      : {
+          driver_avatar_url: null,
+          driver_avatar_mime_type: null,
+          driver_avatar_storage_provider: null,
+          driver_avatar_storage_key: null,
+          driver_avatar_storage_name: null
+        };
     user = await createUser(
       username,
       publicKey,
@@ -2041,17 +2158,19 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
       avatarFields.avatar_storage_name,
       nextStatusEmoji ?? null,
       nextStatusText ?? null,
-      newUserId
+      newUserId,
+      driverAvatarFields
     );
     isNewUser = true;
   } else {
     const nextUsername = sanitizeUsernameForProfile(username);
     const shouldUpdateUsername = Boolean(nextUsername && nextUsername !== user.username);
     const shouldUpdateAvatar = payload.avatarUrl !== undefined;
+    const shouldUpdateDriverAvatar = payload.driverAvatarUrl !== undefined;
     const shouldUpdateStatusEmoji = payload.statusEmoji !== undefined && (user.status_emoji || null) !== (nextStatusEmoji ?? null);
     const shouldUpdateStatusText = payload.statusText !== undefined && (user.status_text || null) !== (nextStatusText ?? null);
 
-    if (shouldUpdateUsername || shouldUpdateAvatar || shouldUpdateStatusEmoji || shouldUpdateStatusText) {
+    if (shouldUpdateUsername || shouldUpdateAvatar || shouldUpdateDriverAvatar || shouldUpdateStatusEmoji || shouldUpdateStatusText) {
       const avatarFields = shouldUpdateAvatar
         ? await persistUserAvatar({
             userId: user.id,
@@ -2059,10 +2178,18 @@ const handleAuthRequest = async (client: ClientConnection, payload: { username: 
             existingUser: user
           })
         : {};
+      const driverAvatarFields = shouldUpdateDriverAvatar
+        ? await persistDriverAvatar({
+            userId: user.id,
+            parsedAvatar: normalizedDriverAvatar ?? null,
+            existingUser: user
+          })
+        : {};
       await updateUserProfile({
         id: user.id,
         ...(shouldUpdateUsername ? { username: nextUsername! } : {}),
         ...(shouldUpdateAvatar ? avatarFields : {}),
+        ...(shouldUpdateDriverAvatar ? driverAvatarFields : {}),
         ...(shouldUpdateStatusEmoji ? { status_emoji: nextStatusEmoji ?? null } : {}),
         ...(shouldUpdateStatusText ? { status_text: nextStatusText ?? null } : {})
       });
@@ -2176,6 +2303,15 @@ const handleAuthResponse = async (client: ClientConnection, payload: { signature
               avatarStorageName: member.avatar_storage_name,
               avatarMimeType: member.avatar_mime_type,
               persistedS3Config
+            }),
+            driver_avatar_url: await buildDriverAvatarClientUrl({
+              userId: member.id,
+              driverAvatarUrl: member.driver_avatar_url,
+              driverAvatarStorageProvider: member.driver_avatar_storage_provider,
+              driverAvatarStorageKey: member.driver_avatar_storage_key,
+              driverAvatarStorageName: member.driver_avatar_storage_name,
+              driverAvatarMimeType: member.driver_avatar_mime_type,
+              persistedS3Config
             })
           }))
         );
@@ -2271,20 +2407,15 @@ const handleGetChannels = async (client: ClientConnection) => {
     for (const [userId, peer] of room.peers.entries()) {
       const user = await getUserById(userId);
       if (user) {
-        const resolvedAvatarUrl = (await getResolvedUser(user.id))?.avatar_url || user.avatar_url;
-
-        console.info('[WS DEBUG][voice_participants_list] voice participant avatar resolved', {
-          channelId,
-          userId: user.id,
-          avatarStorageProvider: user.avatar_storage_provider || null,
-          rawAvatarUrlPresent: Boolean(user.avatar_url),
-          resolvedAvatarUrlPresent: Boolean(resolvedAvatarUrl)
-        });
+        const resolvedUser = await getResolvedUser(user.id);
+        const resolvedAvatarUrl = resolvedUser?.avatar_url || user.avatar_url;
+        const resolvedDriverAvatarUrl = resolvedUser?.driver_avatar_url || user.driver_avatar_url;
 
         users.push({
           id: user.id,
           username: user.username,
           avatar_url: resolvedAvatarUrl,
+          driver_avatar_url: resolvedDriverAvatarUrl,
           isMuted: peer.isMuted,
           isDeafened: peer.isDeafened
         });
@@ -3548,7 +3679,9 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
 
   const user = await getUserById(userId);
   if (!user || client.ws.readyState !== 1) return;
-  const avatarUrl = (await getResolvedUser(user.id))?.avatar_url || user.avatar_url;
+  const resolvedJoiner = await getResolvedUser(user.id);
+  const avatarUrl = resolvedJoiner?.avatar_url || user.avatar_url;
+  const driverAvatarUrl = resolvedJoiner?.driver_avatar_url || user.driver_avatar_url;
   // Validate immediately before admission so deletion or identity changes during lookups cannot create a stale room.
   const channel = await getChannelById(channel_id);
   if (client.ws.readyState !== 1 || client.userId !== userId) return;
@@ -3597,7 +3730,7 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
     type: 'user_joined_voice',
     payload: {
       channel_id,
-      user: { id: user.id, username: user.username, avatar_url: avatarUrl, isMuted: peer.isMuted, isDeafened: peer.isDeafened }
+      user: { id: user.id, username: user.username, avatar_url: avatarUrl, driver_avatar_url: driverAvatarUrl, isMuted: peer.isMuted, isDeafened: peer.isDeafened }
     }
   });
 
@@ -3612,7 +3745,15 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
   for (const [userId, p] of room.peers.entries()) {
     const u = await getUserById(userId);
     if (u) {
-      users.push({ id: u.id, username: u.username, avatar_url: (await getResolvedUser(u.id))?.avatar_url || u.avatar_url, isMuted: p.isMuted, isDeafened: p.isDeafened });
+      const resolvedPeerUser = await getResolvedUser(u.id);
+      users.push({
+        id: u.id,
+        username: u.username,
+        avatar_url: resolvedPeerUser?.avatar_url || u.avatar_url,
+        driver_avatar_url: resolvedPeerUser?.driver_avatar_url || u.driver_avatar_url,
+        isMuted: p.isMuted,
+        isDeafened: p.isDeafened
+      });
     }
   }
 

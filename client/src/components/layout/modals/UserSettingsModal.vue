@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { Car } from 'lucide-vue-next'
 import { EmojiPicker } from 'vue3-twemoji-picker-final'
 import { useChatStore } from '../../../stores/chat'
 import { useWebRtcStore } from '../../../stores/webrtc'
@@ -8,7 +9,7 @@ type TwemojiPickerSelection = {
   i?: string
 }
 
-type SettingsSection = 'general' | 'audio' | 'connections' | 'identity' | 'server'
+type SettingsSection = 'general' | 'audio' | 'connections' | 'drive' | 'identity' | 'server'
 
 defineProps<{
   visible: boolean
@@ -37,6 +38,11 @@ const avatarPreviewUrl = ref<string | null>(chatStore.currentUser?.avatar_url ??
 const avatarPreviewLoadFailed = ref(false)
 const avatarStatus = ref<string | null>(null)
 const avatarError = ref<string | null>(null)
+const driverAvatarInput = ref<HTMLInputElement | null>(null)
+const driverAvatarPreviewUrl = ref<string | null>(chatStore.currentUser?.driver_avatar_url ?? null)
+const driverAvatarPreviewLoadFailed = ref(false)
+const driverAvatarStatus = ref<string | null>(null)
+const driverAvatarError = ref<string | null>(null)
 const statusEmojiPickerOpen = ref(false)
 const statusEmojiPickerRef = ref<HTMLElement | null>(null)
 const sharedEmojiPickerOptions = {
@@ -208,6 +214,86 @@ const handleAvatarPreviewError = () => {
   avatarPreviewLoadFailed.value = true
 }
 
+const resetDriverAvatarMessages = () => {
+  driverAvatarStatus.value = null
+  driverAvatarError.value = null
+}
+
+const promptDriverAvatarSelection = () => {
+  resetDriverAvatarMessages()
+  driverAvatarInput.value?.click()
+}
+
+const clearDriverAvatar = () => {
+  void chatStore.saveLocalDriverAvatar(null)
+  driverAvatarPreviewUrl.value = null
+  driverAvatarPreviewLoadFailed.value = false
+  driverAvatarStatus.value = 'Driver avatar will be removed when you reconnect to the server.'
+  driverAvatarError.value = null
+  if (driverAvatarInput.value) {
+    driverAvatarInput.value.value = ''
+  }
+}
+
+const handleDriverAvatarSelected = (event: Event) => {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0] ?? null
+
+  if (!file) {
+    return
+  }
+
+  const lowerType = (file.type || '').toLowerCase()
+  if (lowerType !== 'image/png' && lowerType !== 'image/jpeg') {
+    driverAvatarError.value = 'Driver avatar must be a PNG or JPG image.'
+    driverAvatarStatus.value = null
+    target.value = ''
+    return
+  }
+
+  if (file.size > 10 * 1024 * 1024) {
+    driverAvatarError.value = 'Driver avatar must be 10MB or smaller.'
+    driverAvatarStatus.value = null
+    target.value = ''
+    return
+  }
+
+  const reader = new FileReader()
+  reader.onload = () => {
+    const result = typeof reader.result === 'string' ? reader.result : null
+    if (!result) {
+      driverAvatarError.value = 'Failed to read selected driver avatar.'
+      driverAvatarStatus.value = null
+      target.value = ''
+      return
+    }
+
+    if (!/^data:image\/(png|jpeg);base64,/i.test(result)) {
+      driverAvatarError.value = 'Driver avatar must be a PNG or JPG image.'
+      driverAvatarStatus.value = null
+      target.value = ''
+      return
+    }
+
+    void chatStore.saveLocalDriverAvatar(result)
+    driverAvatarPreviewUrl.value = result
+    driverAvatarPreviewLoadFailed.value = false
+    driverAvatarStatus.value = 'Driver avatar selected. It uploads to the server the next time you connect.'
+    driverAvatarError.value = null
+    target.value = ''
+  }
+  reader.onerror = () => {
+    driverAvatarError.value = 'Failed to read selected driver avatar.'
+    driverAvatarStatus.value = null
+    target.value = ''
+  }
+  reader.readAsDataURL(file)
+}
+
+const handleDriverAvatarPreviewError = () => {
+  driverAvatarPreviewLoadFailed.value = true
+}
+
 const resetIdentityMessages = () => {
   identityStatus.value = null
   identityError.value = null
@@ -352,6 +438,11 @@ watch(() => chatStore.currentUser?.avatar_url, (value) => {
   avatarPreviewLoadFailed.value = false
 })
 
+watch(() => chatStore.currentUser?.driver_avatar_url, (value) => {
+  driverAvatarPreviewUrl.value = chatStore.getLocalDriverAvatar() ?? value ?? null
+  driverAvatarPreviewLoadFailed.value = false
+})
+
 onMounted(() => {
   document.addEventListener('pointerdown', handleDocumentPointerDown)
 })
@@ -378,6 +469,12 @@ onBeforeUnmount(() => {
           class="w-full text-left px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200" 
           :class="activeSection === 'audio' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'"
         >Audio & Voice</button>
+        
+        <button 
+          @click="emit('update:activeSection', 'drive')" 
+          class="w-full text-left px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200" 
+          :class="activeSection === 'drive' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'"
+        >Drive Together</button>
         
         <button 
           @click="emit('update:activeSection', 'connections')" 
@@ -413,6 +510,7 @@ onBeforeUnmount(() => {
             {{
               activeSection === 'general' ? 'General Settings'
               : activeSection === 'audio' ? 'Audio & Voice'
+              : activeSection === 'drive' ? 'Drive Together'
               : activeSection === 'connections' ? 'Connections'
               : activeSection === 'identity' ? 'Client Identity'
               : 'Server Tools'
@@ -422,6 +520,7 @@ onBeforeUnmount(() => {
             {{
               activeSection === 'general' ? 'Basic client behavior and profile defaults.'
               : activeSection === 'audio' ? 'Input/output devices, gain and voice cleanup.'
+              : activeSection === 'drive' ? 'Pick the car image shown for you as a driver on Drive Together maps.'
               : activeSection === 'connections' ? 'Manage your saved servers and quick connect.'
               : activeSection === 'identity' ? 'Export or replace the cryptographic identity used to authenticate this client.'
               : 'Admin and maintenance actions for active servers.'
@@ -645,6 +744,48 @@ onBeforeUnmount(() => {
                 <input type="range" min="0" max="100" step="1" :value="webrtcStore.noiseGateThreshold" @input="handleNoiseGateThresholdChange" class="w-full accent-indigo-500 h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer" />
               </div>
             </div>
+          </div>
+        </div>
+
+        <div v-else-if="activeSection === 'drive'" class="space-y-6 max-w-2xl">
+          <div class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm space-y-4">
+            <div>
+              <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">Driver Avatar</label>
+              <p class="text-sm text-zinc-500">Upload a car image (PNG or JPG up to 10MB) that is shown next to your position on Drive Together maps. GIFs are not supported. It is synced to the server the next time you connect.</p>
+            </div>
+
+            <div class="flex items-center gap-4">
+              <div class="w-20 h-20 rounded-xl overflow-hidden border border-white/10 bg-indigo-500/10 text-indigo-300 flex items-center justify-center">
+                <img
+                  v-if="driverAvatarPreviewUrl && !driverAvatarPreviewLoadFailed"
+                  :src="driverAvatarPreviewUrl"
+                  alt="Driver avatar preview"
+                  class="w-full h-full object-cover"
+                  @error="handleDriverAvatarPreviewError"
+                />
+                <Car v-else class="h-8 w-8" />
+              </div>
+
+              <div class="flex flex-wrap gap-3">
+                <button @click="promptDriverAvatarSelection" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-lg font-medium transition-colors duration-200 shadow-sm">
+                  Upload
+                </button>
+                <button @click="clearDriverAvatar" :disabled="!driverAvatarPreviewUrl" class="bg-zinc-800 hover:bg-zinc-700 text-white px-5 py-2.5 rounded-lg font-medium transition-colors duration-200 border border-white/10 disabled:opacity-50 disabled:cursor-not-allowed">
+                  Remove
+                </button>
+                <input ref="driverAvatarInput" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" class="hidden" @change="handleDriverAvatarSelected" />
+              </div>
+            </div>
+
+            <div v-if="driverAvatarStatus" class="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">
+              {{ driverAvatarStatus }}
+            </div>
+
+            <div v-if="driverAvatarError" class="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+              {{ driverAvatarError }}
+            </div>
+
+            <p class="text-xs text-zinc-500">Other drivers always see your car image. On your own screen it is hidden while the navigation close-up is active so the direction arrow stays clear.</p>
           </div>
         </div>
 

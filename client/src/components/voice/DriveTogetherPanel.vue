@@ -45,6 +45,12 @@ const driverColor = (userId: string): string => {
   return color
 }
 const selfColor = (): string => chatStore.currentUser ? driverColor(chatStore.currentUser.id) : DRIVE_SELF_COLOR
+const driverAvatarUrlFor = (userId: string): string | null => {
+  if (userId === chatStore.currentUser?.id) {
+    return chatStore.getLocalDriverAvatar() ?? chatStore.currentUser?.driver_avatar_url ?? null
+  }
+  return participants.value.find((participant) => participant.id === userId)?.driver_avatar_url ?? null
+}
 const rankedParticipants = computed(() => rankDriveParticipants(participants.value,
   isJoined.value ? driveStore.locations : new Map(), destination.value))
 const podiumClasses = [
@@ -93,11 +99,38 @@ let leaflet: typeof import('leaflet') | null = null
 let map: LeafletMap | null = null
 let resizeObserver: ResizeObserver | null = null
 let disposed = false
-const markers = new Map<string, CircleMarker>()
+const markers = new Map<string, LeafletMarker>()
+const driverMarkerSignatures = new Map<string, string>()
 const destinationLines = new Map<string, Polyline>()
 const linePositions = new Map<string, [number, number][]>()
 let lastMapCoordinates: [number, number][] | null = null
 let destinationMarker: CircleMarker | null = null
+const driverAvatarSignature = (avatarUrl: string | null): string => {
+  if (!avatarUrl) return ''
+  return `${avatarUrl.length}:${avatarUrl.slice(0, 24)}:${avatarUrl.slice(-24)}`
+}
+const buildDriverIcon = (color: string, avatarUrl: string | null, speaking: boolean) => {
+  const iconSize: [number, number] = avatarUrl ? [34, 34] : [18, 18]
+  const element = document.createElement('span')
+  if (avatarUrl) {
+    element.className = `drive-avatar-marker${speaking ? ' drive-marker-speaking' : ''}`
+    element.style.borderColor = color
+    const image = document.createElement('img')
+    image.src = avatarUrl
+    image.alt = ''
+    image.draggable = false
+    element.appendChild(image)
+  } else {
+    element.className = `drive-dot-marker${speaking ? ' drive-marker-speaking' : ''}`
+    element.style.backgroundColor = color
+  }
+  return leaflet!.divIcon({
+    className: 'drive-driver-icon',
+    html: element,
+    iconSize,
+    iconAnchor: [iconSize[0] / 2, iconSize[1] / 2]
+  })
+}
 const NAV_ZOOM = 17
 const BEARING_EASING = 0.18
 const NAV_LOOK_AHEAD_MIN_METERS = 25
@@ -274,6 +307,7 @@ const syncMap = (forceFit = false) => {
     if (!userIds.has(userId)) {
       marker.remove()
       markers.delete(userId)
+      driverMarkerSignatures.delete(userId)
     }
   }
   for (const [userId, line] of destinationLines) {
@@ -321,14 +355,20 @@ const syncMap = (forceFit = false) => {
       }
       line.setStyle({ color, opacity: isSpeaking ? 1 : 0.85 }).bringToBack()
     }
+    const avatarUrl = isSelf && navMode.value ? null : driverAvatarUrlFor(point.user_id)
+    const signature = `${color}|${isSpeaking ? 1 : 0}|${driverAvatarSignature(avatarUrl)}`
     let marker = markers.get(point.user_id)
     if (!marker) {
-      marker = leaflet.circleMarker(latLng, { radius: 9, weight: 3, color: '#ffffff', fillOpacity: 1 }).addTo(map)
+      marker = leaflet.marker(latLng, { icon: buildDriverIcon(color, avatarUrl, isSpeaking), keyboard: false }).addTo(map)
       markers.set(point.user_id, marker)
+      driverMarkerSignatures.set(point.user_id, signature)
+    } else {
+      marker.setLatLng(latLng)
+      if (driverMarkerSignatures.get(point.user_id) !== signature) {
+        marker.setIcon(buildDriverIcon(color, avatarUrl, isSpeaking))
+        driverMarkerSignatures.set(point.user_id, signature)
+      }
     }
-    marker.setLatLng(latLng).setStyle({ fillColor: color, weight: isSpeaking ? 5 : 3 })
-    const markerElement = marker.getElement()
-    if (markerElement) markerElement.classList.toggle('drive-marker-speaking', isSpeaking)
     const label = document.createElement('span')
     const route = routes.value.get(point.user_id)
     const routeSummary = route ? ` - ${(route.distance_m / 1000).toFixed(1)} km, ${Math.ceil(route.duration_s / 60)} min to destination` : ''
@@ -370,7 +410,7 @@ const syncMap = (forceFit = false) => {
   lastMapCoordinates = coordinates
 }
 
-watch([visibleLocations, destination, routes, participants, () => [...webrtcStore.speakingUserIds], navMode], () => syncMap(), { deep: true })
+watch([visibleLocations, destination, routes, participants, () => [...webrtcStore.speakingUserIds], navMode, () => chatStore.getLocalDriverAvatar(), () => chatStore.currentUser?.driver_avatar_url], () => syncMap(), { deep: true })
 onMounted(async () => {
   try {
     const [module] = await Promise.all([import('leaflet'), import('leaflet/dist/leaflet.css')])
@@ -413,6 +453,7 @@ onBeforeUnmount(() => {
   map?.remove()
   map = null
   markers.clear()
+  driverMarkerSignatures.clear()
   destinationLines.clear()
   linePositions.clear()
   driverColors.clear()
@@ -521,6 +562,36 @@ onBeforeUnmount(() => {
 .drive-map :deep(.drive-direction-icon) {
   background: transparent;
   border: 0;
+}
+.drive-map :deep(.drive-driver-icon) {
+  background: transparent;
+  border: 0;
+}
+.drive-map :deep(.drive-dot-marker) {
+  display: block;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  border: 3px solid #ffffff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 55%);
+}
+.drive-map :deep(.drive-avatar-marker) {
+  display: block;
+  box-sizing: border-box;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  overflow: hidden;
+  border: 2px solid #ffffff;
+  background: #18181b;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 60%);
+}
+.drive-map :deep(.drive-avatar-marker img) {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 .drive-map :deep(.drive-marker-speaking) {
   filter: drop-shadow(0 0 5px #22c55e) drop-shadow(0 0 3px #22c55e);

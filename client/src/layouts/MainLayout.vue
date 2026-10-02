@@ -28,7 +28,7 @@ type ServerSettingsNavGroup = {
   items: Array<{ id: string; label: string }>
 }
 
-type SettingsSection = 'general' | 'audio' | 'connections' | 'server'
+type SettingsSection = 'general' | 'audio' | 'connections' | 'drive' | 'identity' | 'server'
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()

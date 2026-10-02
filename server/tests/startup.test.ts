@@ -33,7 +33,8 @@ test('startup waits for schema before listening and never logs GPS payloads', as
     './rssPolling': {},
     './models': {},
     './storage/s3Storage': {},
-    './storage/userAvatarStorage': {}
+    './storage/userAvatarStorage': {},
+    './storage/driverAvatarStorage': {}
   };
   vm.runInNewContext(compiled, {
     exports: {},

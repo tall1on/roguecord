@@ -2,6 +2,7 @@ import { db, normalizeStoredServerRolePositions } from '../db';
 import crypto from 'node:crypto';
 import { type MessageWithUserAndEmbeds, withMessageEmbeds } from '../messages/embeds';
 import { buildUserAvatarClientUrl } from '../storage/userAvatarStorage';
+import { buildDriverAvatarClientUrl } from '../storage/driverAvatarStorage';
 import type { S3StorageConfig } from '../storage/s3Storage';
 import {
   ADMIN_ROLE_KEY,
@@ -706,6 +707,11 @@ export interface User {
   avatar_storage_provider: 'data_dir' | 's3' | null;
   avatar_storage_key: string | null;
   avatar_storage_name: string | null;
+  driver_avatar_url: string | null;
+  driver_avatar_mime_type: string | null;
+  driver_avatar_storage_provider: 'data_dir' | 's3' | null;
+  driver_avatar_storage_key: string | null;
+  driver_avatar_storage_name: string | null;
   status_emoji: string | null;
   status_text: string | null;
   last_ip: string | null;
@@ -725,9 +731,20 @@ const resolveUserAvatarForClient = async (user: User, persistedS3Config: S3Stora
     persistedS3Config
   });
 
+  const driver_avatar_url = await buildDriverAvatarClientUrl({
+    userId: user.id,
+    driverAvatarUrl: user.driver_avatar_url,
+    driverAvatarStorageProvider: user.driver_avatar_storage_provider,
+    driverAvatarStorageKey: user.driver_avatar_storage_key,
+    driverAvatarStorageName: user.driver_avatar_storage_name,
+    driverAvatarMimeType: user.driver_avatar_mime_type,
+    persistedS3Config
+  });
+
   return {
     ...user,
-    avatar_url
+    avatar_url,
+    driver_avatar_url
   };
 };
 
@@ -738,7 +755,11 @@ const buildUserAvatarClientUrlCacheKey = (user: User): string => {
   const storageKey = user.avatar_storage_key || '';
   const storageName = user.avatar_storage_name || '';
   const avatarUrl = user.avatar_url || '';
-  return `${user.id}|${storageProvider}|${storageKey}|${storageName}|${avatarUrl}`;
+  const driverStorageProvider = user.driver_avatar_storage_provider || 'none';
+  const driverStorageKey = user.driver_avatar_storage_key || '';
+  const driverStorageName = user.driver_avatar_storage_name || '';
+  const driverAvatarUrl = user.driver_avatar_url || '';
+  return `${user.id}|${storageProvider}|${storageKey}|${storageName}|${avatarUrl}|${driverStorageProvider}|${driverStorageKey}|${driverStorageName}|${driverAvatarUrl}`;
 };
 
 const resolveUserAvatarForClientWithCache = async (
@@ -759,22 +780,10 @@ const resolveUserAvatarForClientWithCache = async (
     };
   }
 
-  const avatar_url = await buildUserAvatarClientUrl({
-    userId: user.id,
-    avatarUrl: user.avatar_url,
-    avatarStorageProvider: user.avatar_storage_provider,
-    avatarStorageKey: user.avatar_storage_key,
-    avatarStorageName: user.avatar_storage_name,
-    avatarMimeType: user.avatar_mime_type,
-    persistedS3Config
-  });
+  const resolved = await resolveUserAvatarForClient(user, persistedS3Config);
+  avatarUrlCache.set(cacheKey, resolved.avatar_url);
 
-  avatarUrlCache.set(cacheKey, avatar_url);
-
-  return {
-    ...user,
-    avatar_url
-  };
+  return resolved;
 };
 
 export const createUser = async (
@@ -787,11 +796,34 @@ export const createUser = async (
   avatar_storage_name: string | null = null,
   status_emoji: string | null = null,
   status_text: string | null = null,
-  id: string = crypto.randomUUID()
+  id: string = crypto.randomUUID(),
+  driverAvatar: {
+    driver_avatar_url: string | null;
+    driver_avatar_mime_type: string | null;
+    driver_avatar_storage_provider: 'data_dir' | 's3' | null;
+    driver_avatar_storage_key: string | null;
+    driver_avatar_storage_name: string | null;
+  } | null = null
 ): Promise<User> => {
   await dbRun(
-    'INSERT INTO users (id, username, public_key, avatar_url, avatar_mime_type, avatar_storage_provider, avatar_storage_key, avatar_storage_name, status_emoji, status_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [id, username, public_key, avatar_url, avatar_mime_type, avatar_storage_provider, avatar_storage_key, avatar_storage_name, status_emoji, status_text]
+    'INSERT INTO users (id, username, public_key, avatar_url, avatar_mime_type, avatar_storage_provider, avatar_storage_key, avatar_storage_name, status_emoji, status_text, driver_avatar_url, driver_avatar_mime_type, driver_avatar_storage_provider, driver_avatar_storage_key, driver_avatar_storage_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [
+      id,
+      username,
+      public_key,
+      avatar_url,
+      avatar_mime_type,
+      avatar_storage_provider,
+      avatar_storage_key,
+      avatar_storage_name,
+      status_emoji,
+      status_text,
+      driverAvatar?.driver_avatar_url ?? null,
+      driverAvatar?.driver_avatar_mime_type ?? null,
+      driverAvatar?.driver_avatar_storage_provider ?? null,
+      driverAvatar?.driver_avatar_storage_key ?? null,
+      driverAvatar?.driver_avatar_storage_name ?? null
+    ]
   );
   return (await dbGet<User>('SELECT * FROM users WHERE id = ?', [id]))!;
 };
@@ -896,6 +928,11 @@ export const updateUserProfile = async (input: {
   avatar_storage_provider?: 'data_dir' | 's3' | null;
   avatar_storage_key?: string | null;
   avatar_storage_name?: string | null;
+  driver_avatar_url?: string | null;
+  driver_avatar_mime_type?: string | null;
+  driver_avatar_storage_provider?: 'data_dir' | 's3' | null;
+  driver_avatar_storage_key?: string | null;
+  driver_avatar_storage_name?: string | null;
   status_emoji?: string | null;
   status_text?: string | null;
 }): Promise<void> => {
@@ -930,6 +967,31 @@ export const updateUserProfile = async (input: {
   if (Object.prototype.hasOwnProperty.call(input, 'avatar_storage_name')) {
     assignments.push('avatar_storage_name = ?');
     params.push(input.avatar_storage_name ?? null);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'driver_avatar_url')) {
+    assignments.push('driver_avatar_url = ?');
+    params.push(input.driver_avatar_url ?? null);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'driver_avatar_mime_type')) {
+    assignments.push('driver_avatar_mime_type = ?');
+    params.push(input.driver_avatar_mime_type ?? null);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'driver_avatar_storage_provider')) {
+    assignments.push('driver_avatar_storage_provider = ?');
+    params.push(input.driver_avatar_storage_provider ?? null);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'driver_avatar_storage_key')) {
+    assignments.push('driver_avatar_storage_key = ?');
+    params.push(input.driver_avatar_storage_key ?? null);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'driver_avatar_storage_name')) {
+    assignments.push('driver_avatar_storage_name = ?');
+    params.push(input.driver_avatar_storage_name ?? null);
   }
 
   if (Object.prototype.hasOwnProperty.call(input, 'status_emoji')) {
@@ -1541,6 +1603,11 @@ export const getMessageReplyReferences = async (
       avatar_storage_provider: row.reply_avatar_storage_provider === 's3' || row.reply_avatar_storage_provider === 'data_dir' ? row.reply_avatar_storage_provider : null,
       avatar_storage_key: row.reply_avatar_storage_key ?? null,
       avatar_storage_name: row.reply_avatar_storage_name ?? null,
+      driver_avatar_url: null,
+      driver_avatar_mime_type: null,
+      driver_avatar_storage_provider: null,
+      driver_avatar_storage_key: null,
+      driver_avatar_storage_name: null,
       status_emoji: null,
       status_text: null,
       public_key: row.reply_public_key,

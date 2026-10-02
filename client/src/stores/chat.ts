@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { useWebRtcStore } from './webrtc';
-import { readStoredAvatar, removeLegacyStoredAvatar, saveStoredAvatar } from '../utils/avatarStorage';
+import { readStoredAvatar, readStoredDriverAvatar, removeLegacyStoredAvatar, saveStoredAvatar, saveStoredDriverAvatar } from '../utils/avatarStorage';
 import { cacheServerIcon, getCachedServerIcon, removeCachedServerIcon } from '../utils/serverIconCache';
 import {
   ADMIN_ROLE_KEY,
@@ -32,6 +32,8 @@ export interface User {
   username: string;
   avatar_url: string | null;
   avatar_mime_type?: string | null;
+  driver_avatar_url?: string | null;
+  driver_avatar_mime_type?: string | null;
   status_emoji?: string | null;
   status_text?: string | null;
   status?: PresenceStatus;
@@ -298,7 +300,7 @@ const resolveUserAvatarUrl = (
   }
 
   const normalizedPath = url.startsWith('/') ? url : `/${url}`;
-  if (!/^\/(user-avatars|files\/user-avatars)\//i.test(normalizedPath)) {
+  if (!/^\/(user-avatars|driver-avatars|files\/user-avatars|files\/driver-avatars)\//i.test(normalizedPath)) {
     return normalizedPath;
   }
 
@@ -410,6 +412,7 @@ export const useChatStore = defineStore('chat', () => {
   const hasReceivedInitialMemberList = ref(false);
   const currentUser = ref<User | null>(null);
   const localAvatar = ref<string | null>(null);
+  const localDriverAvatar = ref<string | null>(null);
   const currentUserRole = ref<string>('user');
   const server = ref<Server | null>(null);
   const serverRoles = ref<ServerRole[]>([]);
@@ -683,6 +686,8 @@ export const useChatStore = defineStore('chat', () => {
       ...user,
       avatar_url: resolveUserAvatarUrl(user?.avatar_url, activeConnectionId.value, savedConnections.value),
       avatar_mime_type: user?.avatar_mime_type || null,
+      driver_avatar_url: resolveUserAvatarUrl(user?.driver_avatar_url, activeConnectionId.value, savedConnections.value),
+      driver_avatar_mime_type: user?.driver_avatar_mime_type || null,
       status_emoji: statusEmoji,
       status_text: statusText,
       status: getNormalizedUserStatus(user),
@@ -1084,6 +1089,29 @@ export const useChatStore = defineStore('chat', () => {
 
     return /^data:image\/(png|jpeg|gif);base64,/i.test(localAvatar.value)
       ? localAvatar.value
+      : null;
+  };
+
+  const initializeStoredDriverAvatar = async () => {
+    const storedDriverAvatar = await readStoredDriverAvatar();
+    localDriverAvatar.value = storedDriverAvatar;
+    return storedDriverAvatar;
+  };
+
+  const saveLocalDriverAvatar = async (driverAvatarUrl: string | null) => {
+    localDriverAvatar.value = driverAvatarUrl;
+    await saveStoredDriverAvatar(driverAvatarUrl);
+  };
+
+  const getLocalDriverAvatar = () => localDriverAvatar.value;
+
+  const getAuthDriverAvatarDataUrl = () => {
+    if (typeof localDriverAvatar.value !== 'string') {
+      return null;
+    }
+
+    return /^data:image\/(png|jpeg);base64,/i.test(localDriverAvatar.value)
+      ? localDriverAvatar.value
       : null;
   };
 
@@ -2492,11 +2520,16 @@ export const useChatStore = defineStore('chat', () => {
       if (localAvatar.value === null) {
         await initializeStoredAvatar();
       }
+      if (localDriverAvatar.value === null) {
+        await initializeStoredDriverAvatar();
+      }
       const authAvatarUrl = getAuthAvatarDataUrl();
+      const authDriverAvatarUrl = getAuthDriverAvatarDataUrl();
       send('auth:request', {
         username,
         publicKey: publicKeyBase64,
         avatarUrl: authAvatarUrl,
+        driverAvatarUrl: authDriverAvatarUrl,
         statusEmoji: localStatusEmoji.value,
         statusText: localStatusText.value
       });
@@ -3075,6 +3108,7 @@ export const useChatStore = defineStore('chat', () => {
   });
 
   void initializeStoredAvatar();
+  void initializeStoredDriverAvatar();
 
   return {
     isConnected,
@@ -3116,6 +3150,8 @@ export const useChatStore = defineStore('chat', () => {
     saveStatusPreference,
     saveLocalAvatar,
     getLocalAvatar,
+    saveLocalDriverAvatar,
+    getLocalDriverAvatar,
     getStoredIdentityExport,
     importStoredIdentity,
     addSavedConnection,
