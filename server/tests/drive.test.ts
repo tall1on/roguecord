@@ -23,17 +23,18 @@ test('GPS protocol, identity, privacy, validation, rate limiting and cleanup', (
   drive.update('drive', owner.client, { latitude: 1, longitude: 2, accuracy: 3, user_id: 'spoof', updated_at: 0 }, 10000);
   assert.deepEqual(participant.messages.at(-1), {
     type: 'drive_location_updated',
-    payload: { channel_id: 'drive', user_id: 'owner', location: { latitude: 1, longitude: 2, accuracy: 3, updated_at: 10000 } }
+    payload: { channel_id: 'drive', user_id: 'owner', location: { latitude: 1, longitude: 2, accuracy: 3, speed: null, updated_at: 10000 } }
   });
   assert.equal(otherTab.messages.length, 0);
   drive.snapshot('drive', participant.client);
-  assert.deepEqual(participant.messages.at(-1), {
-    type: 'drive_locations', payload: { channel_id: 'drive', locations: [{ user_id: 'owner', latitude: 1, longitude: 2, accuracy: 3, updated_at: 10000 }] }
-  });
+  assert.equal(participant.messages.at(-1).type, 'drive_locations');
+  assert.equal(typeof participant.messages.at(-1).payload.generated_at, 'number');
+  assert.deepEqual(participant.messages.at(-1).payload.locations, [{ user_id: 'owner', latitude: 1, longitude: 2, accuracy: 3, speed: null, updated_at: 10000 }]);
   for (const location of [undefined, [], {}, { latitude: '1', longitude: 2, accuracy: 3 },
     { latitude: NaN, longitude: 2, accuracy: 3 }, { latitude: 91, longitude: 2, accuracy: 3 },
     { latitude: 1, longitude: Infinity, accuracy: 3 }, { latitude: 1, longitude: 181, accuracy: 3 },
-    { latitude: 1, longitude: 2, accuracy: -1 }, { latitude: 1, longitude: 2, accuracy: Infinity }]) {
+    { latitude: 1, longitude: 2, accuracy: -1 }, { latitude: 1, longitude: 2, accuracy: Infinity },
+    ...[-1, Infinity, NaN, 'fast', 401].map((speed) => ({ latitude: 1, longitude: 2, accuracy: 3, speed }))]) {
     assert.throws(() => drive.update('drive', owner.client, location, 12000));
   }
   assert.throws(() => drive.update('drive', owner.client, { latitude: 1, longitude: 2, accuracy: 3 }, 10500), /rate limit/);
@@ -49,6 +50,22 @@ test('GPS protocol, identity, privacy, validation, rate limiting and cleanup', (
   assert.throws(() => drive.update('drive', owner.client, null));
   drive.removeChannel('drive');
   assert.equal(drive.hasChannel('drive'), false);
+});
+
+test('GPS relays speed in meters per second and snapshots retain it', () => {
+  const drive = new DriveParticipants();
+  const owner = makeClient('owner');
+  const viewer = makeClient('viewer');
+  drive.admit('trip', owner.client);
+  drive.admit('trip', viewer.client);
+  drive.update('trip', owner.client, { latitude: 1, longitude: 2, accuracy: 3, speed: 25 }, 10000);
+  assert.equal(viewer.messages.at(-1).payload.location.speed, 25);
+  drive.snapshot('trip', viewer.client);
+  assert.equal(viewer.messages.at(-1).payload.locations[0].speed, 25);
+  drive.update('trip', owner.client, { latitude: 1, longitude: 2, accuracy: 3, speed: 0 }, 10900);
+  assert.equal(viewer.messages.at(-1).payload.location.speed, 0);
+  drive.update('trip', owner.client, { latitude: 1, longitude: 2, accuracy: 3, speed: null }, 12000);
+  assert.equal(viewer.messages.at(-1).payload.location.speed, null);
 });
 
 test('drive signaling rejects unrelated sockets and screen media before produce', async () => {

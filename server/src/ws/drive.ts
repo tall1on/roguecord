@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws';
 import type { ClientConnection } from './connectionManager';
 
-type Location = { latitude: number; longitude: number; accuracy: number; updated_at: number };
+type Location = { latitude: number; longitude: number; accuracy: number; speed: number | null; updated_at: number };
 type Participant = { client: ClientConnection; location: Location | null; lastUpdate: number | null };
 
 export class DriveParticipants {
@@ -30,6 +30,7 @@ export class DriveParticipants {
       type: 'drive_locations',
       payload: {
         channel_id: channelId,
+        generated_at: Date.now(),
         locations: Array.from(this.channels.get(channelId)!.entries())
           .flatMap(([user_id, participant]) => participant.location ? [{ user_id, ...participant.location }] : [])
       }
@@ -48,15 +49,17 @@ export class DriveParticipants {
       return;
     }
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid drive location');
-    const { latitude, longitude, accuracy } = value as Record<string, unknown>;
+    const { latitude, longitude, accuracy, speed } = value as Record<string, unknown>;
     if (typeof latitude !== 'number' || !Number.isFinite(latitude) || latitude < -90 || latitude > 90
       || typeof longitude !== 'number' || !Number.isFinite(longitude) || longitude < -180 || longitude > 180
-      || typeof accuracy !== 'number' || !Number.isFinite(accuracy) || accuracy < 0 || accuracy > 40075017) {
+      || typeof accuracy !== 'number' || !Number.isFinite(accuracy) || accuracy < 0 || accuracy > 40075017
+      || (speed != null && (typeof speed !== 'number' || !Number.isFinite(speed) || speed < 0 || speed > 400))) {
       throw new Error('Invalid drive location');
     }
-    if (participant.lastUpdate !== null && now - participant.lastUpdate < 1000) throw new Error('Drive location rate limit exceeded');
+    // Allow a little arrival jitter for clients publishing one GPS fix per second.
+    if (participant.lastUpdate !== null && now - participant.lastUpdate < 750) throw new Error('Drive location rate limit exceeded');
     participant.lastUpdate = now;
-    participant.location = { latitude, longitude, accuracy, updated_at: now };
+    participant.location = { latitude, longitude, accuracy, speed: (speed as number | null | undefined) ?? null, updated_at: now };
     this.relay(channelId, client.userId!, participant.location);
   }
 
