@@ -1,28 +1,32 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp, Folder, ChevronDown, ChevronRight, Moon, MinusCircle, Circle, EyeOff } from 'lucide-vue-next'
+import { Car, LocateFixed, Hash, Volume2, Settings, Link, Trash2, Plus, MicOff, Headphones, PhoneOff, Mic, Rss, MonitorUp, Folder, ChevronDown, ChevronRight, Moon, MinusCircle, Circle, EyeOff } from 'lucide-vue-next'
 import AppAvatar from '../common/AppAvatar.vue'
 import { useChatStore, type Channel, type PresenceStatus, type User } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
+import { useDriveStore } from '../../stores/drive'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   isAdmin: boolean
   canOpenServerSettings: boolean
   canManageChannels: boolean
-}>()
+  phoneLayout?: boolean
+}>(), { phoneLayout: false })
 
-type ChannelCreateType = 'text' | 'voice' | 'rss' | 'folder'
+type ChannelCreateType = Channel['type']
 
 const emit = defineEmits<{
   (e: 'open-server-settings'): void
   (e: 'open-invite'): void
   (e: 'remove-server'): void
   (e: 'open-admin'): void
+  (e: 'open-drive-channel', channelId: string): void
   (e: 'open-create-channel', payload: { categoryId: string | null; type?: ChannelCreateType; createCategory?: boolean }): void
 }>()
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
+const driveStore = useDriveStore()
 
 const CallDurationLabel = defineAsyncComponent(() => import('../voice/CallDurationLabel.vue'))
 
@@ -179,7 +183,7 @@ const shouldRenderChannelInCategory = (categoryId: string, channelId: string) =>
 }
 
 const shouldShowVoiceParticipants = (channel: Channel) => {
-  if (channel.type !== 'voice') {
+  if (channel.type !== 'voice' && channel.type !== 'drive') {
     return false
   }
 
@@ -664,7 +668,7 @@ const isChannelActive = (channel: Channel) => {
     return chatStore.activeMainPanel.type === 'folder' && chatStore.activeMainPanel.channelId === channel.id
   }
 
-  if (channel.type === 'voice') {
+  if (channel.type === 'voice' || channel.type === 'drive') {
     return chatStore.activeMainPanel.type === 'voice' && chatStore.activeMainPanel.channelId === channel.id
   }
 
@@ -682,9 +686,12 @@ const isChannelUnread = (channel: Channel) => {
 const handleChannelClick = (channel: Channel) => {
   if (channel.type === 'text' || channel.type === 'rss' || channel.type === 'folder') {
     chatStore.setActiveChannel(channel.id)
-  } else if (channel.type === 'voice') {
+  } else if (channel.type === 'voice' || channel.type === 'drive') {
     chatStore.setActiveVoicePanel(channel.id)
     webrtcStore.joinVoiceChannel(channel.id)
+    if (channel.type === 'drive') {
+      emit('open-drive-channel', channel.id)
+    }
   }
 }
 
@@ -806,7 +813,7 @@ const deleteCategoryFromContextMenu = () => {
   chatStore.deleteCategory(categoryId as string)
 }
 
-const openCreateChannelFromContextMenu = (type: 'text' | 'voice' | 'rss' | 'folder') => {
+const openCreateChannelFromContextMenu = (type: ChannelCreateType) => {
   if (!props.canManageChannels) return
 
   contextMenuVisible.value = false
@@ -831,11 +838,11 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
 </script>
 
 <template>
-  <aside class="w-60 bg-zinc-950 flex flex-col shrink-0">
+  <aside class="bg-zinc-950 flex flex-col min-h-0" :class="phoneLayout ? 'phone-layout flex-1 min-w-0 w-auto' : 'w-60 shrink-0'">
     <template v-if="chatStore.activeConnectionId">
       <header class="h-14 px-4 flex items-center justify-between border-b border-white/5 hover:bg-zinc-900/80 cursor-pointer transition-colors shrink-0">
-        <h1 class="font-bold text-white truncate drop-shadow-sm">{{ activeServer.name }}</h1>
-        <div class="flex items-center gap-2">
+        <h1 class="min-w-0 font-bold text-white truncate drop-shadow-sm">{{ activeServer.name }}</h1>
+        <div class="flex items-center gap-2 shrink-0">
           <button v-if="canOpenServerSettings" class="text-zinc-400 hover:text-white transition-colors" title="Server Settings" @click.stop="emit('open-server-settings')">
             <Settings class="w-4 h-4" />
           </button>
@@ -848,7 +855,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
         </div>
       </header>
 
-      <div class="flex-1 overflow-y-auto p-3 space-y-1 custom-scrollbar" @contextmenu.prevent="openChannelListContextMenu">
+      <div class="channel-scroll min-h-0 flex-1 overflow-auto p-3 space-y-1 custom-scrollbar" @contextmenu.prevent="openChannelListContextMenu">
         <div
           v-for="category in chatStore.activeServerCategories"
           :key="category.id"
@@ -895,10 +902,11 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
               <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-zinc-400 group-hover:text-zinc-300'" />
               <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-zinc-400 group-hover:text-zinc-300'" />
               <Folder v-else-if="channel.type === 'folder'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) ? 'text-white' : 'text-zinc-400 group-hover:text-zinc-300'" />
+              <Car v-else-if="channel.type === 'drive'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) ? 'text-white' : 'text-zinc-400 group-hover:text-zinc-300'" title="Drive Together" />
               <Volume2 v-else class="w-5 h-5 mr-1.5 text-zinc-400 group-hover:text-zinc-300" />
               <span class="truncate font-medium">{{ channel.name }}</span>
               <CallDurationLabel
-                v-if="channel.type === 'voice' && webrtcStore.getCallStartedAt(channel.id)"
+                v-if="(channel.type === 'voice' || channel.type === 'drive') && webrtcStore.getCallStartedAt(channel.id)"
                 :channel-id="channel.id"
                 class="ml-auto pl-2 shrink-0 text-[11px]"
               />
@@ -921,6 +929,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
                   <div class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border border-zinc-950" :class="getPresenceStatusColorClass(getUserPresenceStatus(getVoiceParticipantUser(participant)))"></div>
                 </AppAvatar>
                 <span class="truncate flex-1 font-medium">{{ getVoiceParticipantUser(participant).username }}</span>
+                <span v-if="channel.type === 'drive' && driveStore.getSpeedLabel(participant.id, channel.id)" class="shrink-0 text-[10px] tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(participant.id, channel.id) }}</span>
                 <div class="flex items-center gap-1 ml-2">
                   <MicOff v-if="participant.isMuted || participant.isDeafened" class="w-3 h-3 text-red-400" />
                   <MonitorUp v-if="isUserScreenSharing(participant.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
@@ -966,16 +975,17 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
               <Hash v-if="channel.type === 'text'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-zinc-400 group-hover:text-zinc-300'" />
               <Rss v-else-if="channel.type === 'rss'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) || isChannelUnread(channel) ? 'text-white' : 'text-zinc-400 group-hover:text-zinc-300'" />
               <Folder v-else-if="channel.type === 'folder'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) ? 'text-white' : 'text-zinc-400 group-hover:text-zinc-300'" />
+              <Car v-else-if="channel.type === 'drive'" class="w-5 h-5 mr-1.5" :class="isChannelActive(channel) ? 'text-white' : 'text-zinc-400 group-hover:text-zinc-300'" title="Drive Together" />
               <Volume2 v-else class="w-5 h-5 mr-1.5 text-zinc-400 group-hover:text-zinc-300" />
               <span class="truncate font-medium">{{ channel.name }}</span>
               <CallDurationLabel
-                v-if="channel.type === 'voice' && webrtcStore.getCallStartedAt(channel.id)"
+                v-if="(channel.type === 'voice' || channel.type === 'drive') && webrtcStore.getCallStartedAt(channel.id)"
                 :channel-id="channel.id"
                 class="ml-auto pl-2 shrink-0 text-[11px]"
               />
             </div>
 
-            <div v-if="channel.type === 'voice' && webrtcStore.channelParticipants.get(channel.id)?.length" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
+            <div v-if="shouldShowVoiceParticipants(channel)" class="pl-8 pr-2 pb-2 pt-1 space-y-1">
               <div
                 v-for="participant in webrtcStore.channelParticipants.get(channel.id)"
                 :key="participant.id"
@@ -992,6 +1002,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
                   <div class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border border-zinc-950" :class="getPresenceStatusColorClass(getUserPresenceStatus(getVoiceParticipantUser(participant)))"></div>
                 </AppAvatar>
                 <span class="truncate flex-1 font-medium">{{ getVoiceParticipantUser(participant).username }}</span>
+                <span v-if="channel.type === 'drive' && driveStore.getSpeedLabel(participant.id, channel.id)" class="shrink-0 text-[10px] tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(participant.id, channel.id) }}</span>
                 <div class="flex items-center gap-1 ml-2">
                   <MicOff v-if="participant.isMuted || participant.isDeafened" class="w-3 h-3 text-red-400" />
                   <MonitorUp v-if="isUserScreenSharing(participant.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
@@ -1023,6 +1034,10 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
         <button class="w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="openCreateChannelFromContextMenu('voice')">
           <Volume2 class="w-4 h-4" />
           Create voice channel
+        </button>
+        <button class="w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="openCreateChannelFromContextMenu('drive')">
+          <Car class="w-4 h-4" />
+          Create Drive Together channel
         </button>
         <button class="w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-900/80 flex items-center gap-2 font-medium transition-colors" @click="openCreateChannelFromContextMenu('rss')">
           <Rss class="w-4 h-4" />
@@ -1076,10 +1091,10 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
       </div>
     </template>
     <template v-else>
-      <div class="flex-1 flex items-center justify-center text-zinc-600 text-sm p-4 text-center font-medium">Select a connection to view channels</div>
+      <div class="min-h-0 flex-1 overflow-auto flex items-center justify-center text-zinc-600 text-sm p-4 text-center font-medium">Select a connection to view channels</div>
     </template>
 
-    <div v-if="webrtcStore.activeVoiceChannelId" ref="voiceStatsContainerRef" class="relative">
+    <div v-if="webrtcStore.activeVoiceChannelId" ref="voiceStatsContainerRef" class="relative shrink-0 min-w-0">
       <div class="h-[52px] bg-zinc-900/50 px-3 flex items-center shrink-0 border-t border-white/5 cursor-pointer hover:bg-zinc-900 transition-colors" @click="showVoiceStats = !showVoiceStats">
         <div class="flex items-center flex-1 min-w-0">
           <div class="mr-2" :class="{ 'text-green-400': webrtcStore.connectionQuality === 'good', 'text-yellow-400': webrtcStore.connectionQuality === 'warning', 'text-red-400': webrtcStore.connectionQuality === 'bad' }">
@@ -1097,17 +1112,30 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
             </div>
           </div>
         </div>
-        <button class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-zinc-800 transition-colors" :class="webrtcStore.screenProducer ? 'text-green-400 hover:text-green-300' : 'text-zinc-400 hover:text-zinc-300'" :title="webrtcStore.screenProducer ? 'Stop sharing screen' : 'Share screen'" @click.stop="webrtcStore.screenProducer ? webrtcStore.stopScreenShare() : webrtcStore.startScreenShare()">
+        <button v-if="!webrtcStore.isDriveChannel" class="w-8 h-8 shrink-0 flex items-center justify-center rounded-lg hover:bg-zinc-800 transition-colors" :class="webrtcStore.screenProducer ? 'text-green-400 hover:text-green-300' : 'text-zinc-400 hover:text-zinc-300'" :title="webrtcStore.screenProducer ? 'Stop sharing screen' : 'Share screen'" @click.stop="webrtcStore.screenProducer ? webrtcStore.stopScreenShare() : webrtcStore.startScreenShare()">
           <MonitorUp class="w-5 h-5" />
         </button>
-        <button class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white/10 text-zinc-400 hover:text-red-400 transition-colors" title="Disconnect" @click.stop="webrtcStore.leaveVoiceChannel()">
+        <button v-else class="w-8 h-8 shrink-0 flex items-center justify-center rounded-lg hover:bg-zinc-800 transition-colors disabled:opacity-50" :disabled="!driveStore.joinedChannelId" :class="driveStore.isSharing ? 'text-green-400 hover:text-green-300' : 'text-zinc-400 hover:text-zinc-300'" :title="driveStore.isSharing ? 'Stop sharing GPS location' : 'Share GPS location'" :aria-label="driveStore.isSharing ? 'Stop sharing GPS location' : 'Share GPS location'" :aria-pressed="driveStore.isSharing" @click.stop="driveStore.isSharing ? driveStore.stopSharing() : driveStore.startSharing()">
+          <LocateFixed class="w-5 h-5" />
+        </button>
+        <button class="w-7 h-7 shrink-0 flex items-center justify-center rounded-lg hover:bg-white/10 text-zinc-400 hover:text-red-400 transition-colors" title="Disconnect" @click.stop="webrtcStore.leaveVoiceChannel()">
           <PhoneOff class="w-4 h-4" />
         </button>
       </div>
 
-      <div v-if="webrtcStore.screenShareError" class="px-3 py-1 text-[11px] leading-4 text-amber-300 bg-amber-950/30 border-b border-amber-700/40" role="alert">{{ webrtcStore.screenShareError }}</div>
+      <button
+        v-if="phoneLayout && webrtcStore.isDriveChannel"
+        class="w-full flex items-center justify-center gap-2 px-3 text-xs font-medium text-indigo-300 bg-zinc-900/50 hover:bg-zinc-800 transition-colors border-t border-white/5"
+        @click="emit('open-drive-channel', webrtcStore.activeVoiceChannelId)"
+      >
+        <Car class="w-4 h-4 shrink-0" />
+        Open Drive Together
+      </button>
 
-      <div v-if="showVoiceStats" class="absolute bottom-[56px] left-2 w-64 bg-zinc-950 rounded-xl shadow-2xl border border-white/10 p-4 z-50">
+      <div v-if="webrtcStore.screenShareError" class="voice-error px-3 py-1 text-[11px] leading-4 text-amber-300 bg-amber-950/30 border-b border-amber-700/40" role="alert">{{ webrtcStore.screenShareError }}</div>
+      <div v-if="webrtcStore.isDriveChannel && driveStore.locationError" class="voice-error px-3 py-1 text-[11px] leading-4 text-amber-300 bg-amber-950/30 border-b border-amber-700/40" role="alert">{{ driveStore.locationError }}</div>
+
+      <div v-if="showVoiceStats" class="voice-stats absolute bottom-[56px] left-2 w-64 bg-zinc-950 rounded-xl shadow-2xl border border-white/10 p-4 z-50">
         <div class="flex justify-between items-center mb-3">
           <h3 class="text-xs font-bold text-zinc-300 uppercase tracking-widest">Voice Connection</h3>
           <div class="text-[10px] font-bold px-2 py-0.5 rounded-full" :class="{ 'bg-green-500/10 text-green-400 border border-green-500/20': webrtcStore.connectionQuality === 'good', 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20': webrtcStore.connectionQuality === 'warning', 'bg-red-500/10 text-red-400 border border-red-500/20': webrtcStore.connectionQuality === 'bad' }">{{ webrtcStore.ping }} ms</div>
@@ -1131,7 +1159,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
       </div>
     </div>
 
-    <div class="h-[52px] bg-zinc-900 border-t border-white/5 px-2 flex items-center shrink-0">
+    <div class="user-panel h-[52px] bg-zinc-900 border-t border-white/5 px-2 flex items-center shrink-0">
       <div class="flex items-center hover:bg-zinc-800/80 p-1.5 rounded-lg cursor-pointer flex-1 min-w-0 transition-colors" @contextmenu="openUserStatusMenu">
         <AppAvatar
           :src="userPanelAvatarUrl"
@@ -1148,7 +1176,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
           </div>
         </div>
       </div>
-      <div class="flex items-center gap-0.5 ml-1">
+      <div class="flex items-center gap-0.5 ml-1 shrink-0">
         <button class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors" title="Settings" @click="emit('open-admin')">
           <Settings class="w-4 h-4" />
         </button>
@@ -1180,3 +1208,56 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
     </div>
   </aside>
 </template>
+
+<style scoped>
+.phone-layout button {
+  min-width: 44px;
+  min-height: 44px;
+  flex-shrink: 0;
+}
+
+.phone-layout header {
+  padding-inline: 8px;
+}
+
+.phone-layout header > div {
+  gap: 0;
+}
+
+.phone-layout header button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.phone-layout .channel-scroll .cursor-pointer {
+  min-height: 44px;
+}
+
+.phone-layout .channel-scroll svg {
+  flex-shrink: 0;
+}
+
+.phone-layout .channel-scroll button {
+  opacity: 1;
+}
+
+.phone-layout .user-panel {
+  height: auto;
+  min-height: calc(52px + env(safe-area-inset-bottom, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.phone-layout .voice-error {
+  max-height: min(64px, 15dvh);
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.phone-layout .voice-stats {
+  bottom: calc(100% + 4px);
+  width: calc(100% - 16px);
+  max-height: 40dvh;
+  overflow: auto;
+}
+</style>

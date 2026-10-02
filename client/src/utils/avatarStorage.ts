@@ -1,6 +1,7 @@
 const AVATAR_DB_NAME = 'roguecord-avatar-storage';
 const AVATAR_STORE_NAME = 'avatars';
 const AVATAR_KEY = 'current';
+const DRIVER_AVATAR_KEY = 'driver';
 
 const openAvatarDatabase = (): Promise<IDBDatabase | null> => {
   if (typeof window === 'undefined' || !('indexedDB' in window)) {
@@ -30,7 +31,7 @@ const openAvatarDatabase = (): Promise<IDBDatabase | null> => {
   });
 };
 
-export const readStoredAvatar = async (): Promise<string | null> => {
+const readStoredValue = async (key: string): Promise<string | null> => {
   const database = await openAvatarDatabase();
   if (!database) {
     return null;
@@ -40,7 +41,7 @@ export const readStoredAvatar = async (): Promise<string | null> => {
     try {
       const transaction = database.transaction(AVATAR_STORE_NAME, 'readonly');
       const store = transaction.objectStore(AVATAR_STORE_NAME);
-      const request = store.get(AVATAR_KEY);
+      const request = store.get(key);
 
       request.onsuccess = () => {
         const result = request.result;
@@ -61,7 +62,7 @@ export const readStoredAvatar = async (): Promise<string | null> => {
   });
 };
 
-export const saveStoredAvatar = async (avatarUrl: string | null): Promise<boolean> => {
+const saveStoredValue = async (key: string, avatarUrl: string | null): Promise<boolean> => {
   const database = await openAvatarDatabase();
   if (!database) {
     return false;
@@ -71,7 +72,7 @@ export const saveStoredAvatar = async (avatarUrl: string | null): Promise<boolea
     try {
       const transaction = database.transaction(AVATAR_STORE_NAME, 'readwrite');
       const store = transaction.objectStore(AVATAR_STORE_NAME);
-      const request = avatarUrl === null ? store.delete(AVATAR_KEY) : store.put(avatarUrl, AVATAR_KEY);
+      const request = avatarUrl === null ? store.delete(key) : store.put(avatarUrl, key);
 
       request.onsuccess = () => resolve(true);
       request.onerror = () => {
@@ -89,8 +90,20 @@ export const saveStoredAvatar = async (avatarUrl: string | null): Promise<boolea
   });
 };
 
+export const readStoredAvatar = (): Promise<string | null> => readStoredValue(AVATAR_KEY);
+
+export const saveStoredAvatar = (avatarUrl: string | null): Promise<boolean> => saveStoredValue(AVATAR_KEY, avatarUrl);
+
 export const clearStoredAvatar = async (): Promise<boolean> => {
   return await saveStoredAvatar(null);
+};
+
+export const readStoredDriverAvatar = (): Promise<string | null> => readStoredValue(DRIVER_AVATAR_KEY);
+
+export const saveStoredDriverAvatar = (driverAvatarUrl: string | null): Promise<boolean> => saveStoredValue(DRIVER_AVATAR_KEY, driverAvatarUrl);
+
+export const clearStoredDriverAvatar = async (): Promise<boolean> => {
+  return await saveStoredDriverAvatar(null);
 };
 
 export const removeLegacyStoredAvatar = () => {

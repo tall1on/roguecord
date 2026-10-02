@@ -8,6 +8,7 @@ export interface ClientConnection {
   pendingPublicKey?: string;
   isNewUser?: boolean;
   isAlive: boolean;
+  identityVersion?: number;
 }
 
 class ConnectionManager {
@@ -30,6 +31,7 @@ class ConnectionManager {
   }
 
   setUserId(client: ClientConnection, userId: string) {
+    client.identityVersion = (client.identityVersion || 0) + 1;
     client.userId = userId;
     console.log(`[WS DEBUG] Client authenticated as user: ${userId}`);
   }
