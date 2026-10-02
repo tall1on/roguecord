@@ -7,9 +7,12 @@ import { ref } from 'vue'
 let server
 let useDriveStore
 let getGpsSpeed
+let getDriveMapCoordinates
+let searchDriveDestinations
 before(async () => {
   server = await createServer({ configFile: false, server: { middlewareMode: true }, appType: 'custom' })
   ;({ useDriveStore, getGpsSpeed } = await server.ssrLoadModule('/src/stores/drive.ts'))
+  ;({ getDriveMapCoordinates, searchDriveDestinations } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
 })
 after(async () => server?.close())
 
@@ -222,4 +225,91 @@ test('participant speed labels respect GPS sharing, channel boundaries and stale
   assert.equal(drive.getSpeedLabel('other', 'trip'), null)
   drive.stopSharing()
   assert.equal(drive.getSpeedLabel('me', 'trip'), null)
+})
+
+test('map bounds always include the destination, even without drivers or after GPS updates', () => {
+  const destination = { latitude: 52.51627, longitude: 13.3777 }
+  const targetOnly = getDriveMapCoordinates([], destination)
+  assert.equal(targetOnly.length, 1)
+  assert.equal(targetOnly[0][0], destination.latitude)
+  assert.ok(Math.abs(targetOnly[0][1] - destination.longitude) < 0.00001)
+  const drivers = [{ latitude: 50, longitude: 5 }, { latitude: 51, longitude: 9 }]
+  const coordinates = getDriveMapCoordinates(drivers, destination)
+  assert.equal(coordinates.length, 3)
+  assert.equal(coordinates.at(-1)[0], destination.latitude)
+  assert.ok(Math.abs((coordinates.at(-1)[1] % 360) - destination.longitude) < 0.00001)
+  const moved = getDriveMapCoordinates([{ latitude: 49, longitude: 4 }], destination)
+  assert.equal(moved.length, 2)
+  assert.equal(moved.at(-1)[0], destination.latitude)
+  assert.equal(getDriveMapCoordinates(drivers, null).length, 2)
+  assert.deepEqual(getDriveMapCoordinates([], null), [])
+})
+
+test('driver lines and destination bounds use the same short date-line crossing', () => {
+  const coordinates = getDriveMapCoordinates([{ latitude: 10, longitude: -179.8 }, { latitude: 11, longitude: 179.8 }], { latitude: 12, longitude: 179.9 })
+  const longitudes = coordinates.map((point) => point[1])
+  assert.ok(Math.max(...longitudes) - Math.min(...longitudes) < 0.5)
+  assert.equal(coordinates.at(-1)[0], 12)
+})
+
+test('address search validates results, caches explicit queries and does not send driver coordinates', async (context) => {
+  const feature = { geometry: { type: 'Point', coordinates: [13.3777, 52.51627] }, properties: {
+    name: 'Brandenburg Gate', street: 'Pariser Platz', housenumber: '1', postcode: '10117', city: 'Berlin', country: 'Germany'
+  } }
+  let requests = 0
+  context.mock.method(globalThis, 'fetch', async (url, options) => {
+    requests++
+    assert.equal(url.searchParams.get('q'), 'Test Landmark Search')
+    assert.equal(url.searchParams.get('limit'), '5')
+    assert.deepEqual([...url.searchParams.keys()].sort(), ['limit', 'q'])
+    assert.equal(options.credentials, 'omit')
+    assert.equal(options.referrerPolicy, 'no-referrer')
+    return { ok: true, json: async () => ({ features: [null, feature, feature,
+      { geometry: { type: 'Point', coordinates: [200, 52] } },
+      { geometry: { type: 'Point', coordinates: [13, '52'] } }] }) }
+  })
+  const result = await searchDriveDestinations('  Test Landmark Search  ', new AbortController().signal)
+  assert.deepEqual(result, [{ latitude: 52.51627, longitude: 13.3777, label: 'Brandenburg Gate, Pariser Platz 1, 10117 Berlin, Germany' }])
+  assert.deepEqual(await searchDriveDestinations('test landmark search', new AbortController().signal), result)
+  assert.equal(requests, 1)
+  const aborted = new AbortController()
+  aborted.abort()
+  await assert.rejects(searchDriveDestinations('Test Landmark Search', aborted.signal), { name: 'AbortError' })
+  assert.equal(requests, 1)
+})
+
+test('address lookup handles empty, malformed and failed responses and limits results', async (context) => {
+  let response = { ok: false }
+  context.mock.method(globalThis, 'fetch', async () => response)
+  const search = (query) => searchDriveDestinations(query, new AbortController().signal)
+  await assert.rejects(search('a'), /Enter an address/)
+  await assert.rejects(search('x'.repeat(251)), /Enter an address/)
+  await assert.rejects(search('Unavailable test address'), /unavailable/)
+  response = { ok: true, json: async () => ({ unexpected: true }) }
+  await assert.rejects(search('Malformed test address'), /invalid response/)
+  response = { ok: true, json: async () => ({ features: [] }) }
+  assert.deepEqual(await search('Empty test address'), [])
+  response = { ok: true, json: async () => ({ features: Array.from({ length: 8 }, (_, index) => ({
+    geometry: { type: 'Point', coordinates: [index, 50] }, properties: { name: `Address ${index}` }
+  })) }) }
+  assert.equal((await search('Multiple test addresses')).length, 5)
+})
+
+test('cancelled address lookup cannot return a destination after its request completes', async (context) => {
+  const controller = new AbortController()
+  context.mock.method(globalThis, 'fetch', async () => ({ ok: true, json: async () => {
+    controller.abort()
+    return { features: [{ geometry: { type: 'Point', coordinates: [13, 52] }, properties: { name: 'Cancelled target' } }] }
+  } }))
+  await assert.rejects(searchDriveDestinations('Cancelled test address', controller.signal), { name: 'AbortError' })
+})
+
+test('selected targets survive navigation and GPS disconnects without being persisted to storage', (context) => {
+  const { drive, chat } = setup(context)
+  const destination = { latitude: 52, longitude: 13, label: 'Target' }
+  drive.destinations.set('server:trip', destination)
+  chat.activeMainPanel = { type: 'text', channelId: 'chat' }
+  chat.isConnected = false
+  assert.deepEqual(drive.destinations.get('server:trip'), destination)
+  assert.equal(drive.destinations.has('other-server:trip'), false)
 })

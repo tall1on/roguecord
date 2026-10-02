@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { computed, onScopeDispose, ref, watch } from 'vue';
 import { useChatStore } from './chat';
 import { useWebRtcStore } from './webrtc';
+import type { DriveDestination } from '../utils/driveNavigation';
 
 export interface DriveLocation {
   user_id: string;
@@ -37,6 +38,7 @@ export const useDriveStore = defineStore('drive', () => {
   const webrtcStore = useWebRtcStore();
   const joinedChannelId = ref<string | null>(null);
   const locations = ref<Map<string, DriveLocation>>(new Map());
+  const destinations = ref<Map<string, DriveDestination>>(new Map());
   const isSharing = ref(false);
   const locationError = ref<string | null>(null);
   let watchId: number | null = null;
@@ -180,5 +182,5 @@ export const useDriveStore = defineStore('drive', () => {
     chatStore.removeMessageListener(handleMessage);
   });
 
-  return { activeChannelId, joinedChannelId, locations, isSharing, locationError, getSpeedLabel, startSharing, stopSharing };
+  return { activeChannelId, joinedChannelId, locations, destinations, isSharing, locationError, getSpeedLabel, startSharing, stopSharing };
 });
