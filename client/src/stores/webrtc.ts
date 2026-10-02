@@ -3,6 +3,7 @@ import { computed, ref, shallowRef, watch } from 'vue';
 import { Device } from 'mediasoup-client';
 import { useChatStore } from './chat';
 import { useDriveCameraShare } from '../composables/useDriveCameraShare';
+import { useWakeLock } from '../composables/useWakeLock';
 
 type AudioElementWithSinkId = HTMLAudioElement & {
   setSinkId?: (sinkId: string) => Promise<void>;
@@ -2145,6 +2146,16 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
 
   // Register listener
   chatStore.addMessageListener(handleMessage);
+
+  // Keep the screen awake while connected to a voice or drive channel
+  const { enable: enableWakeLock, disable: disableWakeLock } = useWakeLock();
+  watch(activeVoiceChannelId, (channelId) => {
+    if (channelId) {
+      enableWakeLock();
+    } else {
+      disableWakeLock();
+    }
+  });
 
   // Watch for websocket disconnects to clean up voice state
   watch(() => chatStore.isConnected, (isConnected) => {
