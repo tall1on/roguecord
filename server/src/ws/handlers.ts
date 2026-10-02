@@ -1,5 +1,6 @@
 import { ClientConnection, connectionManager } from './connectionManager';
 import { driveParticipants } from './drive';
+import { handleDriveNavigation } from './driveNavigation';
 import {
   createUser,
   getUserByPublicKey,
@@ -1766,6 +1767,10 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
     }
 
     switch (type) {
+      case 'drive_search_destinations':
+      case 'drive_get_route':
+        await handleDriveNavigation(client, type, payload);
+        break;
       case 'auth:request':
         await handleAuthRequest(client, payload);
         break;

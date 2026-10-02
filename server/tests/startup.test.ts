@@ -5,6 +5,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { transformSync } from 'esbuild';
+import sqlite3 from 'sqlite3';
+import { migrateDriveGeocodeCache } from '../src/driveGeocodeMigration';
 
 test('startup waits for schema before listening and never logs GPS payloads', async () => {
   let ready!: () => void;
@@ -57,4 +59,43 @@ test('startup waits for schema before listening and never logs GPS payloads', as
   assert.ok(!logs.join('\n').includes('48.123456'));
   assert.ok(!logs.join('\n').includes('11.987654'));
   assert.ok(!logs.join('\n').includes('6.789'));
+});
+
+test('database readiness includes the geocode migration and rejects migration failures', async () => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/db.ts'), 'utf8');
+  const compiled = transformSync(source, { loader: 'ts', format: 'cjs', target: 'node22' }).code;
+  for (const fail of [false, true]) {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const mockedSqlite = { ...sqlite3, Database: class extends sqlite3.Database {
+      constructor(_file: string, callback: (error: Error | null) => void) {
+        super(':memory:', callback);
+      }
+    } };
+    const module = { exports: {} as Record<string, any> };
+    const requireMock = (id: string) => {
+      if (id === 'sqlite3') return mockedSqlite;
+      if (id === './driveGeocodeMigration') return { migrateDriveGeocodeCache: async (db: sqlite3.Database) => {
+        await gate;
+        if (fail) throw new Error('mock cache migration failure');
+        await migrateDriveGeocodeCache(db);
+      } };
+      // The dedicated channel connection has its own :memory: DB; channel migration is tested separately.
+      if (id === './channelMigration') return { migrateChannelsSchema: async () => {} };
+      if (id === './permissions') return require('../src/permissions');
+      return require(id);
+    };
+    vm.runInNewContext(compiled, { module, exports: module.exports, require: requireMock, __dirname: path.join(__dirname, '../src'), console: { log: () => {}, error: () => {} } });
+    let settled = false;
+    const completion = module.exports.channelsSchemaReady.then(() => { settled = true; });
+    void completion.catch(() => {});
+    const checked = fail ? assert.rejects(completion, /mock cache migration failure/) : completion;
+    // Other migrations finish against a real in-memory database, but the cache step is still blocked.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(settled, false);
+    release();
+    await checked;
+    assert.equal(settled, !fail);
+    await new Promise<void>((resolve, reject) => module.exports.db.close((error: Error | null) => error ? reject(error) : resolve()));
+  }
 });

@@ -2,7 +2,7 @@ import { WebSocket } from 'ws';
 import type { ClientConnection } from './connectionManager';
 
 type Location = { latitude: number; longitude: number; accuracy: number; speed: number | null; updated_at: number };
-type Participant = { client: ClientConnection; location: Location | null; lastUpdate: number | null };
+type Participant = { client: ClientConnection; location: Location | null; sharingSession: object | null; lastUpdate: number | null };
 
 export class DriveParticipants {
   private channels = new Map<string, Map<string, Participant>>();
@@ -15,12 +15,22 @@ export class DriveParticipants {
     return this.channels.has(channelId);
   }
 
+  readSharedLocation(channelId: string, client: ClientConnection, userId: string) {
+    if (!this.owns(channelId, client) || client.ws.readyState !== WebSocket.OPEN) return null;
+    const participants = this.channels.get(channelId)!;
+    const source = participants.get(userId);
+    if (!source?.location || source.client.userId !== userId || source.client.ws.readyState !== WebSocket.OPEN) return null;
+    // Tokens detect leave/rejoin and clear/re-share, without invalidating routes on every normal GPS fix.
+    return { membership: participants.get(client.userId!) as object, source: source as object,
+      sharingSession: source.sharingSession, location: source.location as Readonly<Location> };
+  }
+
   admit(channelId: string, client: ClientConnection): void {
     if (!client.userId || client.ws.readyState !== WebSocket.OPEN) throw new Error('Connection is not active');
     const participants = this.channels.get(channelId) || new Map<string, Participant>();
     const existing = participants.get(client.userId);
     if (existing && existing.client !== client) throw new Error('Drive channel already joined on another connection');
-    if (!existing) participants.set(client.userId, { client, location: null, lastUpdate: null });
+    if (!existing) participants.set(client.userId, { client, location: null, sharingSession: null, lastUpdate: null });
     this.channels.set(channelId, participants);
   }
 
@@ -44,6 +54,7 @@ export class DriveParticipants {
       // Clearing is never throttled; repeated clears do not generate relay traffic.
       if (participant.location) {
         participant.location = null;
+        participant.sharingSession = null;
         this.relay(channelId, client.userId!, null);
       }
       return;
@@ -59,6 +70,7 @@ export class DriveParticipants {
     // Allow a little arrival jitter for clients publishing one GPS fix per second.
     if (participant.lastUpdate !== null && now - participant.lastUpdate < 750) throw new Error('Drive location rate limit exceeded');
     participant.lastUpdate = now;
+    participant.sharingSession ||= {};
     participant.location = { latitude, longitude, accuracy, speed: (speed as number | null | undefined) ?? null, updated_at: now };
     this.relay(channelId, client.userId!, participant.location);
   }

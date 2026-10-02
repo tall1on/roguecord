@@ -2,18 +2,19 @@ import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import { createServer } from 'vite'
 import { createPinia, defineStore, disposePinia, setActivePinia } from 'pinia'
-import { effectScope, ref } from 'vue'
+import { effectScope, reactive, ref } from 'vue'
 
 let server
 let useDriveStore
 let getGpsSpeed
 let getDriveMapCoordinates
 let searchDriveDestinations
+let getDriveRoute
 let usePhoneLayout
 before(async () => {
-  server = await createServer({ configFile: false, server: { middlewareMode: true }, appType: 'custom' })
+  server = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom' })
   ;({ useDriveStore, getGpsSpeed } = await server.ssrLoadModule('/src/stores/drive.ts'))
-  ;({ getDriveMapCoordinates, searchDriveDestinations } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
+  ;({ getDriveMapCoordinates, searchDriveDestinations, getDriveRoute } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
   ;({ usePhoneLayout } = await server.ssrLoadModule('/src/composables/usePhoneLayout.ts'))
 })
 after(async () => server?.close())
@@ -254,56 +255,113 @@ test('driver lines and destination bounds use the same short date-line crossing'
   assert.equal(coordinates.at(-1)[0], 12)
 })
 
-test('address search validates results, caches explicit queries and does not send driver coordinates', async (context) => {
-  const feature = { geometry: { type: 'Point', coordinates: [13.3777, 52.51627] }, properties: {
-    name: 'Brandenburg Gate', street: 'Pariser Platz', housenumber: '1', postcode: '10117', city: 'Berlin', country: 'Germany'
-  } }
-  let requests = 0
-  context.mock.method(globalThis, 'fetch', async (url, options) => {
-    requests++
-    assert.equal(url.searchParams.get('q'), 'Test Landmark Search')
-    assert.equal(url.searchParams.get('limit'), '5')
-    assert.deepEqual([...url.searchParams.keys()].sort(), ['limit', 'q'])
-    assert.equal(options.credentials, 'omit')
-    assert.equal(options.referrerPolicy, 'no-referrer')
-    return { ok: true, json: async () => ({ features: [null, feature, feature,
-      { geometry: { type: 'Point', coordinates: [200, 52] } },
-      { geometry: { type: 'Point', coordinates: [13, '52'] } }] }) }
+function navigationTransport() {
+  const listeners = new Set()
+  const sent = []
+  const transport = reactive({
+    isConnected: true, activeConnectionId: 'guild', currentUser: { id: 'me' },
+    addMessageListener: (listener) => listeners.add(listener),
+    removeMessageListener: (listener) => listeners.delete(listener),
+    send: (type, payload) => sent.push({ type, payload })
   })
-  const result = await searchDriveDestinations('  Test Landmark Search  ', new AbortController().signal)
-  assert.deepEqual(result, [{ latitude: 52.51627, longitude: 13.3777, label: 'Brandenburg Gate, Pariser Platz 1, 10117 Berlin, Germany' }])
-  assert.deepEqual(await searchDriveDestinations('test landmark search', new AbortController().signal), result)
-  assert.equal(requests, 1)
-  const aborted = new AbortController()
-  aborted.abort()
-  await assert.rejects(searchDriveDestinations('Test Landmark Search', aborted.signal), { name: 'AbortError' })
-  assert.equal(requests, 1)
+  const reply = (type, payload) => { for (const listener of [...listeners]) listener({ type, payload }) }
+  return { transport, listeners, sent, reply }
+}
+
+test('address search uses the guild socket, matches concurrent replies, and never contacts Photon from the client', async (context) => {
+  const directFetch = context.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected direct upstream request') })
+  const { transport, listeners, sent, reply } = navigationTransport()
+  const first = searchDriveDestinations(transport, 'trip', '  Berlin Gate  ', new AbortController().signal)
+  const second = searchDriveDestinations(transport, 'trip', 'Munich', new AbortController().signal)
+  assert.equal(listeners.size, 2)
+  assert.deepEqual(Object.keys(sent[0].payload).sort(), ['channel_id', 'query', 'request_id'])
+  assert.equal(sent[0].type, 'drive_search_destinations')
+  assert.equal(sent[0].payload.query, 'Berlin Gate')
+  assert.notEqual(sent[0].payload.request_id, sent[1].payload.request_id)
+  reply('drive_destinations', { ...sent[0].payload, channel_id: 'elsewhere', destinations: [] })
+  assert.equal(listeners.size, 2)
+  reply('drive_destinations', { ...sent[1].payload, destinations: [] })
+  assert.deepEqual(await second, [])
+  const destination = { latitude: 52.51627, longitude: 13.3777, label: 'Brandenburg Gate, Berlin' }
+  reply('drive_destinations', { ...sent[0].payload, destinations: [destination] })
+  assert.deepEqual(await first, [destination])
+  assert.equal(listeners.size, 0)
+  assert.equal(directFetch.mock.callCount(), 0)
 })
 
-test('address lookup handles empty, malformed and failed responses and limits results', async (context) => {
-  let response = { ok: false }
-  context.mock.method(globalThis, 'fetch', async () => response)
-  const search = (query) => searchDriveDestinations(query, new AbortController().signal)
+test('address proxy handles invalid queries, malformed results and correlated upstream errors', async () => {
+  const { transport, listeners, sent, reply } = navigationTransport()
+  const search = (query) => searchDriveDestinations(transport, 'trip', query, new AbortController().signal)
   await assert.rejects(search('a'), /Enter an address/)
   await assert.rejects(search('x'.repeat(251)), /Enter an address/)
-  await assert.rejects(search('Unavailable test address'), /unavailable/)
-  response = { ok: true, json: async () => ({ unexpected: true }) }
-  await assert.rejects(search('Malformed test address'), /invalid response/)
-  response = { ok: true, json: async () => ({ features: [] }) }
-  assert.deepEqual(await search('Empty test address'), [])
-  response = { ok: true, json: async () => ({ features: Array.from({ length: 8 }, (_, index) => ({
-    geometry: { type: 'Point', coordinates: [index, 50] }, properties: { name: `Address ${index}` }
-  })) }) }
-  assert.equal((await search('Multiple test addresses')).length, 5)
+  assert.equal(sent.length, 0)
+  const failed = search('Unavailable address')
+  reply('drive_destinations', { ...sent.at(-1).payload, error: 'Address search unavailable.' })
+  await assert.rejects(failed, /unavailable/)
+  const malformed = search('Malformed address')
+  reply('drive_destinations', { ...sent.at(-1).payload, destinations: [{ latitude: 200, longitude: 13, label: 'Invalid' }] })
+  await assert.rejects(malformed, /invalid response/)
+  const generic = search('Generic server error')
+  reply('error', { request_id: sent.at(-1).payload.request_id, message: 'Permission denied' })
+  await assert.rejects(generic, /Permission denied/)
+  assert.equal(listeners.size, 0)
 })
 
-test('cancelled address lookup cannot return a destination after its request completes', async (context) => {
+test('navigation cancels on abort, server switch, reauthentication, disconnect and timeout without accepting late replies', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  const { transport, listeners, sent, reply } = navigationTransport()
   const controller = new AbortController()
-  context.mock.method(globalThis, 'fetch', async () => ({ ok: true, json: async () => {
-    controller.abort()
-    return { features: [{ geometry: { type: 'Point', coordinates: [13, 52] }, properties: { name: 'Cancelled target' } }] }
-  } }))
-  await assert.rejects(searchDriveDestinations('Cancelled test address', controller.signal), { name: 'AbortError' })
+  const aborted = searchDriveDestinations(transport, 'trip', 'Cancelled address', controller.signal)
+  const late = sent.at(-1).payload
+  controller.abort()
+  await assert.rejects(aborted, { name: 'AbortError' })
+  reply('drive_destinations', { ...late, destinations: [] })
+  assert.equal(listeners.size, 0)
+  const switched = searchDriveDestinations(transport, 'trip', 'Other address', new AbortController().signal)
+  transport.activeConnectionId = 'other-guild'
+  await assert.rejects(switched, /connection changed/)
+  const reauthenticated = searchDriveDestinations(transport, 'trip', 'Reauthenticated address', new AbortController().signal)
+  reply('authenticated', { user: { id: 'me' } })
+  await assert.rejects(reauthenticated, /authentication changed/)
+  const disconnected = searchDriveDestinations(transport, 'trip', 'Third address', new AbortController().signal)
+  transport.isConnected = false
+  await assert.rejects(disconnected, /connection changed/)
+  await assert.rejects(searchDriveDestinations(transport, 'trip', 'Offline address', new AbortController().signal), /Connect to the guild/)
+  transport.isConnected = true
+  const timeout = searchDriveDestinations(transport, 'trip', 'Timeout address', new AbortController().signal)
+  context.mock.timers.tick(20000)
+  await assert.rejects(timeout, /timed out/)
+  assert.equal(listeners.size, 0)
+})
+
+test('street routing submits only driver identity and target and validates road geometry', async () => {
+  const { transport, listeners, sent, reply } = navigationTransport()
+  const destination = { latitude: 52.52, longitude: 13.4 }
+  const route = {
+    coordinates: [[13.39, 52.51], [13.395, 52.515], [13.4, 52.52]], distance_m: 1500, duration_s: 120,
+    origin: { latitude: 52.51, longitude: 13.39 }, destination, provider: 'osrm', updated_at: 100000
+  }
+  const request = getDriveRoute(transport, 'trip', 'driver', destination, new AbortController().signal)
+  assert.equal(sent.at(-1).type, 'drive_get_route')
+  assert.deepEqual(Object.keys(sent.at(-1).payload).sort(), ['channel_id', 'destination', 'request_id', 'user_id'])
+  reply('drive_route', { ...sent.at(-1).payload, route })
+  assert.deepEqual(await request, route)
+  for (const invalid of [{ ...route, coordinates: [[13, 52], [200, 52]] }, { ...route, duration_s: Infinity }, { ...route, updated_at: undefined }, { ...route, destination: { latitude: 0, longitude: 0 } }]) {
+    const bad = getDriveRoute(transport, 'trip', 'driver', destination, new AbortController().signal)
+    reply('drive_route', { ...sent.at(-1).payload, route: invalid })
+    await assert.rejects(bad, /invalid street route/)
+  }
+  assert.equal(listeners.size, 0)
+})
+
+test('automatic bounds include road detours as well as drivers and the destination', () => {
+  const drivers = [{ latitude: 50, longitude: 8 }]
+  const destination = { latitude: 51, longitude: 9 }
+  const street = [{ latitude: 50, longitude: 8 }, { latitude: 54, longitude: 12 }, { latitude: 51, longitude: 9 }]
+  const coordinates = getDriveMapCoordinates(drivers, destination, street)
+  assert.equal(coordinates.length, 5)
+  assert.equal(coordinates[1][0], destination.latitude)
+  assert.equal(Math.max(...coordinates.map((point) => point[0])), 54)
 })
 
 test('selected targets survive navigation and GPS disconnects without being persisted to storage', (context) => {

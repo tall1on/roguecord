@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "tsx src/index.ts",
-    "test:drive": "tsx --test tests/drive.test.ts tests/channelMigration.test.ts tests/startup.test.ts",
+    "test:drive": "tsx --test tests/drive.test.ts tests/driveNavigation.test.ts tests/driveServices.test.ts tests/channelMigration.test.ts tests/startup.test.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

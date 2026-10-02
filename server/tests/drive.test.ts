@@ -100,6 +100,14 @@ test('drive signaling rejects unrelated sockets and screen media before produce'
   const room = { id: 'drive', router: { rtpCapabilities: {}, close: () => closes++ }, peers: new Map() } as unknown as Room;
   rooms.set('drive', room);
   const send = (client: ClientConnection, type: string, payload: any) => handleMessage(client, JSON.stringify({ type, payload }));
+  await send(owner.client, 'drive_search_destinations', { request_id: 'invalid-search', channel_id: 'drive', query: '' });
+  assert.equal(owner.messages.at(-1).type, 'drive_destinations');
+  assert.equal(owner.messages.at(-1).payload.request_id, 'invalid-search');
+  assert.equal(typeof owner.messages.at(-1).payload.error, 'string');
+  await send(owner.client, 'drive_get_route', { request_id: 'invalid-route', channel_id: 'drive', user_id: 'owner', destination: { latitude: '1', longitude: 2 } });
+  assert.equal(owner.messages.at(-1).type, 'drive_route');
+  assert.equal(owner.messages.at(-1).payload.request_id, 'invalid-route');
+  assert.equal(typeof owner.messages.at(-1).payload.error, 'string');
   await send(owner.client, 'join_voice_channel', { channel_id: 'text' });
   assert.equal(rooms.has('text'), false);
   await send(owner.client, 'create_webrtc_transport', { channel_id: 'drive' });
