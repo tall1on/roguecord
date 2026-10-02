@@ -21,6 +21,7 @@ const PORT = process.env.PORT ? ~~process.env.PORT : 1337;
 const HOST = process.env.LISTEN_IP || '0.0.0.0';
 const serverIconsRootDir = path.resolve(dataDir, 'server-icons');
 const userAvatarsRootDir = path.resolve(dataDir, 'user-avatars');
+const driverAvatarsRootDir = path.resolve(dataDir, 'driver-avatars');
 const filesRootDir = path.resolve(dataDir, 'files');
 const emojiAssetsRootDir = path.resolve(process.cwd(), 'client', 'public', 'svg');
 const DEFAULT_FILE_CACHE_CONTROL = 'public, max-age=300';
@@ -470,6 +471,36 @@ async function startServer() {
                 return;
             } catch (error) {
                 handleStreamingResponseError(res, error, 'Failed to serve user avatar:');
+                return;
+            }
+        }
+
+        if (req.method === 'GET' && requestUrl.pathname.startsWith('/driver-avatars/')) {
+            try {
+                const segments = requestUrl.pathname.split('/').filter(Boolean);
+                if (segments.length !== 3) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const userId = segments[1] || '';
+                const storageName = segments[2] || '';
+
+                if (!isSafeUserId(userId) || !isSafeStorageName(storageName)) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const driverAvatarFilePath = path.resolve(driverAvatarsRootDir, userId, storageName);
+                if (!driverAvatarFilePath.startsWith(driverAvatarsRootDir) || !fs.existsSync(driverAvatarFilePath)) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                await streamLocalFile(req, res, driverAvatarFilePath, getIconContentType(driverAvatarFilePath));
+                return;
+            } catch (error) {
+                handleStreamingResponseError(res, error, 'Failed to serve driver avatar:');
                 return;
             }
         }

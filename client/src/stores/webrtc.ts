@@ -64,7 +64,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     return {
       ...knownUser,
       ...participant,
-      avatar_url: knownUser.avatar_url ?? participant.avatar_url ?? null
+      avatar_url: knownUser.avatar_url ?? participant.avatar_url ?? null,
+      driver_avatar_url: knownUser.driver_avatar_url ?? participant.driver_avatar_url ?? null
     };
   };
 

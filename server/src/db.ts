@@ -192,6 +192,11 @@ function initializeDatabase() {
         avatar_storage_provider TEXT,
         avatar_storage_key TEXT,
         avatar_storage_name TEXT,
+        driver_avatar_url TEXT,
+        driver_avatar_mime_type TEXT,
+        driver_avatar_storage_provider TEXT,
+        driver_avatar_storage_key TEXT,
+        driver_avatar_storage_name TEXT,
         status_emoji TEXT,
         status_text TEXT,
         last_ip TEXT,
@@ -718,6 +723,11 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
     const hasAvatarStorageProvider = columns.some((column) => column.name === 'avatar_storage_provider');
     const hasAvatarStorageKey = columns.some((column) => column.name === 'avatar_storage_key');
     const hasAvatarStorageName = columns.some((column) => column.name === 'avatar_storage_name');
+    const hasDriverAvatarUrl = columns.some((column) => column.name === 'driver_avatar_url');
+    const hasDriverAvatarMimeType = columns.some((column) => column.name === 'driver_avatar_mime_type');
+    const hasDriverAvatarStorageProvider = columns.some((column) => column.name === 'driver_avatar_storage_provider');
+    const hasDriverAvatarStorageKey = columns.some((column) => column.name === 'driver_avatar_storage_key');
+    const hasDriverAvatarStorageName = columns.some((column) => column.name === 'driver_avatar_storage_name');
     const hasStatusEmoji = columns.some((column) => column.name === 'status_emoji');
     const hasStatusText = columns.some((column) => column.name === 'status_text');
     const hasLastIp = columns.some((column) => column.name === 'last_ip');
@@ -731,6 +741,11 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
     if (!hasAvatarStorageProvider) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_storage_provider TEXT');
     if (!hasAvatarStorageKey) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_storage_key TEXT');
     if (!hasAvatarStorageName) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_storage_name TEXT');
+    if (!hasDriverAvatarUrl) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN driver_avatar_url TEXT');
+    if (!hasDriverAvatarMimeType) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN driver_avatar_mime_type TEXT');
+    if (!hasDriverAvatarStorageProvider) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN driver_avatar_storage_provider TEXT');
+    if (!hasDriverAvatarStorageKey) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN driver_avatar_storage_key TEXT');
+    if (!hasDriverAvatarStorageName) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN driver_avatar_storage_name TEXT');
     if (!hasStatusEmoji) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN status_emoji TEXT');
     if (!hasStatusText) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN status_text TEXT');
     if (!hasLastIp) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN last_ip TEXT');
@@ -762,6 +777,23 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
             END,
             avatar_storage_key = NULLIF(TRIM(COALESCE(avatar_storage_key, '')), ''),
             avatar_storage_name = NULLIF(TRIM(COALESCE(avatar_storage_name, '')), ''),
+            driver_avatar_mime_type = CASE
+              WHEN LOWER(COALESCE(driver_avatar_mime_type, '')) IN ('image/png', 'image/jpeg') THEN LOWER(driver_avatar_mime_type)
+              ELSE CASE
+                WHEN LOWER(COALESCE(driver_avatar_url, '')) LIKE 'data:image/png;%' THEN 'image/png'
+                WHEN LOWER(COALESCE(driver_avatar_url, '')) LIKE 'data:image/jpeg;%' THEN 'image/jpeg'
+                WHEN LOWER(COALESCE(driver_avatar_url, '')) LIKE 'data:image/jpg;%' THEN 'image/jpeg'
+                WHEN LOWER(COALESCE(driver_avatar_url, '')) LIKE '%.png' THEN 'image/png'
+                WHEN LOWER(COALESCE(driver_avatar_url, '')) LIKE '%.jpg' OR LOWER(COALESCE(driver_avatar_url, '')) LIKE '%.jpeg' THEN 'image/jpeg'
+                ELSE NULL
+              END
+            END,
+            driver_avatar_storage_provider = CASE
+              WHEN LOWER(COALESCE(driver_avatar_storage_provider, '')) IN ('data_dir', 's3') THEN LOWER(driver_avatar_storage_provider)
+              ELSE NULL
+            END,
+            driver_avatar_storage_key = NULLIF(TRIM(COALESCE(driver_avatar_storage_key, '')), ''),
+            driver_avatar_storage_name = NULLIF(TRIM(COALESCE(driver_avatar_storage_name, '')), ''),
             status_emoji = NULLIF(TRIM(COALESCE(status_emoji, '')), ''),
             status_text = CASE
               WHEN TRIM(COALESCE(status_text, '')) = '' THEN NULL
