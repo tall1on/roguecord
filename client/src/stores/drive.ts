@@ -13,6 +13,17 @@ export interface DriveLocation {
   updated_at: number;
 }
 
+const EARTH_RADIUS_M = 6371000;
+const toRadians = (degrees: number) => degrees * Math.PI / 180;
+
+const gpsDistance = (a: { latitude: number; longitude: number }, b: { latitude: number; longitude: number }): number => {
+  const latitudeDelta = toRadians(b.latitude - a.latitude);
+  const longitudeDelta = toRadians(b.longitude - a.longitude);
+  const haversine = Math.sin(latitudeDelta / 2) ** 2
+    + Math.cos(toRadians(a.latitude)) * Math.cos(toRadians(b.latitude)) * Math.sin(longitudeDelta / 2) ** 2;
+  return EARTH_RADIUS_M * 2 * Math.asin(Math.sqrt(Math.max(0, Math.min(1, haversine))));
+};
+
 export const getGpsSpeed = (position: GeolocationPosition, previous: GeolocationPosition | null): number | null => {
   const speed = position.coords.speed;
   if (typeof speed === 'number' && Number.isFinite(speed) && speed >= 0 && speed <= 400) return speed;
@@ -20,17 +31,29 @@ export const getGpsSpeed = (position: GeolocationPosition, previous: Geolocation
   const seconds = (position.timestamp - previous.timestamp) / 1000;
   if (seconds < 2 || seconds > 15 || !Number.isFinite(seconds)
     || position.coords.accuracy > 50 || previous.coords.accuracy > 50) return null;
-  const radians = Math.PI / 180;
-  const latitudeDelta = (position.coords.latitude - previous.coords.latitude) * radians;
-  const longitudeDelta = (position.coords.longitude - previous.coords.longitude) * radians;
-  const haversine = Math.sin(latitudeDelta / 2) ** 2
-    + Math.cos(previous.coords.latitude * radians) * Math.cos(position.coords.latitude * radians)
-    * Math.sin(longitudeDelta / 2) ** 2;
-  const distance = 6371000 * 2 * Math.asin(Math.sqrt(Math.max(0, Math.min(1, haversine))));
+  const distance = gpsDistance(previous.coords, position.coords);
   // Movement inside the combined GPS accuracy radius is indistinguishable from stationary jitter.
   if (distance <= position.coords.accuracy + previous.coords.accuracy) return 0;
   const estimated = distance / seconds;
   return Number.isFinite(estimated) && estimated <= 400 ? estimated : null;
+};
+
+export const getGpsHeading = (position: GeolocationPosition, previous: GeolocationPosition | null): number | null => {
+  const heading = position.coords.heading;
+  if (typeof heading === 'number' && Number.isFinite(heading) && heading >= 0 && heading <= 360) return heading % 360;
+  if (!previous) return null;
+  const seconds = (position.timestamp - previous.timestamp) / 1000;
+  if (seconds < 2 || seconds > 15 || !Number.isFinite(seconds)
+    || position.coords.accuracy > 50 || previous.coords.accuracy > 50) return null;
+  const distance = gpsDistance(previous.coords, position.coords);
+  // A short hop is dominated by GPS jitter, so it cannot imply a trustworthy bearing.
+  if (distance <= position.coords.accuracy + previous.coords.accuracy || distance < 5) return null;
+  const latitude1 = toRadians(previous.coords.latitude);
+  const latitude2 = toRadians(position.coords.latitude);
+  const longitudeDelta = toRadians(position.coords.longitude - previous.coords.longitude);
+  const y = Math.sin(longitudeDelta) * Math.cos(latitude2);
+  const x = Math.cos(latitude1) * Math.sin(latitude2) - Math.sin(latitude1) * Math.cos(latitude2) * Math.cos(longitudeDelta);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 };
 
 export const useDriveStore = defineStore('drive', () => {
@@ -40,6 +63,7 @@ export const useDriveStore = defineStore('drive', () => {
   const locations = ref<Map<string, DriveLocation>>(new Map());
   const destinations = ref<Map<string, DriveDestination>>(new Map());
   const isSharing = ref(false);
+  const selfHeading = ref<number | null>(null);
   const locationError = ref<string | null>(null);
   let watchId: number | null = null;
   let sendTimer: ReturnType<typeof setTimeout> | null = null;
@@ -75,6 +99,7 @@ export const useDriveStore = defineStore('drive', () => {
     sendTimer = null;
     pendingLocation = null;
     isSharing.value = false;
+    selfHeading.value = null;
     if (chatStore.currentUser) {
       locations.value.delete(chatStore.currentUser.id);
       receivedAt.delete(chatStore.currentUser.id);
@@ -111,6 +136,8 @@ export const useDriveStore = defineStore('drive', () => {
     watchId = navigator.geolocation.watchPosition((position) => {
       if (generation !== watchGeneration || activeChannelId.value !== channelId) return;
       locationError.value = null;
+      const heading = getGpsHeading(position, previousFix);
+      if (heading !== null) selfHeading.value = heading;
       if (previousFix && (position.timestamp - previousFix.timestamp >= 2000 || position.timestamp <= previousFix.timestamp)) {
         estimatedSpeed = getGpsSpeed(position, previousFix);
         previousFix = position;
@@ -191,5 +218,5 @@ export const useDriveStore = defineStore('drive', () => {
     chatStore.removeMessageListener(handleMessage);
   });
 
-  return { activeChannelId, joinedChannelId, locations, destinations, isSharing, locationError, getSpeedLabel, startSharing, stopSharing };
+  return { activeChannelId, joinedChannelId, locations, destinations, isSharing, selfHeading, locationError, getSpeedLabel, startSharing, stopSharing };
 });
