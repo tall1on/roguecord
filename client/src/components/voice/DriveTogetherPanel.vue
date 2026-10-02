@@ -450,11 +450,10 @@ onMounted(async () => {
     await import('leaflet-rotate')
     if (disposed || !mapElement.value) return
     map = leaflet.map(mapElement.value, {
-      zoomControl: true, attributionControl: true, minZoom: -10, zoomSnap: 0,
+      zoomControl: true, attributionControl: false, minZoom: -10, zoomSnap: 0,
       rotate: true, bearing: 0, rotateControl: false, touchRotate: false, shiftKeyRotate: false
     }).setView([20, 0], 2)
     leaflet.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
       minZoom: -10,
       minNativeZoom: 0,
       maxZoom: 19
@@ -653,12 +652,5 @@ onBeforeUnmount(() => {
 }
 .drive-map :deep(.leaflet-bar a:hover) {
   background: #3f3f46;
-}
-.drive-map :deep(.leaflet-control-attribution) {
-  background: rgb(24 24 27 / 90%);
-  color: #a1a1aa;
-}
-.drive-map :deep(.leaflet-control-attribution a) {
-  color: #a5b4fc;
 }
 </style>
