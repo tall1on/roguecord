@@ -924,6 +924,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
                   <div class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border border-zinc-950" :class="getPresenceStatusColorClass(getUserPresenceStatus(getVoiceParticipantUser(participant)))"></div>
                 </AppAvatar>
                 <span class="truncate flex-1 font-medium">{{ getVoiceParticipantUser(participant).username }}</span>
+                <span v-if="channel.type === 'drive' && driveStore.getSpeedLabel(participant.id, channel.id)" class="shrink-0 text-[10px] tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(participant.id, channel.id) }}</span>
                 <div class="flex items-center gap-1 ml-2">
                   <MicOff v-if="participant.isMuted || participant.isDeafened" class="w-3 h-3 text-red-400" />
                   <MonitorUp v-if="isUserScreenSharing(participant.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />
@@ -996,6 +997,7 @@ const isUserScreenSharing = (userId: string) => webrtcStore.userScreenStreams.ha
                   <div class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border border-zinc-950" :class="getPresenceStatusColorClass(getUserPresenceStatus(getVoiceParticipantUser(participant)))"></div>
                 </AppAvatar>
                 <span class="truncate flex-1 font-medium">{{ getVoiceParticipantUser(participant).username }}</span>
+                <span v-if="channel.type === 'drive' && driveStore.getSpeedLabel(participant.id, channel.id)" class="shrink-0 text-[10px] tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(participant.id, channel.id) }}</span>
                 <div class="flex items-center gap-1 ml-2">
                   <MicOff v-if="participant.isMuted || participant.isDeafened" class="w-3 h-3 text-red-400" />
                   <MonitorUp v-if="isUserScreenSharing(participant.id)" class="w-3.5 h-3.5 text-green-400" title="Screen sharing" />

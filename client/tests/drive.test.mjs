@@ -6,9 +6,10 @@ import { ref } from 'vue'
 
 let server
 let useDriveStore
+let getGpsSpeed
 before(async () => {
   server = await createServer({ configFile: false, server: { middlewareMode: true }, appType: 'custom' })
-  ;({ useDriveStore } = await server.ssrLoadModule('/src/stores/drive.ts'))
+  ;({ useDriveStore, getGpsSpeed } = await server.ssrLoadModule('/src/stores/drive.ts'))
 })
 after(async () => server?.close())
 
@@ -68,15 +69,15 @@ test('GPS starts only after drive admission and keeps running when navigating aw
 })
 
 test('GPS sends latest coordinates with throttling and clears sharing on demand', (context) => {
-  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 10000 })
+  context.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 10000 })
   const { drive, emit, watches, sent, cleared } = setup(context)
   emit('voice_channel_joined')
   watches[0].success({ coords: { latitude: 10, longitude: 20, accuracy: 5 } })
   watches[0].success({ coords: { latitude: 11, longitude: 21, accuracy: 6 } })
   watches[0].success({ coords: { latitude: 12, longitude: 22, accuracy: 7 } })
   assert.equal(sent.length, 1)
-  context.mock.timers.tick(2000)
-  assert.deepEqual(sent[1].payload.location, { latitude: 12, longitude: 22, accuracy: 7 })
+  context.mock.timers.tick(1000)
+  assert.deepEqual(sent[1].payload.location, { latitude: 12, longitude: 22, accuracy: 7, speed: null })
   emit('drive_location_updated', { user_id: 'me', location: { latitude: 12, longitude: 22, accuracy: 7, updated_at: 12000 } })
   drive.stopSharing()
   assert.equal(drive.isSharing, false)
@@ -166,4 +167,59 @@ test('insecure clients can still join voice without requesting GPS', (context) =
   assert.equal(drive.isSharing, false)
   assert.equal(watches.length, 0)
   assert.match(drive.locationError, /HTTPS/)
+})
+
+const fix = (timestamp, latitude, longitude, speed = null, accuracy = 3) => ({
+  timestamp, coords: { latitude, longitude, speed, accuracy }
+})
+
+test('speed uses native GPS values or accurate timed positions without stationary jitter', () => {
+  assert.equal(getGpsSpeed(fix(1000, 0, 0, 12), null), 12)
+  assert.equal(getGpsSpeed(fix(1000, 0, 0, 0), null), 0)
+  assert.equal(getGpsSpeed(fix(1000, 0, 0, -1), null), null)
+  assert.equal(getGpsSpeed(fix(1000, 0, 0, Infinity), null), null)
+  const previous = fix(1000, 0, 0)
+  assert.ok(Math.abs(getGpsSpeed(fix(3000, 0, 0.0002), previous) - 11.1195) < 0.01)
+  assert.equal(getGpsSpeed(fix(3000, 0, 0.00001), previous), 0)
+  assert.equal(getGpsSpeed(fix(2000, 0, 0.0002), previous), null)
+  assert.equal(getGpsSpeed(fix(20000, 0, 0.0002), previous), null)
+  assert.equal(getGpsSpeed(fix(3000, 0, 0.0002, null, 100), previous), null)
+  assert.equal(getGpsSpeed(fix(3000, 0, 1), previous), null)
+  assert.ok(Math.abs(getGpsSpeed(fix(3000, 0, -179.9999), fix(1000, 0, 179.9999)) - 11.1195) < 0.01)
+})
+
+test('GPS watches fresh fixes and publishes estimated speed when native speed is absent', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 10000 })
+  const { emit, watches, sent } = setup(context)
+  emit('voice_channel_joined')
+  assert.equal(watches[0].options.maximumAge, 0)
+  watches[0].success(fix(10000, 0, 0))
+  assert.equal(sent[0].payload.location.speed, null)
+  context.mock.timers.tick(1000)
+  watches[0].success(fix(11000, 0, 0.0001))
+  context.mock.timers.tick(1000)
+  watches[0].success(fix(12000, 0, 0.0002))
+  assert.ok(Math.abs(sent.at(-1).payload.location.speed - 11.1195) < 0.01)
+  context.mock.timers.tick(1000)
+  watches[0].success(fix(13000, 0, 0.0003, 15))
+  assert.equal(sent.at(-1).payload.location.speed, 15)
+})
+
+test('participant speed labels respect GPS sharing, channel boundaries and stale readings', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 100000 })
+  const { drive, emit } = setup(context)
+  emit('voice_channel_joined')
+  assert.equal(drive.getSpeedLabel('me', 'trip'), '-- km/h')
+  assert.equal(drive.getSpeedLabel('other', 'trip'), null)
+  emit('drive_location_updated', { user_id: 'other', location: { latitude: 0, longitude: 0, accuracy: 3, speed: 10, updated_at: 500000 } })
+  assert.equal(drive.getSpeedLabel('other', 'trip'), '36 km/h')
+  assert.equal(drive.getSpeedLabel('other', 'elsewhere'), null)
+  context.mock.timers.tick(15000)
+  assert.equal(drive.getSpeedLabel('other', 'trip'), '-- km/h')
+  emit('drive_locations', { generated_at: 500000, locations: [{ user_id: 'other', latitude: 0, longitude: 0, accuracy: 3, speed: 10, updated_at: 480000 }] })
+  assert.equal(drive.getSpeedLabel('other', 'trip'), '-- km/h')
+  emit('drive_location_updated', { user_id: 'other', location: null })
+  assert.equal(drive.getSpeedLabel('other', 'trip'), null)
+  drive.stopSharing()
+  assert.equal(drive.getSpeedLabel('me', 'trip'), null)
 })

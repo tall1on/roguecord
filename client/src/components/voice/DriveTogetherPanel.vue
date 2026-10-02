@@ -127,7 +127,7 @@ onBeforeUnmount(() => {
     </header>
     <p v-if="driveStore.locationError && isJoined" class="shrink-0 bg-amber-950/30 px-4 py-3 text-sm text-amber-200" role="alert">{{ driveStore.locationError }}</p>
     <div class="relative min-h-[16rem] flex-1 isolate">
-      <div ref="mapElement" class="absolute inset-0 z-0" aria-label="OpenStreetMap showing participant GPS locations" />
+      <div ref="mapElement" class="drive-map absolute inset-0 z-0" aria-label="Dark OpenStreetMap showing participant GPS locations" />
       <div v-if="!visibleLocations.length || mapError" class="pointer-events-none absolute inset-x-4 top-4 z-10 mx-auto max-w-md rounded-xl border border-white/10 bg-zinc-950/90 p-4 text-center shadow-xl backdrop-blur">
         <MapPin class="mx-auto mb-2 h-6 w-6 text-indigo-400" />
         <p class="text-sm font-medium text-white">{{ mapError || (isJoined ? 'Waiting for shared GPS locations' : 'Join to see and share live locations') }}</p>
@@ -140,9 +140,38 @@ onBeforeUnmount(() => {
           <MicOff v-if="participant.isMuted || participant.isDeafened" class="h-3 w-3 text-red-400" />
           {{ participant.username }}
           <MapPin v-if="isJoined && driveStore.locations.has(participant.id)" class="h-3 w-3 text-indigo-400" />
+          <span v-if="driveStore.getSpeedLabel(participant.id, channelId)" class="tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(participant.id, channelId) }}</span>
         </span>
       </div>
       <p class="text-[11px] leading-relaxed text-zinc-500">GPS is shared only with people in this call and stops when you leave. Locations are not saved. Map tiles are loaded from OpenStreetMap. Screen sharing is disabled.</p>
     </footer>
   </section>
 </template>
+
+<style scoped>
+.drive-map {
+  background: #18181b;
+}
+.drive-map :deep(.leaflet-tile-pane) {
+  filter: invert(1) hue-rotate(180deg) brightness(0.75) saturate(0.65) contrast(1.1);
+}
+.drive-map :deep(.leaflet-tooltip),
+.drive-map :deep(.leaflet-bar a) {
+  background: #27272a;
+  border-color: #3f3f46;
+  color: #f4f4f5;
+}
+.drive-map :deep(.leaflet-tooltip-top::before) {
+  border-top-color: #27272a;
+}
+.drive-map :deep(.leaflet-bar a:hover) {
+  background: #3f3f46;
+}
+.drive-map :deep(.leaflet-control-attribution) {
+  background: rgb(24 24 27 / 90%);
+  color: #a1a1aa;
+}
+.drive-map :deep(.leaflet-control-attribution a) {
+  color: #a5b4fc;
+}
+</style>
