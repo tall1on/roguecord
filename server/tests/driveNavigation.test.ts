@@ -18,6 +18,7 @@ const makeClient = (userId?: string) => {
   return { client, messages };
 };
 const payload = { request_id: 'request', channel_id: 'drive', user_id: 'driver', destination: { latitude: 49, longitude: 12 } };
+const goal = { ...payload.destination, label: 'Park' };
 const search = { request_id: 'search', channel_id: 'drive', query: '  Central  Park  ' };
 const point = { latitude: 48.123456, longitude: 11.987654, accuracy: 3 };
 const streetRoute: StreetRoute = { coordinates: [[11.987654, 48.123456], [12, 49]], origin: { latitude: point.latitude, longitude: point.longitude }, destination: payload.destination, distance_m: 100, duration_s: 30, provider: 'osrm', updated_at: 1000 };
@@ -44,6 +45,7 @@ test('authenticated search before join, socket-only frozen responses, and route 
   f.participants.admit('drive', requester.client);
   f.participants.admit('drive', driver.client);
   f.participants.update('drive', driver.client, point, 1000);
+  f.participants.setDestination('drive', requester.client, goal, 1000);
   requester.messages.length = driver.messages.length = 0;
   await f.handler(tab.client, 'drive_get_route', payload);
   assert.equal(tab.messages.at(-1).type, 'drive_route');
@@ -112,13 +114,14 @@ test('navigation requests cannot pass the startup readiness barrier', async () =
 });
 
 test('stale route completion after leave/rejoin, GPS clear/re-share, relogin, deletion or disconnect never sends geometry', async () => {
-  for (const action of ['leave', 'rejoin', 'clear', 'clear-reshare', 'driver-leave', 'relogin', 'delete', 'disconnect']) {
+  for (const action of ['leave', 'rejoin', 'clear', 'clear-reshare', 'driver-leave', 'relogin', 'delete', 'disconnect', 'destination-change', 'destination-clear', 'destination-reset']) {
     const f = fixture();
     const requester = makeClient('requester');
     const driver = makeClient('driver');
     f.participants.admit('drive', requester.client);
     f.participants.admit('drive', driver.client);
     f.participants.update('drive', driver.client, point, 1000);
+    f.participants.setDestination('drive', requester.client, goal, 1000);
     requester.messages.length = driver.messages.length = 0;
     let release!: () => void;
     let started!: () => void;
@@ -131,6 +134,9 @@ test('stale route completion after leave/rejoin, GPS clear/re-share, relogin, de
     if (action === 'clear' || action === 'clear-reshare') f.participants.update('drive', driver.client, null);
     if (action === 'clear-reshare') f.participants.update('drive', driver.client, point, 2000);
     if (action === 'driver-leave') f.participants.leave('drive', driver.client);
+    if (action === 'destination-change') f.participants.setDestination('drive', requester.client, { ...goal, longitude: 13 }, 2000);
+    if (action === 'destination-clear' || action === 'destination-reset') f.participants.setDestination('drive', requester.client, null, 2000);
+    if (action === 'destination-reset') f.participants.setDestination('drive', requester.client, goal, 2000);
     if (action === 'relogin') requester.client.identityVersion!++;
     if (action === 'delete') f.removeChannel();
     if (action === 'disconnect') requester.client.ws.readyState = 3;
@@ -150,6 +156,7 @@ test('ordinary GPS updates do not starve queued routes; origin remains the serve
   f.participants.admit('drive', requester.client);
   f.participants.admit('drive', driver.client);
   f.participants.update('drive', driver.client, point, 1000);
+  f.participants.setDestination('drive', requester.client, goal, 1000);
   let release!: () => void;
   let started!: () => void;
   const start = new Promise<void>((resolve) => { started = resolve; });
@@ -193,6 +200,7 @@ test('per-connection request rate limits include cached hits, and global outstan
   f.participants.admit('drive', requester.client);
   f.participants.admit('drive', driver.client);
   f.participants.update('drive', driver.client, point, 1000);
+  f.participants.setDestination('drive', requester.client, goal, 1000);
   await f.handler(requester.client, 'drive_get_route', payload);
   await f.handler(requester.client, 'drive_get_route', { ...payload, request_id: 'route-limited' });
   assert.match(requester.messages.at(-1).payload.error, /rate limit/);
@@ -239,6 +247,7 @@ test('multiple viewers coalesce a driver route, dispatch latest GPS, and preserv
   const driver = makeClient('driver');
   for (const { client } of [first, second, driver]) participants.admit('drive', client);
   participants.update('drive', driver.client, point, 1000);
+  participants.setDestination('drive', first.client, goal, 1000);
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const urls: URL[] = [];
@@ -272,13 +281,14 @@ test('multiple viewers coalesce a driver route, dispatch latest GPS, and preserv
 
 test('queued route privacy rechecks prevent upstream GPS transmission after invalidation', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 200000 });
-  for (const action of ['leave', 'rejoin', 'clear', 'clear-reshare', 'relogin', 'delete', 'disconnect']) {
+  for (const action of ['leave', 'rejoin', 'clear', 'clear-reshare', 'relogin', 'delete', 'disconnect', 'destination-change', 'destination-clear', 'destination-reset']) {
     const participants = new DriveParticipants();
     const requester = makeClient('requester');
     const driver = makeClient('driver');
     participants.admit('drive', requester.client);
     participants.admit('drive', driver.client);
     participants.update('drive', driver.client, point, 1000);
+    participants.setDestination('drive', requester.client, goal, 1000);
     let exists = true;
     let calls = 0;
     const service = new DriveServices({} as sqlite3.Database, readDriveConfig({}), (async () => {
@@ -293,6 +303,9 @@ test('queued route privacy rechecks prevent upstream GPS transmission after inva
     if (action === 'rejoin') participants.admit('drive', requester.client);
     if (action === 'clear' || action === 'clear-reshare') participants.update('drive', driver.client, null);
     if (action === 'clear-reshare') participants.update('drive', driver.client, point, 2000);
+    if (action === 'destination-change') participants.setDestination('drive', requester.client, { ...goal, longitude: 13 }, 2000);
+    if (action === 'destination-clear' || action === 'destination-reset') participants.setDestination('drive', requester.client, null, 2000);
+    if (action === 'destination-reset') participants.setDestination('drive', requester.client, goal, 2000);
     if (action === 'relogin') requester.client.identityVersion!++;
     if (action === 'delete') exists = false;
     if (action === 'disconnect') requester.client.ws.readyState = 3;
@@ -314,6 +327,7 @@ test('route handling rate limit is hard one second including cached responses', 
   f.participants.admit('drive', requester.client);
   f.participants.admit('drive', driver.client);
   f.participants.update('drive', driver.client, point, 1000);
+  f.participants.setDestination('drive', requester.client, goal, 1000);
   await f.handler(requester.client, 'drive_get_route', payload);
   now += 999;
   await f.handler(requester.client, 'drive_get_route', payload);
@@ -322,4 +336,27 @@ test('route handling rate limit is hard one second including cached responses', 
   await f.handler(requester.client, 'drive_get_route', payload);
   assert.equal(requester.messages.at(-1).payload.error, undefined);
   assert.equal(f.counts().routes, 2);
+});
+
+test('routes require the nonnull shared room goal; spoofed matchRoomTarget cannot bypass matching', async () => {
+  for (const selected of [null, { ...goal, latitude: 50 }, goal]) {
+    const f = fixture();
+    const requester = makeClient('requester');
+    const driver = makeClient('driver');
+    f.participants.admit('drive', requester.client);
+    f.participants.admit('drive', driver.client);
+    f.participants.update('drive', driver.client, point, 1000);
+    if (selected) f.participants.setDestination('drive', requester.client, selected, 1000);
+    await f.handler(requester.client, 'drive_get_route', { ...payload, matchRoomTarget: false, origin: point });
+    const response = requester.messages.at(-1).payload;
+    if (selected === goal) {
+      assert.equal(f.counts().routes, 1);
+      assert.deepEqual(response.route, streetRoute);
+    } else {
+      assert.equal(f.counts().routes, 0);
+      assert.match(response.error, /shared room destination/);
+      assert.equal(response.route, undefined);
+      assert.ok(!JSON.stringify(response).includes(String(point.latitude)));
+    }
+  }
 });

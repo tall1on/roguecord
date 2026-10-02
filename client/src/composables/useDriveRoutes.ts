@@ -1,23 +1,17 @@
 import { computed, onScopeDispose, ref, watch } from 'vue';
 import {
   getDriveRoute,
+  driveMovementDistance,
   type DriveDestination,
   type DriveNavigationTransport,
   type DriveRoute,
   type MapPosition,
 } from '../utils/driveNavigation';
+export { driveMovementDistance } from '../utils/driveNavigation';
 
 type DriverPosition = MapPosition & { user_id: string };
 type Attempt = { at: number; anchor: MapPosition; failed: boolean; rateLimited?: boolean };
 const dispatchStates = new WeakMap<DriveNavigationTransport, { at: number; pending: number }>();
-
-export function driveMovementDistance(a: MapPosition, b: MapPosition): number {
-  const radians = Math.PI / 180;
-  const haversine = Math.sin((b.latitude - a.latitude) * radians / 2) ** 2
-    + Math.cos(a.latitude * radians) * Math.cos(b.latitude * radians)
-    * Math.sin((b.longitude - a.longitude) * radians / 2) ** 2;
-  return 6371000 * 2 * Math.asin(Math.sqrt(Math.min(1, haversine)));
-}
 
 export function useDriveRoutes(
   transport: DriveNavigationTransport,

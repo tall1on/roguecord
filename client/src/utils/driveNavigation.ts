@@ -87,6 +87,50 @@ const validPosition = (position: any): boolean => !!position
   && typeof position.latitude === 'number' && Number.isFinite(position.latitude) && Math.abs(position.latitude) <= 90
   && typeof position.longitude === 'number' && Number.isFinite(position.longitude) && Math.abs(position.longitude) <= 180;
 
+export const isDriveDestination = (value: unknown): value is DriveDestination => {
+  if (!value || typeof value !== 'object') return false;
+  const destination = value as Record<string, unknown>;
+  return validPosition(destination) && typeof destination.label === 'string' && !!destination.label.trim()
+    && destination.label.length <= 500 && !/[\x00-\x1f\x7f]/.test(destination.label);
+};
+
+export function driveMovementDistance(a: MapPosition, b: MapPosition): number {
+  const radians = Math.PI / 180;
+  const haversine = Math.sin((b.latitude - a.latitude) * radians / 2) ** 2
+    + Math.cos(a.latitude * radians) * Math.cos(b.latitude * radians)
+    * Math.sin((b.longitude - a.longitude) * radians / 2) ** 2;
+  return 6371000 * 2 * Math.asin(Math.sqrt(Math.min(1, haversine)));
+}
+
+export function rankDriveParticipants<T extends { id: string }>(participants: T[], locations: ReadonlyMap<string, MapPosition>, destination: MapPosition | null) {
+  const entries = participants.map((participant) => {
+    const location = locations.get(participant.id);
+    return { participant, rank: null as number | null,
+      distance_m: destination && validPosition(destination) && location && validPosition(location)
+        ? driveMovementDistance(location, destination) : null };
+  });
+  if (!destination) return entries;
+  entries.sort((a, b) => {
+    if (a.distance_m === null) return b.distance_m === null ? 0 : 1;
+    if (b.distance_m === null) return -1;
+    return a.distance_m - b.distance_m || (a.participant.id < b.participant.id ? -1 : a.participant.id > b.participant.id ? 1 : 0);
+  });
+  let rank = 0;
+  for (const entry of entries) if (entry.distance_m !== null) entry.rank = ++rank;
+  return entries;
+}
+
+export const setDriveDestination = async (
+  transport: DriveNavigationTransport, channelId: string, destination: DriveDestination | null, signal: AbortSignal
+): Promise<DriveDestination | null> => {
+  if (destination !== null && !isDriveDestination(destination)) throw new Error('Choose a valid room destination.');
+  const response = await requestNavigation(transport, 'drive_set_destination', 'drive_destination_set', channelId, {
+    destination: destination ? { latitude: destination.latitude, longitude: destination.longitude, label: destination.label } : null
+  }, signal, 10000);
+  if (response.destination !== null && !isDriveDestination(response.destination)) throw new Error('Invalid room destination response.');
+  return response.destination;
+};
+
 export const searchDriveDestinations = async (
   transport: DriveNavigationTransport, channelId: string, query: string, signal: AbortSignal
 ): Promise<DriveDestination[]> => {

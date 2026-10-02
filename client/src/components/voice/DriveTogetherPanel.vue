@@ -6,7 +6,7 @@ import { useChatStore } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 import { useDriveStore } from '../../stores/drive'
 import { useDriveRoutes } from '../../composables/useDriveRoutes'
-import { getDriveMapCoordinates, searchDriveDestinations, type DriveDestination } from '../../utils/driveNavigation'
+import { getDriveMapCoordinates, rankDriveParticipants, searchDriveDestinations, setDriveDestination, type DriveDestination } from '../../utils/driveNavigation'
 
 const props = withDefaults(defineProps<{ channelId: string; channelName: string; phoneLayout?: boolean }>(), { phoneLayout: false })
 const emit = defineEmits<{ (e: 'back'): void }>()
@@ -17,22 +17,25 @@ const mapElement = ref<HTMLElement | null>(null)
 const mapError = ref<string | null>(null)
 const navigationElement = ref<HTMLElement | null>(null)
 const destinationKey = computed(() => `${chatStore.activeConnectionId}:${props.channelId}`)
-const destination = computed<DriveDestination | null>({
-  get: () => driveStore.destinations.get(destinationKey.value) ?? null,
-  set: (value) => {
-    if (value) driveStore.destinations.set(destinationKey.value, value)
-    else driveStore.destinations.delete(destinationKey.value)
-  }
-})
+const destination = computed<DriveDestination | null>(() => driveStore.destinations.get(destinationKey.value) ?? null)
 const addressQuery = ref(destination.value?.label ?? '')
 const searchResults = ref<DriveDestination[]>([])
 const searchError = ref<string | null>(null)
 const isSearching = ref(false)
+const isSettingDestination = ref(false)
+let destinationController: AbortController | null = null
 let searchController: AbortController | null = null
 let lastSearchAt = 0
 const isJoined = computed(() => driveStore.joinedChannelId === props.channelId)
 const participants = computed(() => webrtcStore.channelParticipants.get(props.channelId) || [])
 const visibleLocations = computed(() => isJoined.value ? [...driveStore.locations.values()] : [])
+const rankedParticipants = computed(() => rankDriveParticipants(participants.value,
+  isJoined.value ? driveStore.locations : new Map(), destination.value))
+const podiumClasses = [
+  'border-amber-400/50 bg-amber-400/10 text-amber-200',
+  'border-slate-300/50 bg-slate-300/10 text-slate-200',
+  'border-orange-400/50 bg-orange-700/15 text-orange-300'
+]
 const { routes, routeErrors, isRouting } = useDriveRoutes(chatStore, () => props.channelId,
   () => visibleLocations.value, () => destination.value, () => isJoined.value)
 const renderedStreets = computed(() => {
@@ -88,7 +91,17 @@ const cancelSearch = () => {
   searchError.value = null
 }
 watch(addressQuery, cancelSearch, { flush: 'sync' })
-watch(destinationKey, () => {
+watch(destination, () => {
+  cancelSearch()
+  addressQuery.value = destination.value?.label ?? ''
+}, { flush: 'sync' })
+const cancelDestinationChange = () => {
+  destinationController?.abort()
+  destinationController = null
+  isSettingDestination.value = false
+}
+watch([destinationKey, isJoined], () => {
+  cancelDestinationChange()
   cancelSearch()
   addressQuery.value = destination.value?.label ?? ''
 }, { flush: 'sync' })
@@ -120,16 +133,25 @@ const searchAddress = async () => {
   }
 }
 
-const selectDestination = (result: DriveDestination) => {
-  destination.value = result
-  addressQuery.value = result.label
-  cancelSearch()
-}
-
-const clearDestination = () => {
-  destination.value = null
-  addressQuery.value = ''
-  cancelSearch()
+const changeDestination = async (result: DriveDestination | null) => {
+  if (!isJoined.value || isSettingDestination.value) return
+  const controller = new AbortController()
+  destinationController = controller
+  isSettingDestination.value = true
+  searchError.value = null
+  try {
+    await setDriveDestination(chatStore, props.channelId, result, controller.signal)
+    if (disposed || destinationController !== controller) return
+    cancelSearch()
+    addressQuery.value = destination.value?.label ?? ''
+  } catch (error) {
+    if (!disposed && destinationController === controller) searchError.value = error instanceof Error ? error.message : 'Could not change the room destination.'
+  } finally {
+    if (destinationController === controller) {
+      destinationController = null
+      isSettingDestination.value = false
+    }
+  }
 }
 
 const leaveDriveChannel = () => {
@@ -239,6 +261,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   disposed = true
   cancelSearch()
+  cancelDestinationChange()
   resizeObserver?.disconnect()
   map?.remove()
   map = null
@@ -282,13 +305,15 @@ onBeforeUnmount(() => {
         </form>
         <p v-if="searchError" class="mt-2 text-xs text-amber-300" role="alert">{{ searchError }}</p>
         <ul v-if="searchResults.length" class="mt-2 max-h-40 space-y-1 overflow-y-auto" aria-label="Matching destination addresses">
-          <li v-for="(result, index) in searchResults" :key="index"><button type="button" class="w-full rounded-lg px-2 py-2 text-left text-xs leading-relaxed text-zinc-300 hover:bg-zinc-800 hover:text-white" @click="selectDestination(result)">{{ result.label }}</button></li>
+          <li v-for="(result, index) in searchResults" :key="index"><button type="button" class="w-full rounded-lg px-2 py-2 text-left text-xs leading-relaxed text-zinc-300 hover:bg-zinc-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-50" :disabled="!isJoined || isSettingDestination" :title="!isJoined ? 'Join to set the room destination' : 'Set destination for everyone in the room'" @click="changeDestination(result)">{{ result.label }}</button></li>
         </ul>
         <div v-if="destination" class="mt-3 flex items-start gap-2 border-t border-white/10 pt-2">
           <Flag class="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
           <p class="min-w-0 flex-1 text-xs leading-relaxed text-zinc-200">{{ destination.label }}</p>
-          <button type="button" class="shrink-0 rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-white" aria-label="Clear destination" @click="clearDestination"><X class="h-3.5 w-3.5" /></button>
+          <button type="button" class="shrink-0 rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-white disabled:opacity-50" :disabled="!isJoined || isSettingDestination" aria-label="Clear destination" title="Clear the destination for everyone in the room" @click="changeDestination(null)"><X class="h-3.5 w-3.5" /></button>
         </div>
+        <p v-if="isSettingDestination" class="mt-2 text-[11px] text-indigo-300" role="status">Updating room destination...</p>
+        <p v-else-if="destination" class="mt-2 text-[10px] text-zinc-500">Shared with everyone in this room.</p>
         <p v-if="destination && isJoined" class="mt-2 text-[11px] text-zinc-400" role="status">{{ routes.size }}/{{ visibleLocations.length }} street routes<span v-if="isRouting">, updating...</span></p>
         <div v-if="routingErrors.length" class="mt-2 max-h-24 space-y-1 overflow-y-auto" role="alert"><p v-for="entry in routingErrors" :key="entry.userId" class="text-xs text-amber-300">{{ entry.username }}: {{ entry.error }}</p></div>
         <p class="mt-2 text-[10px] leading-relaxed text-zinc-500">Address search through your guild: <a href="https://photon.komoot.io" target="_blank" rel="noopener noreferrer" class="text-indigo-300 hover:underline">Photon / OpenStreetMap</a>. Street routes: <a href="https://project-osrm.org" target="_blank" rel="noopener noreferrer" class="text-indigo-300 hover:underline">OSRM</a>.</p>
@@ -301,11 +326,12 @@ onBeforeUnmount(() => {
     </div>
     <footer class="drive-footer shrink-0 border-t border-white/5 px-4 py-3">
       <div class="mb-2 flex max-h-24 flex-wrap gap-2 overflow-y-auto">
-        <span v-for="participant in participants" :key="participant.id" class="flex items-center gap-2 rounded-full border px-3 py-1 text-xs" :class="webrtcStore.isUserSpeaking(participant.id) ? 'border-green-500/50 text-green-300' : 'border-white/10 text-zinc-300'">
-          <MicOff v-if="participant.isMuted || participant.isDeafened" class="h-3 w-3 text-red-400" />
-          {{ participant.username }}
-          <MapPin v-if="isJoined && driveStore.locations.has(participant.id)" class="h-3 w-3 text-indigo-400" />
-          <span v-if="driveStore.getSpeedLabel(participant.id, channelId)" class="tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(participant.id, channelId) }}</span>
+        <span v-for="entry in rankedParticipants" :key="entry.participant.id" class="driver-chip flex items-center gap-2 rounded-full border px-3 py-1 text-xs" :data-rank="entry.rank ?? undefined" :class="[entry.rank !== null && entry.rank <= 3 ? podiumClasses[entry.rank - 1] : webrtcStore.isUserSpeaking(entry.participant.id) ? 'border-green-500/50 text-green-300' : 'border-white/10 text-zinc-300', webrtcStore.isUserSpeaking(entry.participant.id) && entry.rank !== null && entry.rank <= 3 ? 'ring-1 ring-green-500/60' : '']" :title="entry.distance_m !== null ? `${Math.round(entry.distance_m)} m GPS distance to the shared destination` : undefined">
+          <span v-if="entry.rank !== null" class="min-w-4 font-bold tabular-nums">{{ entry.rank }}.</span>
+          <MicOff v-if="entry.participant.isMuted || entry.participant.isDeafened" class="h-3 w-3 text-red-400" />
+          {{ entry.participant.username }}
+          <MapPin v-if="isJoined && driveStore.locations.has(entry.participant.id)" class="h-3 w-3 text-indigo-400" />
+          <span v-if="driveStore.getSpeedLabel(entry.participant.id, channelId)" class="tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(entry.participant.id, channelId) }}</span>
         </span>
       </div>
       <p class="text-[11px] leading-relaxed text-zinc-500">GPS sharing stops when you leave. For street routes, driver positions are sent through your guild to its configured OSRM server. Your guild does not save live GPS or routes; address results are cached in its database. Map tiles come from OpenStreetMap. Screen sharing is disabled.</p>

@@ -1,5 +1,5 @@
 import { ClientConnection, connectionManager } from './connectionManager';
-import { driveParticipants } from './drive';
+import { driveParticipants, validDriveId } from './drive';
 import { handleDriveNavigation } from './driveNavigation';
 import {
   createUser,
@@ -1771,6 +1771,24 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'drive_get_route':
         await handleDriveNavigation(client, type, payload);
         break;
+      case 'drive_set_destination': {
+        const identifiers = {
+          request_id: validDriveId(payload?.request_id) ? payload.request_id : null,
+          channel_id: validDriveId(payload?.channel_id) ? payload.channel_id : null
+        };
+        let result: Record<string, unknown>;
+        try {
+          if (!identifiers.request_id || !identifiers.channel_id) throw new Error('Invalid request identifiers');
+          const room = rooms.get(identifiers.channel_id);
+          if (!client.userId || room?.type !== 'drive' || !room.peers.has(client.userId)
+            || !driveParticipants.owns(identifiers.channel_id, client)) throw new Error('Join the drive channel before selecting a destination');
+          result = { destination: driveParticipants.setDestination(identifiers.channel_id, client, payload.destination) };
+        } catch (error) {
+          result = { error: error instanceof Error ? error.message : 'Drive destination could not be set. Please try again' };
+        }
+        if (client.ws.readyState === 1) client.ws.send(JSON.stringify({ type: 'drive_destination_set', payload: { ...identifiers, ...result } }));
+        break;
+      }
       case 'auth:request':
         await handleAuthRequest(client, payload);
         break;
