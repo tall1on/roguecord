@@ -30,6 +30,14 @@ services:
       LISTEN_IP: "0.0.0.0"
       PORT: "1338"
 
+      # Existing providers only; no routing engine or map provisioning.
+      DRIVE_PHOTON_URL: ${DRIVE_PHOTON_URL-https://photon.komoot.io/api/}
+      # Public OSRM: light non-commercial <=1/sec, no SLA. Empty explicitly disables routing.
+      DRIVE_OSRM_URL: ${DRIVE_OSRM_URL-https://router.project-osrm.org}
+      DRIVE_GEOCODE_TTL_SECONDS: ${DRIVE_GEOCODE_TTL_SECONDS:-604800}
+      DRIVE_GEOCODE_EMPTY_TTL_SECONDS: ${DRIVE_GEOCODE_EMPTY_TTL_SECONDS:-300}
+      DRIVE_GEOCODE_MAX_ROWS: ${DRIVE_GEOCODE_MAX_ROWS:-1000}
+
       # mediasoup WebRTC
       MEDIASOUP_LISTEN_IP: "0.0.0.0"
       # IMPORTANT: set this to your server's public IP so clients can reach the

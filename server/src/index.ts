@@ -21,6 +21,7 @@ const PORT = process.env.PORT ? ~~process.env.PORT : 1337;
 const HOST = process.env.LISTEN_IP || '0.0.0.0';
 const serverIconsRootDir = path.resolve(dataDir, 'server-icons');
 const userAvatarsRootDir = path.resolve(dataDir, 'user-avatars');
+const driverAvatarsRootDir = path.resolve(dataDir, 'driver-avatars');
 const filesRootDir = path.resolve(dataDir, 'files');
 const emojiAssetsRootDir = path.resolve(process.cwd(), 'client', 'public', 'svg');
 const DEFAULT_FILE_CACHE_CONTROL = 'public, max-age=300';
@@ -350,6 +351,7 @@ const resolveSafeStoredFilePath = (channelId: string, storageName: string) => {
 };
 
 async function startServer() {
+    await channelsSchemaReady;
     const server = http.createServer(async (req, res) => {
         const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
@@ -473,6 +475,36 @@ async function startServer() {
             }
         }
 
+        if (req.method === 'GET' && requestUrl.pathname.startsWith('/driver-avatars/')) {
+            try {
+                const segments = requestUrl.pathname.split('/').filter(Boolean);
+                if (segments.length !== 3) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const userId = segments[1] || '';
+                const storageName = segments[2] || '';
+
+                if (!isSafeUserId(userId) || !isSafeStorageName(storageName)) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const driverAvatarFilePath = path.resolve(driverAvatarsRootDir, userId, storageName);
+                if (!driverAvatarFilePath.startsWith(driverAvatarsRootDir) || !fs.existsSync(driverAvatarFilePath)) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                await streamLocalFile(req, res, driverAvatarFilePath, getIconContentType(driverAvatarFilePath));
+                return;
+            } catch (error) {
+                handleStreamingResponseError(res, error, 'Failed to serve driver avatar:');
+                return;
+            }
+        }
+
         if (req.method === 'GET' && requestUrl.pathname.startsWith('/svg/')) {
             try {
                 const relativePath = decodeURIComponent(requestUrl.pathname.slice('/svg/'.length));
@@ -538,7 +570,8 @@ async function startServer() {
         });
 
         ws.on('message', async (message) => {
-            console.log(`[WS DEBUG] Received message from ${client.userId || 'unauthenticated'}: ${message}`);
+            // Never log raw payloads: GPS coordinates can also occur in malformed or spoofed messages.
+            console.log(`[WS DEBUG] Received message from ${client.userId || 'unauthenticated'}`);
             await handleMessage(client, message.toString());
         });
 
@@ -556,12 +589,6 @@ async function startServer() {
     server.listen(PORT, HOST, async () => {
         console.log(`HTTP Server listening on http://${HOST}:${PORT}`);
         console.log(`WebSocket Server listening on ws://${HOST}:${PORT}`);
-        try {
-            await channelsSchemaReady;
-        } catch (error) {
-            console.error('Database schema initialization failed:', error);
-            process.exit(1);
-        }
         try {
             await migrateLegacyUserAvatarDataUrls();
         } catch (error) {
@@ -581,4 +608,7 @@ async function startServer() {
     });
 }
 
-startServer().catch(console.error);
+startServer().catch((error) => {
+    console.error('Server startup failed:', error);
+    process.exit(1);
+});

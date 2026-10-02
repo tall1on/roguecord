@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { RouterView } from 'vue-router'
 import { useRouter } from 'vue-router'
-import { Minus, Square, X, AlertCircle } from 'lucide-vue-next'
-import { useChatStore, type ServerPermission } from '../stores/chat'
+import { ArrowLeft, Minus, Square, X, AlertCircle } from 'lucide-vue-next'
+import { useChatStore, type Channel, type ServerPermission } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
+import { useDriveStore } from '../stores/drive'
 import LoginModal from '../components/layout/modals/LoginModal.vue'
 import CreateServerModal from '../components/layout/modals/CreateServerModal.vue'
 import CreateChannelModal from '../components/layout/modals/CreateChannelModal.vue'
@@ -15,8 +16,10 @@ import ChannelListSidebar from '../components/layout/ChannelListSidebar.vue'
 import MemberListSidebar from '../components/layout/MemberListSidebar.vue'
 import { isTauri } from '../utils/isTauri'
 import { isCachyOS } from '../utils/isCachyOS'
+import { usePhoneLayout } from '../composables/usePhoneLayout'
 
 const ServerSettingsModal = defineAsyncComponent(() => import('../components/layout/modals/ServerSettingsModal.vue'))
+const DriveTogetherPanel = defineAsyncComponent(() => import('../components/voice/DriveTogetherPanel.vue'))
 
 type ServerSettingsNavGroup = {
   id: string
@@ -25,10 +28,36 @@ type ServerSettingsNavGroup = {
   items: Array<{ id: string; label: string }>
 }
 
-type SettingsSection = 'general' | 'audio' | 'connections' | 'server'
+type SettingsSection = 'general' | 'audio' | 'connections' | 'drive' | 'identity' | 'server'
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
+useDriveStore()
+const isPhone = usePhoneLayout()
+const phoneDriveChannelId = ref<string | null>(null)
+const phoneBackButton = ref<HTMLButtonElement | null>(null)
+let previousPhoneFocus: HTMLElement | null = null
+const phoneDriveChannel = computed(() => isPhone.value
+  ? chatStore.activeServerChannels.find((channel) => channel.id === phoneDriveChannelId.value && channel.type === 'drive')
+  : undefined)
+const openPhoneDriveChannel = (channelId: string) => {
+  if (!isPhone.value || !chatStore.activeServerChannels.some((channel) => channel.id === channelId && channel.type === 'drive')) return
+  previousPhoneFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  chatStore.setActiveVoicePanel(channelId)
+  phoneDriveChannelId.value = channelId
+  void nextTick(() => phoneBackButton.value?.focus({ preventScroll: true }))
+}
+const closePhoneDriveChannel = () => {
+  phoneDriveChannelId.value = null
+  void nextTick(() => previousPhoneFocus?.isConnected && previousPhoneFocus.focus({ preventScroll: true }))
+}
+watch(isPhone, (phone) => {
+  phoneDriveChannelId.value = null
+  if (phone && chatStore.activeMainPanel.type === 'voice' && chatStore.activeMainPanel.channelId && chatStore.activeMainPanel.channelId === webrtcStore.activeVoiceChannelId) {
+    openPhoneDriveChannel(chatStore.activeMainPanel.channelId)
+  }
+})
+watch(() => chatStore.activeConnectionId, () => { phoneDriveChannelId.value = null })
 const router = useRouter()
 const isTauriApp = isTauri()
 const cachyOSBuild = isCachyOS()
@@ -42,7 +71,7 @@ const isMaximized = ref(false)
 
 const showCreateChannelModal = ref(false)
 const newChannelName = ref('')
-const newChannelType = ref<'text' | 'voice' | 'rss' | 'folder'>('text')
+const newChannelType = ref<Channel['type']>('text')
 const newChannelFeedUrl = ref('')
 const selectedCategoryId = ref<string | null>(null)
 const createChannelError = ref<string | null>(null)
@@ -361,7 +390,7 @@ const handleCreateServer = async () => {
   }
 }
 
-const openCreateChannelModal = (payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' | 'folder'; createCategory?: boolean }) => {
+const openCreateChannelModal = (payload: { categoryId: string | null; type?: Channel['type']; createCategory?: boolean }) => {
   if (!canManageChannels.value) return
 
   createChannelError.value = null
@@ -913,9 +942,9 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="flex h-screen w-full flex-col overflow-hidden bg-zinc-950 text-zinc-300 font-sans">
+  <div class="flex h-screen w-full flex-col overflow-hidden bg-zinc-950 text-zinc-300 font-sans" :class="{ 'phone-layout': isPhone }">
     <div
-      v-if="isTauriApp && !cachyOSBuild"
+      v-if="isTauriApp && !cachyOSBuild && !isPhone"
       class="tauri-titlebar flex h-10 shrink-0 items-center border-b border-zinc-800 bg-zinc-900/95"
     >
       <div class="tauri-titlebar-drag-region flex min-w-0 flex-1 items-center px-4" data-tauri-drag-region>
@@ -1018,7 +1047,7 @@ onUnmounted(() => {
     />
 
     <div class="flex min-h-0 min-w-0 flex-1 overflow-hidden relative">
-      <ServerListSidebar @open-create-server="showCreateServerModal = true" />
+      <ServerListSidebar :phone-layout="isPhone" :inert="phoneDriveChannel ? true : undefined" :aria-hidden="phoneDriveChannel ? true : undefined" @open-create-server="showCreateServerModal = true" />
 
       <div v-if="chatStore.isConnecting || chatStore.isAuthPending || chatStore.isInitialSyncPending" class="absolute inset-y-0 right-0 left-[72px] z-50 flex flex-col items-center justify-center bg-zinc-900/80 backdrop-blur-sm">
         <div class="w-12 h-12 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin mb-4"></div>
@@ -1048,6 +1077,9 @@ onUnmounted(() => {
       </div>
 
       <ChannelListSidebar
+        :phone-layout="isPhone"
+        :inert="phoneDriveChannel ? true : undefined"
+        :aria-hidden="phoneDriveChannel ? true : undefined"
         :is-admin="isAdmin"
         :can-open-server-settings="canOpenServerSettings"
         :can-manage-channels="canManageChannels"
@@ -1056,15 +1088,39 @@ onUnmounted(() => {
         @remove-server="handleRemoveServer"
         @open-admin="openSettings(canOpenServerSettings ? 'server' : 'general')"
         @open-create-channel="openCreateChannelModal"
+        @open-drive-channel="openPhoneDriveChannel"
       />
 
-      <main class="flex min-w-0 flex-1 bg-zinc-900 border-l border-white/5">
+      <main v-if="!isPhone" class="flex min-w-0 flex-1 bg-zinc-900 border-l border-white/5">
         <div class="flex flex-1 flex-col min-w-0">
           <RouterView />
         </div>
 
         <MemberListSidebar v-if="shouldShowMemberList" />
       </main>
+      <div v-if="phoneDriveChannel" class="phone-drive-overlay fixed inset-0 z-40 flex min-h-0 flex-col overflow-hidden bg-zinc-950" role="dialog" aria-modal="true" :aria-label="`Drive Together: ${phoneDriveChannel.name}`" @keydown.esc.stop.prevent="closePhoneDriveChannel">
+        <button ref="phoneBackButton" type="button" class="phone-drive-back absolute z-30 flex h-11 w-11 items-center justify-center rounded-xl text-zinc-300 hover:bg-zinc-800 hover:text-white" aria-label="Back to servers and channels" @click="closePhoneDriveChannel"><ArrowLeft class="h-5 w-5" /></button>
+        <DriveTogetherPanel :key="`${chatStore.activeConnectionId}:${phoneDriveChannel.id}`" :channel-id="phoneDriveChannel.id" :channel-name="phoneDriveChannel.name" phone-layout @back="closePhoneDriveChannel" />
+      </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.phone-layout {
+  height: 100vh;
+  height: 100dvh;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+.phone-drive-overlay {
+  height: 100vh;
+  height: 100dvh;
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+.phone-drive-back {
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  left: calc(12px + env(safe-area-inset-left, 0px));
+}
+</style>

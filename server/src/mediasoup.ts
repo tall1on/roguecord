@@ -132,25 +132,36 @@ export interface Peer {
 
 export interface Room {
   id: string;
+  type?: 'voice' | 'drive';
   router: Router;
   peers: Map<string, Peer>;
   callStartedAt?: number; // epoch ms when the active call began (first member joined); undefined when no active call
 }
 
 export const rooms = new Map<string, Room>();
+const pendingRooms = new Map<string, Promise<Room>>();
 
 export async function getOrCreateRoom(roomId: string): Promise<Room> {
-  let room = rooms.get(roomId);
-  if (!room) {
+  const existing = rooms.get(roomId);
+  if (existing) return existing;
+  const pending = pendingRooms.get(roomId);
+  if (pending) return pending;
+  const creation = (async () => {
     const router = await createRouter();
-    room = {
+    const room: Room = {
       id: roomId,
       router,
       peers: new Map(),
     };
     rooms.set(roomId, room);
+    return room;
+  })();
+  pendingRooms.set(roomId, creation);
+  try {
+    return await creation;
+  } finally {
+    pendingRooms.delete(roomId);
   }
-  return room;
 }
 
 export function getPeer(room: Room, peerId: string): Peer {

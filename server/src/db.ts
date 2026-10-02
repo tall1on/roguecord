@@ -2,6 +2,8 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { migrateChannelsSchema } from './channelMigration';
+import { migrateDriveGeocodeCache } from './driveGeocodeMigration';
 import {
   ADMIN_ROLE_KEY,
   ALL_SERVER_PERMISSIONS,
@@ -44,12 +46,13 @@ let folderFilesSchemaMigrated = false;
 let messageAttachmentsSchemaMigrated = false;
 let messagesSchemaMigrated = false;
 let messageReactionsSchemaMigrated = false;
+let driveGeocodeSchemaMigrated = false;
 
 function failSchemaInitialization(error: Error) {
   rejectChannelsSchemaReady?.(error);
 }
 
-function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'user_server_roles' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions') {
+function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'user_server_roles' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions' | 'drive_geocode_cache') {
   if (step === 'servers') serversSchemaMigrated = true;
   if (step === 'users') usersSchemaMigrated = true;
   if (step === 'roles') rolesSchemaMigrated = true;
@@ -59,8 +62,9 @@ function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'user_server_r
   if (step === 'message_attachments') messageAttachmentsSchemaMigrated = true;
   if (step === 'messages') messagesSchemaMigrated = true;
   if (step === 'message_reactions') messageReactionsSchemaMigrated = true;
+  if (step === 'drive_geocode_cache') driveGeocodeSchemaMigrated = true;
 
-  if (serversSchemaMigrated && usersSchemaMigrated && rolesSchemaMigrated && userServerRolesSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated) {
+  if (serversSchemaMigrated && usersSchemaMigrated && rolesSchemaMigrated && userServerRolesSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated && driveGeocodeSchemaMigrated) {
     resolveChannelsSchemaReady?.();
   }
 }
@@ -68,6 +72,7 @@ function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'user_server_r
 export const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error('Error opening database:', err.message);
+    failSchemaInitialization(err);
   } else {
     console.log('Connected to the SQLite database.');
     initializeDatabase();
@@ -127,6 +132,7 @@ export const normalizeStoredServerRolePositions = async (serverId?: string): Pro
 };
 
 function initializeDatabase() {
+  migrateDriveGeocodeCache(db).then(() => markSchemaStepDone('drive_geocode_cache'), failSchemaInitialization);
   db.serialize(() => {
     // Servers Table
     db.run(`
@@ -186,6 +192,11 @@ function initializeDatabase() {
         avatar_storage_provider TEXT,
         avatar_storage_key TEXT,
         avatar_storage_name TEXT,
+        driver_avatar_url TEXT,
+        driver_avatar_mime_type TEXT,
+        driver_avatar_storage_provider TEXT,
+        driver_avatar_storage_key TEXT,
+        driver_avatar_storage_name TEXT,
         status_emoji TEXT,
         status_text TEXT,
         last_ip TEXT,
@@ -312,7 +323,7 @@ function initializeDatabase() {
         id TEXT PRIMARY KEY,
         category_id TEXT,
         name TEXT NOT NULL,
-        type TEXT NOT NULL CHECK(type IN ('text', 'voice', 'rss', 'folder')),
+        type TEXT NOT NULL CHECK(type IN ('text', 'voice', 'rss', 'folder', 'drive')),
         position INTEGER NOT NULL DEFAULT 0,
         feed_url TEXT,
         FOREIGN KEY (category_id) REFERENCES categories(id)
@@ -690,92 +701,13 @@ function initializeDatabase() {
 }
 
 function migrateChannelsTableSchema(done: (error?: Error) => void) {
-  db.all('PRAGMA table_info(channels)', (pragmaErr, columns: any[]) => {
-    if (pragmaErr) {
-      console.error('Failed to inspect channels table for migration:', pragmaErr.message);
-      done(pragmaErr);
-      return;
-    }
-
-    const hasFeedUrl = columns.some((column) => column.name === 'feed_url');
-    db.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'channels'", (schemaErr, schemaRow: any) => {
-      if (schemaErr) {
-        done(schemaErr);
-        return;
-      }
-
-      const tableSql = typeof schemaRow?.sql === 'string' ? schemaRow.sql.toLowerCase() : '';
-      const supportsFolderType = tableSql.includes("'folder'");
-
-      if (hasFeedUrl && supportsFolderType) {
-        db.serialize(() => {
-          db.run('CREATE INDEX IF NOT EXISTS idx_channels_category_position ON channels(category_id, position)');
-          db.run('CREATE INDEX IF NOT EXISTS idx_channels_position ON channels(position)');
-        });
-        done();
-        return;
-      }
-
-      db.run(
-        `
-        CREATE TABLE IF NOT EXISTS channels_new (
-          id TEXT PRIMARY KEY,
-          category_id TEXT,
-          name TEXT NOT NULL,
-          type TEXT NOT NULL CHECK(type IN ('text', 'voice', 'rss', 'folder')),
-          position INTEGER NOT NULL DEFAULT 0,
-          feed_url TEXT,
-          FOREIGN KEY (category_id) REFERENCES categories(id)
-        )
-        `,
-        (createErr) => {
-          if (createErr) {
-            console.error('Failed to create channels_new migration table:', createErr.message);
-            done(createErr);
-            return;
-          }
-
-          const feedUrlSelect = hasFeedUrl ? 'feed_url' : 'NULL';
-          db.run(
-            `
-            INSERT INTO channels_new (id, category_id, name, type, position, feed_url)
-            SELECT id, category_id, name, type, position, ${feedUrlSelect} FROM channels
-            `,
-            (copyErr) => {
-              if (copyErr) {
-                console.error('Failed to copy channels into migration table:', copyErr.message);
-                db.run('DROP TABLE IF EXISTS channels_new', () => {});
-                done(copyErr);
-                return;
-              }
-
-              db.run('DROP TABLE channels', (dropErr) => {
-                if (dropErr) {
-                  console.error('Failed to drop old channels table during migration:', dropErr.message);
-                  db.run('DROP TABLE IF EXISTS channels_new', () => {});
-                  done(dropErr);
-                  return;
-                }
-
-                db.run('ALTER TABLE channels_new RENAME TO channels', (renameErr) => {
-                  if (renameErr) {
-                    console.error('Failed to rename channels_new table during migration:', renameErr.message);
-                    done(renameErr);
-                    return;
-                  }
-                  db.serialize(() => {
-                    db.run('CREATE INDEX IF NOT EXISTS idx_channels_category_position ON channels(category_id, position)');
-                    db.run('CREATE INDEX IF NOT EXISTS idx_channels_position ON channels(position)');
-                  });
-                  console.log('Migrated channels table schema to support rss feed_url, folder channels, and channel ordering indexes.');
-                  done();
-                });
-              });
-            }
-          );
-        }
-      );
-    });
+  const migrationDb = new sqlite3.Database(dbPath, (error) => {
+    if (error) return done(error);
+    migrationDb.configure('busyTimeout', 10000);
+    migrateChannelsSchema(migrationDb).then(
+      () => migrationDb.close((error) => done(error || undefined)),
+      (error) => migrationDb.close(() => done(error))
+    );
   });
 }
 
@@ -791,6 +723,11 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
     const hasAvatarStorageProvider = columns.some((column) => column.name === 'avatar_storage_provider');
     const hasAvatarStorageKey = columns.some((column) => column.name === 'avatar_storage_key');
     const hasAvatarStorageName = columns.some((column) => column.name === 'avatar_storage_name');
+    const hasDriverAvatarUrl = columns.some((column) => column.name === 'driver_avatar_url');
+    const hasDriverAvatarMimeType = columns.some((column) => column.name === 'driver_avatar_mime_type');
+    const hasDriverAvatarStorageProvider = columns.some((column) => column.name === 'driver_avatar_storage_provider');
+    const hasDriverAvatarStorageKey = columns.some((column) => column.name === 'driver_avatar_storage_key');
+    const hasDriverAvatarStorageName = columns.some((column) => column.name === 'driver_avatar_storage_name');
     const hasStatusEmoji = columns.some((column) => column.name === 'status_emoji');
     const hasStatusText = columns.some((column) => column.name === 'status_text');
     const hasLastIp = columns.some((column) => column.name === 'last_ip');
@@ -804,6 +741,11 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
     if (!hasAvatarStorageProvider) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_storage_provider TEXT');
     if (!hasAvatarStorageKey) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_storage_key TEXT');
     if (!hasAvatarStorageName) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN avatar_storage_name TEXT');
+    if (!hasDriverAvatarUrl) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN driver_avatar_url TEXT');
+    if (!hasDriverAvatarMimeType) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN driver_avatar_mime_type TEXT');
+    if (!hasDriverAvatarStorageProvider) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN driver_avatar_storage_provider TEXT');
+    if (!hasDriverAvatarStorageKey) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN driver_avatar_storage_key TEXT');
+    if (!hasDriverAvatarStorageName) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN driver_avatar_storage_name TEXT');
     if (!hasStatusEmoji) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN status_emoji TEXT');
     if (!hasStatusText) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN status_text TEXT');
     if (!hasLastIp) pendingAlterStatements.push('ALTER TABLE users ADD COLUMN last_ip TEXT');
@@ -835,6 +777,23 @@ function migrateUsersTableSchema(done: (error?: Error) => void) {
             END,
             avatar_storage_key = NULLIF(TRIM(COALESCE(avatar_storage_key, '')), ''),
             avatar_storage_name = NULLIF(TRIM(COALESCE(avatar_storage_name, '')), ''),
+            driver_avatar_mime_type = CASE
+              WHEN LOWER(COALESCE(driver_avatar_mime_type, '')) IN ('image/png', 'image/jpeg') THEN LOWER(driver_avatar_mime_type)
+              ELSE CASE
+                WHEN LOWER(COALESCE(driver_avatar_url, '')) LIKE 'data:image/png;%' THEN 'image/png'
+                WHEN LOWER(COALESCE(driver_avatar_url, '')) LIKE 'data:image/jpeg;%' THEN 'image/jpeg'
+                WHEN LOWER(COALESCE(driver_avatar_url, '')) LIKE 'data:image/jpg;%' THEN 'image/jpeg'
+                WHEN LOWER(COALESCE(driver_avatar_url, '')) LIKE '%.png' THEN 'image/png'
+                WHEN LOWER(COALESCE(driver_avatar_url, '')) LIKE '%.jpg' OR LOWER(COALESCE(driver_avatar_url, '')) LIKE '%.jpeg' THEN 'image/jpeg'
+                ELSE NULL
+              END
+            END,
+            driver_avatar_storage_provider = CASE
+              WHEN LOWER(COALESCE(driver_avatar_storage_provider, '')) IN ('data_dir', 's3') THEN LOWER(driver_avatar_storage_provider)
+              ELSE NULL
+            END,
+            driver_avatar_storage_key = NULLIF(TRIM(COALESCE(driver_avatar_storage_key, '')), ''),
+            driver_avatar_storage_name = NULLIF(TRIM(COALESCE(driver_avatar_storage_name, '')), ''),
             status_emoji = NULLIF(TRIM(COALESCE(status_emoji, '')), ''),
             status_text = CASE
               WHEN TRIM(COALESCE(status_text, '')) = '' THEN NULL
