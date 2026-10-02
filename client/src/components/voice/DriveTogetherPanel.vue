@@ -6,7 +6,7 @@ import { useChatStore } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 import { useDriveStore } from '../../stores/drive'
 import { useDriveRoutes } from '../../composables/useDriveRoutes'
-import { DRIVE_SELF_COLOR, getDriveMapCoordinates, pickDriveColor, rankDriveParticipants, searchDriveDestinations, setDriveDestination, type DriveDestination } from '../../utils/driveNavigation'
+import { DRIVE_SELF_COLOR, getDriveMapCoordinates, getRouteHeading, pickDriveColor, rankDriveParticipants, searchDriveDestinations, setDriveDestination, type DriveDestination } from '../../utils/driveNavigation'
 
 const props = withDefaults(defineProps<{ channelId: string; channelName: string; phoneLayout?: boolean }>(), { phoneLayout: false })
 const emit = defineEmits<{ (e: 'back'): void }>()
@@ -99,9 +99,19 @@ const linePositions = new Map<string, [number, number][]>()
 let lastMapCoordinates: [number, number][] | null = null
 let destinationMarker: CircleMarker | null = null
 const NAV_ZOOM = 17
+const BEARING_EASING = 0.18
+const NAV_LOOK_AHEAD_MIN_METERS = 25
+const NAV_LOOK_AHEAD_MAX_METERS = 80
 let directionArrow: LeafletMarker | null = null
 let directionArrowHeading: number | null = null
-const clearDirectionArrow = () => { directionArrow?.remove(); directionArrow = null; directionArrowHeading = null }
+let directionArrowElement: HTMLElement | null = null
+let lastSelfPoint: { latitude: number; longitude: number } | null = null
+let targetHeading = 0
+let displayedHeading = 0
+let bearingFrame: number | null = null
+let bearingExitRefit = false
+const normalizeHeading = (value: number): number => ((value % 360) + 360) % 360
+const headingDelta = (from: number, to: number): number => ((to - from + 540) % 360) - 180
 const headingCenter = (point: { latitude: number; longitude: number }, heading: number, size: { x: number; y: number }): [number, number] => {
   const latitude = point.latitude
   const metersPerPixel = 156543.03392 * Math.cos(latitude * Math.PI / 180) / 2 ** NAV_ZOOM
@@ -111,18 +121,73 @@ const headingCenter = (point: { latitude: number; longitude: number }, heading: 
   const longitudeOffset = (Math.sin(radians) * offsetMeters) / (111320 * Math.max(0.01, Math.cos(latitude * Math.PI / 180)))
   return [latitude + latitudeOffset, point.longitude + longitudeOffset]
 }
-const updateDirectionArrow = (point: { latitude: number; longitude: number }) => {
+// Prefer the street route's next waypoint over the noisy GPS compass so the view turns early and holds steady.
+const routeHeading = (point: { latitude: number; longitude: number; speed: number | null }): number | null => {
+  const userId = chatStore.currentUser?.id
+  const route = userId ? routes.value.get(userId) : undefined
+  if (route) {
+    const speed = typeof point.speed === 'number' && Number.isFinite(point.speed) ? point.speed : null
+    const lookAhead = speed === null
+      ? NAV_LOOK_AHEAD_MIN_METERS + 10
+      : Math.min(NAV_LOOK_AHEAD_MAX_METERS, Math.max(NAV_LOOK_AHEAD_MIN_METERS, NAV_LOOK_AHEAD_MIN_METERS + speed * 2))
+    const heading = getRouteHeading(point, route.coordinates, lookAhead)
+    if (heading !== null) return heading
+  }
+  return driveStore.selfHeading
+}
+const rotateDirectionArrow = () => {
+  if (!directionArrowElement || directionArrowHeading === null) return
+  directionArrowElement.style.transform = `rotate(${normalizeHeading(directionArrowHeading - displayedHeading)}deg)`
+}
+const clearDirectionArrow = () => { directionArrow?.remove(); directionArrow = null; directionArrowHeading = null; directionArrowElement = null }
+const updateDirectionArrow = (point: { latitude: number; longitude: number }, heading: number) => {
   if (!map || !leaflet) return
-  const heading = driveStore.selfHeading
-  if (heading === null) { clearDirectionArrow(); return }
   const latLng: [number, number] = [point.latitude, point.longitude]
-  if (directionArrow) directionArrow.setLatLng(latLng)
-  if (directionArrow && directionArrowHeading === heading) return
-  const html = `<span style="display:block;width:100%;height:100%;transform:rotate(${heading}deg);transform-origin:50% 50%"><svg viewBox="0 0 24 24" width="100%" height="100%" style="filter:drop-shadow(0 1px 2px rgba(0,0,0,.65))"><path d="M12 2 L20.5 21 L12 16.5 L3.5 21 Z" fill="${selfColor()}" stroke="#ffffff" stroke-width="1.4" stroke-linejoin="round"/></svg></span>`
+  if (directionArrow) {
+    directionArrow.setLatLng(latLng)
+    directionArrowHeading = heading
+    rotateDirectionArrow()
+    return
+  }
+  const html = `<span style="display:block;width:100%;height:100%;transform-origin:50% 50%"><svg viewBox="0 0 24 24" width="100%" height="100%" style="filter:drop-shadow(0 1px 2px rgba(0,0,0,.65))"><path d="M12 2 L20.5 21 L12 16.5 L3.5 21 Z" fill="${selfColor()}" stroke="#ffffff" stroke-width="1.4" stroke-linejoin="round"/></svg></span>`
   const icon = leaflet.divIcon({ className: 'drive-direction-icon', html, iconSize: [30, 30], iconAnchor: [15, 15] })
   directionArrowHeading = heading
-  if (directionArrow) directionArrow.setIcon(icon)
-  else directionArrow = leaflet.marker(latLng, { icon, interactive: false, keyboard: false, zIndexOffset: 1000 }).addTo(map)
+  directionArrow = leaflet.marker(latLng, { icon, interactive: false, keyboard: false, zIndexOffset: 1000 }).addTo(map)
+  directionArrowElement = directionArrow.getElement()?.firstElementChild as HTMLElement | null
+  rotateDirectionArrow()
+}
+const applyNavView = () => {
+  if (!map) return
+  map.setBearing(normalizeHeading(-displayedHeading))
+  rotateDirectionArrow()
+  if (!lastSelfPoint) return
+  const size = map.getSize()
+  if (size.x <= 0 || size.y <= 0) return
+  map.setView(headingCenter(lastSelfPoint, displayedHeading, size), NAV_ZOOM, { animate: false })
+}
+const stepBearing = () => {
+  bearingFrame = null
+  if (disposed || !map) return
+  const delta = headingDelta(displayedHeading, targetHeading)
+  if (Math.abs(delta) < 0.05) {
+    if (displayedHeading !== targetHeading) {
+      displayedHeading = normalizeHeading(targetHeading)
+      applyNavView()
+    }
+    if (bearingExitRefit) {
+      bearingExitRefit = false
+      syncMap(true)
+    }
+    return
+  }
+  displayedHeading = normalizeHeading(displayedHeading + delta * BEARING_EASING)
+  applyNavView()
+  bearingFrame = requestAnimationFrame(stepBearing)
+}
+const startBearingAnimation = () => {
+  if (bearingFrame !== null) return
+  if (displayedHeading === targetHeading && !bearingExitRefit) return
+  bearingFrame = requestAnimationFrame(stepBearing)
 }
 
 const cancelSearch = () => {
@@ -274,16 +339,25 @@ const syncMap = (forceFit = false) => {
   if (navMode.value) {
     const selfPoint = points.find((point) => point.user_id === chatStore.currentUser?.id)
     if (selfPoint) {
-      updateDirectionArrow(selfPoint)
-      const size = map.getSize()
-      if (size.x <= 0 || size.y <= 0) return
-      const heading = driveStore.selfHeading
-      map.setView(heading === null ? [selfPoint.latitude, selfPoint.longitude] : headingCenter(selfPoint, heading, size), NAV_ZOOM, { animate: false })
+      lastSelfPoint = selfPoint
+      const heading = routeHeading(selfPoint)
+      if (heading !== null) {
+        targetHeading = heading
+        updateDirectionArrow(selfPoint, heading)
+      } else {
+        clearDirectionArrow()
+      }
+      startBearingAnimation()
+      applyNavView()
       lastMapCoordinates = null
       return
     }
   }
+  lastSelfPoint = null
   clearDirectionArrow()
+  if (displayedHeading !== 0) bearingExitRefit = true
+  targetHeading = 0
+  startBearingAnimation()
   if (!forceFit && coordinates === lastMapCoordinates) return
   const size = map.getSize()
   if (size.x <= 0 || size.y <= 0) return
@@ -302,7 +376,14 @@ onMounted(async () => {
     const [module] = await Promise.all([import('leaflet'), import('leaflet/dist/leaflet.css')])
     if (disposed || !mapElement.value) return
     leaflet = module
-    map = leaflet.map(mapElement.value, { zoomControl: true, attributionControl: true, minZoom: -10, zoomSnap: 0 }).setView([20, 0], 2)
+    // leaflet-rotate patches the Leaflet instance from the global namespace, so expose the ESM build first.
+    ;(window as Window & { L?: typeof import('leaflet') }).L = module
+    await import('leaflet-rotate')
+    if (disposed || !mapElement.value) return
+    map = leaflet.map(mapElement.value, {
+      zoomControl: true, attributionControl: true, minZoom: -10, zoomSnap: 0,
+      rotate: true, bearing: 0, rotateControl: false, touchRotate: false, shiftKeyRotate: false
+    }).setView([20, 0], 2)
     leaflet.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
       minZoom: -10,
@@ -322,6 +403,9 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   disposed = true
+  if (bearingFrame !== null) cancelAnimationFrame(bearingFrame)
+  bearingFrame = null
+  lastSelfPoint = null
   cancelSearch()
   cancelDestinationChange()
   resizeObserver?.disconnect()

@@ -102,6 +102,78 @@ export function driveMovementDistance(a: MapPosition, b: MapPosition): number {
   return 6371000 * 2 * Math.asin(Math.sqrt(Math.min(1, haversine)));
 }
 
+const EARTH_RADIUS_METERS = 6371000;
+const DEG_TO_RAD = Math.PI / 180;
+const RAD_TO_DEG = 180 / Math.PI;
+const ROUTE_MAX_OFFSET_METERS = 75;
+
+const bearingBetween = (from: MapPosition, to: MapPosition): number => {
+  const latitude1 = from.latitude * DEG_TO_RAD;
+  const latitude2 = to.latitude * DEG_TO_RAD;
+  const longitudeDelta = (to.longitude - from.longitude) * DEG_TO_RAD;
+  const y = Math.sin(longitudeDelta) * Math.cos(latitude2);
+  const x = Math.cos(latitude1) * Math.sin(latitude2) - Math.sin(latitude1) * Math.cos(latitude2) * Math.cos(longitudeDelta);
+  return (Math.atan2(y, x) * RAD_TO_DEG + 360) % 360;
+};
+
+// Equirectangular projection of a point onto a segment; distances are approximate but stable near the driver.
+const segmentProjection = (point: MapPosition, start: MapPosition, end: MapPosition) => {
+  const cosLatitude = Math.cos(point.latitude * DEG_TO_RAD);
+  const startX = (start.longitude - point.longitude) * cosLatitude;
+  const startY = start.latitude - point.latitude;
+  const deltaX = (end.longitude - start.longitude) * cosLatitude;
+  const deltaY = end.latitude - start.latitude;
+  const lengthSquared = deltaX * deltaX + deltaY * deltaY;
+  const t = lengthSquared === 0 ? 0 : Math.max(0, Math.min(1, -(startX * deltaX + startY * deltaY) / lengthSquared));
+  const offsetX = startX + t * deltaX;
+  const offsetY = startY + t * deltaY;
+  return { t, metersSquared: (offsetX * offsetX + offsetY * offsetY) * (EARTH_RADIUS_METERS * DEG_TO_RAD) ** 2 };
+};
+
+/**
+ * Estimates the direction of travel from the street route instead of the raw GPS heading.
+ * The nearest point on the route is followed by a look-ahead distance, so the value only
+ * changes at real corners and stays stable between noisy position fixes.
+ */
+export function getRouteHeading(position: MapPosition, coordinates: readonly (readonly [number, number])[], lookAheadMeters = 35): number | null {
+  if (!validPosition(position) || !Array.isArray(coordinates) || coordinates.length < 2) return null;
+  let best = { metersSquared: Infinity, index: 0, t: 0 };
+  for (let index = 0; index < coordinates.length - 1; index++) {
+    const start = { longitude: coordinates[index]![0], latitude: coordinates[index]![1] };
+    const end = { longitude: coordinates[index + 1]![0], latitude: coordinates[index + 1]![1] };
+    if (!validPosition(start) || !validPosition(end)) continue;
+    const projection = segmentProjection(position, start, end);
+    if (projection.metersSquared < best.metersSquared) best = { ...projection, index };
+  }
+  if (!Number.isFinite(best.metersSquared)) return null;
+  // A driver too far from the (possibly stale) route should fall back to the GPS compass instead.
+  if (Math.sqrt(best.metersSquared) > ROUTE_MAX_OFFSET_METERS) return null;
+  const start = coordinates[best.index]!;
+  const end = coordinates[best.index + 1]!;
+  let cursor: MapPosition = {
+    latitude: start[1] + (end[1] - start[1]) * best.t,
+    longitude: start[0] + (end[0] - start[0]) * best.t,
+  };
+  let remaining = lookAheadMeters;
+  for (let index = best.index; index < coordinates.length - 1; index++) {
+    const next = coordinates[index + 1]!;
+    const target = { longitude: next[0], latitude: next[1] };
+    const toTarget = driveMovementDistance(cursor, target);
+    if (toTarget <= 0) continue;
+    if (toTarget >= remaining) {
+      const ratio = remaining / toTarget;
+      const lookAhead = {
+        latitude: cursor.latitude + (target.latitude - cursor.latitude) * ratio,
+        longitude: cursor.longitude + (target.longitude - cursor.longitude) * ratio,
+      };
+      return driveMovementDistance(position, lookAhead) > 1 ? bearingBetween(position, lookAhead) : null;
+    }
+    remaining -= toTarget;
+    cursor = target;
+  }
+  return driveMovementDistance(position, cursor) > 1 ? bearingBetween(position, cursor) : null;
+}
+
 export const DRIVE_SELF_COLOR = '#39ff14';
 
 // Curated neon palette assigned to drivers before generated hues; green stays reserved for the local driver.

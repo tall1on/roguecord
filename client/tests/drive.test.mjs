@@ -13,13 +13,14 @@ let getDriveRoute
 let setDriveDestination
 let rankDriveParticipants
 let pickDriveColor
+let getRouteHeading
 let DRIVE_SELF_COLOR
 let DRIVE_DRIVER_COLORS
 let usePhoneLayout
 before(async () => {
   server = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom' })
   ;({ useDriveStore, getGpsSpeed } = await server.ssrLoadModule('/src/stores/drive.ts'))
-  ;({ getDriveMapCoordinates, searchDriveDestinations, getDriveRoute, setDriveDestination, rankDriveParticipants, pickDriveColor, DRIVE_SELF_COLOR, DRIVE_DRIVER_COLORS } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
+  ;({ getDriveMapCoordinates, searchDriveDestinations, getDriveRoute, setDriveDestination, rankDriveParticipants, pickDriveColor, getRouteHeading, DRIVE_SELF_COLOR, DRIVE_DRIVER_COLORS } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
   ;({ usePhoneLayout } = await server.ssrLoadModule('/src/composables/usePhoneLayout.ts'))
 })
 after(async () => server?.close())
@@ -368,6 +369,23 @@ test('automatic bounds include road detours as well as drivers and the destinati
   assert.equal(coordinates.length, 5)
   assert.equal(coordinates[1][0], destination.latitude)
   assert.equal(Math.max(...coordinates.map((point) => point[0])), 54)
+})
+
+test('street route heading follows the next waypoint instead of the raw GPS compass', () => {
+  const angleError = (a, b) => Math.abs(((a - b + 540) % 360) - 180)
+  const north = [[13.4, 52.5], [13.4, 52.5002], [13.4, 52.5004]]
+  assert.ok(angleError(getRouteHeading({ latitude: 52.5, longitude: 13.4 }, north, 20), 0) < 1)
+  const east = [[13.4, 52.5], [13.4002, 52.5], [13.4004, 52.5]]
+  assert.ok(angleError(getRouteHeading({ latitude: 52.5, longitude: 13.4 }, east, 20), 90) < 1)
+  const corner = [[13.4, 52.5], [13.4, 52.5002], [13.4002, 52.5002], [13.4004, 52.5002]]
+  assert.ok(angleError(getRouteHeading({ latitude: 52.5002, longitude: 13.4 }, corner, 20), 90) < 5)
+  // Projecting onto the route absorbs GPS jitter that would otherwise flip the compass.
+  const jittered = getRouteHeading({ latitude: 52.50005, longitude: 13.40001 }, north, 30)
+  assert.ok(angleError(jittered, 0) < 5)
+  assert.equal(getRouteHeading({ latitude: 52.5, longitude: 13.4 }, [[13.4, 52.5]], 20), null)
+  assert.equal(getRouteHeading({ latitude: NaN, longitude: 13.4 }, north, 20), null)
+  assert.equal(getRouteHeading({ latitude: 52.5, longitude: 13.4 }, null, 20), null)
+  assert.equal(getRouteHeading({ latitude: 53, longitude: 13.4 }, north, 20), null)
 })
 
 test('shared targets survive panel navigation but reset on disconnect until a fresh room snapshot', (context) => {

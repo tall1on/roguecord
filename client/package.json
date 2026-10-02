@@ -16,6 +16,7 @@
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-opener": "2.5.4",
     "leaflet": "1.9.4",
+    "leaflet-rotate": "0.2.8",
     "lucide-vue-next": "1.0.0",
     "mediasoup-client": "3.21.0",
     "pinia": "3.0.4",
