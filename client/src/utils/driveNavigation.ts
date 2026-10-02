@@ -102,6 +102,52 @@ export function driveMovementDistance(a: MapPosition, b: MapPosition): number {
   return 6371000 * 2 * Math.asin(Math.sqrt(Math.min(1, haversine)));
 }
 
+export const DRIVE_SELF_COLOR = '#39ff14';
+
+// Curated neon palette assigned to drivers before generated hues; green stays reserved for the local driver.
+export const DRIVE_DRIVER_COLORS = [
+  '#22d3ee', '#f472b6', '#fb923c', '#a78bfa', '#facc15',
+  '#60a5fa', '#f87171', '#2dd4bf', '#f0abfc', '#c084fc'
+] as const;
+
+const DRIVE_DRIVER_HUES = [187, 330, 27, 258, 48, 217, 0, 172, 292, 271];
+const DRIVE_SELF_HUE = 110;
+
+const hueDistance = (a: number, b: number): number => {
+  const distance = Math.abs(a - b) % 360;
+  return distance > 180 ? 360 - distance : distance;
+};
+
+const colorHue = (color: string): number | null => {
+  if (color === DRIVE_SELF_COLOR) return DRIVE_SELF_HUE;
+  const paletteIndex = (DRIVE_DRIVER_COLORS as readonly string[]).indexOf(color);
+  if (paletteIndex >= 0) return DRIVE_DRIVER_HUES[paletteIndex]!;
+  const match = /^hsl\(\s*(\d+(?:\.\d+)?)/.exec(color);
+  return match ? Number(match[1]) : null;
+};
+
+// Assigns the next most distinguishable color for a driver, generating spaced hues once the palette is exhausted.
+export function pickDriveColor(usedColors: ReadonlySet<string>, isSelf: boolean): string {
+  if (isSelf) return DRIVE_SELF_COLOR;
+  const available = (DRIVE_DRIVER_COLORS as readonly string[]).find((color) => !usedColors.has(color));
+  if (available) return available;
+  const usedHues = [DRIVE_SELF_HUE];
+  for (const color of usedColors) {
+    const hue = colorHue(color);
+    if (hue !== null) usedHues.push(hue);
+  }
+  let bestHue = 0;
+  let bestDistance = -1;
+  for (let hue = 0; hue < 360; hue += 2) {
+    const distance = usedHues.reduce((minimum, used) => Math.min(minimum, hueDistance(hue, used)), 180);
+    if (distance > bestDistance) {
+      bestDistance = distance;
+      bestHue = hue;
+    }
+  }
+  return `hsl(${bestHue} 90% 60%)`;
+}
+
 export function rankDriveParticipants<T extends { id: string }>(participants: T[], locations: ReadonlyMap<string, MapPosition>, destination: MapPosition | null) {
   const entries = participants.map((participant) => {
     const location = locations.get(participant.id);

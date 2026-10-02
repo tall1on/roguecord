@@ -12,11 +12,14 @@ let searchDriveDestinations
 let getDriveRoute
 let setDriveDestination
 let rankDriveParticipants
+let pickDriveColor
+let DRIVE_SELF_COLOR
+let DRIVE_DRIVER_COLORS
 let usePhoneLayout
 before(async () => {
   server = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom' })
   ;({ useDriveStore, getGpsSpeed } = await server.ssrLoadModule('/src/stores/drive.ts'))
-  ;({ getDriveMapCoordinates, searchDriveDestinations, getDriveRoute, setDriveDestination, rankDriveParticipants } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
+  ;({ getDriveMapCoordinates, searchDriveDestinations, getDriveRoute, setDriveDestination, rankDriveParticipants, pickDriveColor, DRIVE_SELF_COLOR, DRIVE_DRIVER_COLORS } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
   ;({ usePhoneLayout } = await server.ssrLoadModule('/src/composables/usePhoneLayout.ts'))
 })
 after(async () => server?.close())
@@ -440,6 +443,18 @@ test('disabled destinations restore original chip order; equal GPS positions bre
   assert.deepEqual(entries.map((entry) => [entry.participant.id, entry.rank]), [['a', 1], ['b', 2], ['invalid', null]])
   assert.ok(entries[0].distance_m < 25000)
   assert.deepEqual(rankDriveParticipants(participants, locations, null).map((entry) => [entry.participant.id, entry.rank]), [['b', null], ['a', null], ['invalid', null]])
+})
+
+test('each driver gets a distinct color while the local driver keeps neon green', () => {
+  assert.equal(pickDriveColor(new Set(), true), DRIVE_SELF_COLOR)
+  assert.equal(pickDriveColor(new Set([DRIVE_SELF_COLOR]), false), DRIVE_DRIVER_COLORS[0])
+  const used = new Set()
+  const colors = DRIVE_DRIVER_COLORS.map(() => { const color = pickDriveColor(used, false); used.add(color); return color })
+  assert.equal(new Set(colors).size, colors.length)
+  assert.ok(!colors.includes(DRIVE_SELF_COLOR))
+  const extras = Array.from({ length: 6 }, () => { const color = pickDriveColor(used, false); used.add(color); return color })
+  assert.equal(new Set([...colors, ...extras]).size, colors.length + extras.length)
+  assert.ok(extras.every((color) => /^hsl\(/.test(color)))
 })
 
 test('phone layout follows modern and legacy media changes and cleans up on unmount', (context) => {
