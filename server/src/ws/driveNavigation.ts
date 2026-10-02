@@ -3,7 +3,7 @@ import { db, channelsSchemaReady } from '../db';
 import { getChannelById } from '../models';
 import { DriveServiceError, DriveServices, normalizeDriveQuery, readDriveConfig, validCoordinates } from '../driveServices';
 import type { ClientConnection } from './connectionManager';
-import { DriveParticipants, driveParticipants } from './drive';
+import { DriveParticipants, driveParticipants, validDriveId as validId } from './drive';
 
 type Dependencies = {
   ready: Promise<void>;
@@ -11,8 +11,6 @@ type Dependencies = {
   services: () => Pick<DriveServices, 'search' | 'route'>;
   participants: DriveParticipants;
 };
-const validId = (value: unknown): value is string => typeof value === 'string'
-  && value.length > 0 && value.length <= 128 && !/[\s\x00-\x1f\x7f]/.test(value);
 
 export function createDriveNavigationHandler(dependencies: Dependencies) {
   const limits = new WeakMap<ClientConnection, { search: number; route: number; pending: number }>();
@@ -41,6 +39,10 @@ export function createDriveNavigationHandler(dependencies: Dependencies) {
       if (!userId || !active()) throw new DriveServiceError('Authentication required.');
       const query = search ? normalizeDriveQuery(payload.query) : undefined;
       if (!search && !validCoordinates(payload.destination)) throw new DriveServiceError('Invalid destination coordinates.');
+      const requestedDestination = search ? null : {
+        latitude: (payload.destination as { latitude: number }).latitude,
+        longitude: (payload.destination as { longitude: number }).longitude
+      };
       if (!limit) { limit = { search: -Infinity, route: -Infinity, pending: 0 }; limits.set(client, limit); }
       const now = Date.now();
       const kind = search ? 'search' : 'route';
@@ -63,13 +65,16 @@ export function createDriveNavigationHandler(dependencies: Dependencies) {
       } else {
         const source = dependencies.participants.readSharedLocation(channelId, client, targetId as string);
         if (!source) throw new DriveServiceError('Join the drive channel and select a participant sharing location.');
+        const destination = dependencies.participants.destinationFor(channelId, client);
+        if (!destination || destination.latitude !== requestedDestination!.latitude || destination.longitude !== requestedDestination!.longitude) {
+          throw new DriveServiceError('Select the shared room destination before requesting a matching route.');
+        }
         const currentSource = () => {
-          if (!active()) return null;
+          if (!active() || dependencies.participants.destinationFor(channelId, client) !== destination) return null;
           const latest = dependencies.participants.readSharedLocation(channelId, client, targetId as string);
           return latest && latest.membership === source.membership && latest.source === source.source
             && latest.sharingSession === source.sharingSession ? latest.location : null;
         };
-        const destination = payload.destination as { latitude: number; longitude: number };
         const route = await dependencies.services().route(source.location, { latitude: destination.latitude, longitude: destination.longitude }, {
           channelId, userId: targetId as string,
           resolveOrigin: async () => {
@@ -80,7 +85,7 @@ export function createDriveNavigationHandler(dependencies: Dependencies) {
         const current = await dependencies.channel(channelId);
         if (!active()) return;
         if (current?.type !== 'drive' || !currentSource()) {
-          throw new DriveServiceError('Drive membership or shared location changed. Request a new route.');
+          throw new DriveServiceError('Drive membership, shared location or destination changed. Request a new route.');
         }
         reply({ route });
       }

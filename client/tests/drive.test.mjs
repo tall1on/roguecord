@@ -10,11 +10,13 @@ let getGpsSpeed
 let getDriveMapCoordinates
 let searchDriveDestinations
 let getDriveRoute
+let setDriveDestination
+let rankDriveParticipants
 let usePhoneLayout
 before(async () => {
   server = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom' })
   ;({ useDriveStore, getGpsSpeed } = await server.ssrLoadModule('/src/stores/drive.ts'))
-  ;({ getDriveMapCoordinates, searchDriveDestinations, getDriveRoute } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
+  ;({ getDriveMapCoordinates, searchDriveDestinations, getDriveRoute, setDriveDestination, rankDriveParticipants } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
   ;({ usePhoneLayout } = await server.ssrLoadModule('/src/composables/usePhoneLayout.ts'))
 })
 after(async () => server?.close())
@@ -42,6 +44,7 @@ function setup(context, { secure = true } = {}) {
   const chat = defineStore('chat', () => ({
     channels: ref([{ id: 'trip', type: 'drive' }, { id: 'voice', type: 'voice' }]),
     currentUser: ref({ id: 'me' }),
+    activeConnectionId: ref('guild'),
     isConnected: ref(true),
     activeMainPanel: ref({ type: 'voice', channelId: 'trip' }),
     send: (type, payload) => sent.push({ type, payload }),
@@ -364,14 +367,79 @@ test('automatic bounds include road detours as well as drivers and the destinati
   assert.equal(Math.max(...coordinates.map((point) => point[0])), 54)
 })
 
-test('selected targets survive navigation and GPS disconnects without being persisted to storage', (context) => {
-  const { drive, chat } = setup(context)
+test('shared targets survive panel navigation but reset on disconnect until a fresh room snapshot', (context) => {
+  const { drive, chat, emit } = setup(context)
   const destination = { latitude: 52, longitude: 13, label: 'Target' }
-  drive.destinations.set('server:trip', destination)
+  emit('voice_channel_joined')
+  emit('drive_locations', { locations: [], destination })
   chat.activeMainPanel = { type: 'text', channelId: 'chat' }
+  assert.deepEqual(drive.destinations.get('guild:trip'), destination)
   chat.isConnected = false
-  assert.deepEqual(drive.destinations.get('server:trip'), destination)
-  assert.equal(drive.destinations.has('other-server:trip'), false)
+  assert.equal(drive.destinations.size, 0)
+  chat.isConnected = true
+  emit('voice_channel_joined')
+  emit('drive_locations', { locations: [], destination: null })
+  assert.equal(drive.destinations.size, 0)
+})
+
+test('room destination updates are authoritative, room-scoped and cleared on leaving', (context) => {
+  const { drive, emit, webrtc } = setup(context)
+  emit('voice_channel_joined')
+  const first = { latitude: 52, longitude: 13, label: 'Shared target' }
+  emit('drive_destination_set', { destination: first })
+  assert.equal(drive.destinations.size, 0)
+  emit('drive_destination_updated', { destination: first })
+  assert.deepEqual(drive.destinations.get('guild:trip'), first)
+  emit('drive_destination_updated', { channel_id: 'other-room', destination: null })
+  assert.deepEqual(drive.destinations.get('guild:trip'), first)
+  emit('drive_destination_updated', { destination: { ...first, longitude: 200 } })
+  assert.deepEqual(drive.destinations.get('guild:trip'), first)
+  emit('drive_destination_updated', { destination: null })
+  assert.equal(drive.destinations.size, 0)
+  emit('drive_destination_updated', { destination: first })
+  webrtc.activeVoiceChannelId = null
+  assert.equal(drive.destinations.size, 0)
+})
+
+test('setting and clearing a shared destination require private correlated acknowledgements', async () => {
+  const { transport, listeners, sent, reply } = navigationTransport()
+  const destination = { latitude: 52, longitude: 13, label: 'Shared target' }
+  const set = setDriveDestination(transport, 'trip', destination, new AbortController().signal)
+  assert.equal(sent.at(-1).type, 'drive_set_destination')
+  reply('drive_destination_updated', { channel_id: 'trip', destination })
+  assert.equal(listeners.size, 1)
+  reply('drive_destination_set', { ...sent.at(-1).payload, destination })
+  assert.deepEqual(await set, destination)
+  const clear = setDriveDestination(transport, 'trip', null, new AbortController().signal)
+  assert.equal(sent.at(-1).payload.destination, null)
+  reply('drive_destination_set', { ...sent.at(-1).payload, destination: null })
+  assert.equal(await clear, null)
+  const denied = setDriveDestination(transport, 'trip', destination, new AbortController().signal)
+  reply('drive_destination_set', { ...sent.at(-1).payload, error: 'Join the drive room first.' })
+  await assert.rejects(denied, /Join the drive room/)
+  await assert.rejects(setDriveDestination(transport, 'trip', { ...destination, latitude: 100 }, new AbortController().signal), /valid room destination/)
+  assert.equal(listeners.size, 0)
+})
+
+test('driver chips rank and sort closest first, leaving unknown GPS unranked at the end', () => {
+  const participants = ['far', 'unknown', 'near', 'middle'].map((id) => ({ id, username: id }))
+  const locations = new Map([['far', { latitude: 0, longitude: 0.3 }], ['near', { latitude: 0, longitude: 0.1 }], ['middle', { latitude: 0, longitude: 0.2 }]])
+  const entries = rankDriveParticipants(participants, locations, { latitude: 0, longitude: 0 })
+  assert.deepEqual(entries.map((entry) => [entry.participant.id, entry.rank]), [['near', 1], ['middle', 2], ['far', 3], ['unknown', null]])
+  assert.ok(entries[0].distance_m < entries[1].distance_m)
+  assert.deepEqual(participants.map((participant) => participant.id), ['far', 'unknown', 'near', 'middle'])
+  locations.set('far', { latitude: 0, longitude: 0.01 })
+  assert.equal(rankDriveParticipants(participants, locations, { latitude: 0, longitude: 0 })[0].participant.id, 'far')
+  assert.equal(rankDriveParticipants(participants, locations, { latitude: 0, longitude: 0.2 })[0].participant.id, 'middle')
+})
+
+test('disabled destinations restore original chip order; equal GPS positions break ties deterministically', () => {
+  const participants = ['b', 'a', 'invalid'].map((id) => ({ id }))
+  const locations = new Map([['a', { latitude: 0, longitude: -179.9 }], ['b', { latitude: 0, longitude: -179.9 }], ['invalid', { latitude: NaN, longitude: 0 }]])
+  const entries = rankDriveParticipants(participants, locations, { latitude: 0, longitude: 179.9 })
+  assert.deepEqual(entries.map((entry) => [entry.participant.id, entry.rank]), [['a', 1], ['b', 2], ['invalid', null]])
+  assert.ok(entries[0].distance_m < 25000)
+  assert.deepEqual(rankDriveParticipants(participants, locations, null).map((entry) => [entry.participant.id, entry.rank]), [['b', null], ['a', null], ['invalid', null]])
 })
 
 test('phone layout follows modern and legacy media changes and cleans up on unmount', (context) => {

@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { computed, onScopeDispose, ref, watch } from 'vue';
 import { useChatStore } from './chat';
 import { useWebRtcStore } from './webrtc';
-import type { DriveDestination } from '../utils/driveNavigation';
+import { isDriveDestination, type DriveDestination } from '../utils/driveNavigation';
 
 export interface DriveLocation {
   user_id: string;
@@ -139,16 +139,24 @@ export const useDriveStore = defineStore('drive', () => {
 
   const handleMessage = ({ type, payload }: { type: string; payload: any }) => {
     if (!activeChannelId.value || payload?.channel_id !== activeChannelId.value) return;
+    const receiveDestination = (value: unknown) => {
+      const key = `${chatStore.activeConnectionId}:${payload.channel_id}`;
+      if (value === null) destinations.value.delete(key);
+      else if (isDriveDestination(value)) destinations.value.set(key, value);
+    };
     if (type === 'voice_channel_joined') {
       joinedChannelId.value = payload.channel_id;
       if (locationSharingEnabled) startSharing();
     } else if (type === 'drive_locations') {
+      receiveDestination(payload.destination ?? null);
       now.value = Date.now();
       receivedAt.clear();
       for (const location of payload.locations as DriveLocation[]) {
         receivedAt.set(location.user_id, now.value - Math.max(0, (payload.generated_at ?? now.value) - location.updated_at));
       }
       locations.value = new Map((payload.locations as DriveLocation[]).map((location) => [location.user_id, location]));
+    } else if (type === 'drive_destination_updated') {
+      receiveDestination(payload.destination);
     } else if (type === 'drive_location_updated') {
       now.value = Date.now();
       if (payload.location) {
@@ -165,11 +173,12 @@ export const useDriveStore = defineStore('drive', () => {
   };
 
   chatStore.addMessageListener(handleMessage);
-  watch([activeChannelId, () => chatStore.isConnected], () => {
+  watch([activeChannelId, () => chatStore.isConnected, () => chatStore.activeConnectionId], () => {
     // Keep an explicit GPS opt-out until the user enables sharing again.
     stopSharing(false);
     joinedChannelId.value = null;
     locations.value = new Map();
+    destinations.value.clear();
     receivedAt.clear();
     locationError.value = null;
     if (freshnessTimer !== null) clearInterval(freshnessTimer);
