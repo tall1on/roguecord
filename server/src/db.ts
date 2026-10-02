@@ -3,6 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { migrateChannelsSchema } from './channelMigration';
+import { migrateDriveGeocodeCache } from './driveGeocodeMigration';
 import {
   ADMIN_ROLE_KEY,
   ALL_SERVER_PERMISSIONS,
@@ -45,12 +46,13 @@ let folderFilesSchemaMigrated = false;
 let messageAttachmentsSchemaMigrated = false;
 let messagesSchemaMigrated = false;
 let messageReactionsSchemaMigrated = false;
+let driveGeocodeSchemaMigrated = false;
 
 function failSchemaInitialization(error: Error) {
   rejectChannelsSchemaReady?.(error);
 }
 
-function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'user_server_roles' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions') {
+function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'user_server_roles' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions' | 'drive_geocode_cache') {
   if (step === 'servers') serversSchemaMigrated = true;
   if (step === 'users') usersSchemaMigrated = true;
   if (step === 'roles') rolesSchemaMigrated = true;
@@ -60,8 +62,9 @@ function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'user_server_r
   if (step === 'message_attachments') messageAttachmentsSchemaMigrated = true;
   if (step === 'messages') messagesSchemaMigrated = true;
   if (step === 'message_reactions') messageReactionsSchemaMigrated = true;
+  if (step === 'drive_geocode_cache') driveGeocodeSchemaMigrated = true;
 
-  if (serversSchemaMigrated && usersSchemaMigrated && rolesSchemaMigrated && userServerRolesSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated) {
+  if (serversSchemaMigrated && usersSchemaMigrated && rolesSchemaMigrated && userServerRolesSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated && driveGeocodeSchemaMigrated) {
     resolveChannelsSchemaReady?.();
   }
 }
@@ -129,6 +132,7 @@ export const normalizeStoredServerRolePositions = async (serverId?: string): Pro
 };
 
 function initializeDatabase() {
+  migrateDriveGeocodeCache(db).then(() => markSchemaStepDone('drive_geocode_cache'), failSchemaInitialization);
   db.serialize(() => {
     // Servers Table
     db.run(`

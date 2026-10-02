@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test:drive": "node --test tests/drive.test.mjs",
+    "test:drive": "node --test tests/drive.test.mjs tests/driveRoutes.test.mjs",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
     "tauri": "tauri",

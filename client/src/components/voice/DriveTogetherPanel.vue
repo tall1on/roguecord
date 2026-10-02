@@ -5,6 +5,7 @@ import type { CircleMarker, Map as LeafletMap, Polyline } from 'leaflet'
 import { useChatStore } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 import { useDriveStore } from '../../stores/drive'
+import { useDriveRoutes } from '../../composables/useDriveRoutes'
 import { getDriveMapCoordinates, searchDriveDestinations, type DriveDestination } from '../../utils/driveNavigation'
 
 const props = withDefaults(defineProps<{ channelId: string; channelName: string; phoneLayout?: boolean }>(), { phoneLayout: false })
@@ -32,12 +33,51 @@ let lastSearchAt = 0
 const isJoined = computed(() => driveStore.joinedChannelId === props.channelId)
 const participants = computed(() => webrtcStore.channelParticipants.get(props.channelId) || [])
 const visibleLocations = computed(() => isJoined.value ? [...driveStore.locations.values()] : [])
+const { routes, routeErrors, isRouting } = useDriveRoutes(chatStore, () => props.channelId,
+  () => visibleLocations.value, () => destination.value, () => isJoined.value)
+const renderedStreets = computed(() => {
+  const entries = [...routes.value]
+  const positions = entries.flatMap(([, route]) => route.coordinates.map(([longitude, latitude]) => ({ latitude, longitude })))
+  const coordinates = getDriveMapCoordinates([], destination.value, positions)
+  const paths = new Map<string, [number, number][]>()
+  let offset = destination.value ? 1 : 0
+  for (const [userId, route] of entries) {
+    paths.set(userId, coordinates.slice(offset, offset + route.coordinates.length))
+    offset += route.coordinates.length
+  }
+  let minLatitude = Infinity, maxLatitude = -Infinity, minLongitude = Infinity, maxLongitude = -Infinity
+  for (const [latitude, longitude] of coordinates) {
+    minLatitude = Math.min(minLatitude, latitude)
+    maxLatitude = Math.max(maxLatitude, latitude)
+    minLongitude = Math.min(minLongitude, longitude)
+    maxLongitude = Math.max(maxLongitude, longitude)
+  }
+  const bounds: [number, number][] = coordinates.length ? [
+    [minLatitude, minLongitude], [minLatitude, maxLongitude], [maxLatitude, minLongitude], [maxLatitude, maxLongitude]
+  ] : []
+  return { target: coordinates[0], paths, bounds, centerLongitude: coordinates.length ? (minLongitude + maxLongitude) / 2 : 0 }
+})
+const renderedMap = computed(() => {
+  const streets = renderedStreets.value
+  const points = visibleLocations.value
+  if (!destination.value || !streets.paths.size) return { coordinates: getDriveMapCoordinates(points, destination.value), paths: streets.paths }
+  // Road geometry stays cached between route updates; GPS-only updates fit just markers and road bounds.
+  const coordinates = points.map<[number, number]>((point) => [point.latitude,
+    streets.centerLongitude + ((point.longitude - streets.centerLongitude) % 360 + 540) % 360 - 180])
+  coordinates.push(streets.target!, ...streets.bounds)
+  return { coordinates, paths: streets.paths }
+})
+const routingErrors = computed(() => [...routeErrors.value].map(([userId, error]) => ({
+  userId, error, username: participants.value.find((participant) => participant.id === userId)?.username || 'Driver'
+})))
 let leaflet: typeof import('leaflet') | null = null
 let map: LeafletMap | null = null
 let resizeObserver: ResizeObserver | null = null
 let disposed = false
 const markers = new Map<string, CircleMarker>()
 const destinationLines = new Map<string, Polyline>()
+const linePositions = new Map<string, [number, number][]>()
+let lastMapCoordinates: [number, number][] | null = null
 let destinationMarker: CircleMarker | null = null
 
 const cancelSearch = () => {
@@ -64,19 +104,15 @@ const searchAddress = async () => {
   const controller = new AbortController()
   searchController = controller
   isSearching.value = true
-  let timedOut = false
-  const timeout = setTimeout(() => { timedOut = true; controller.abort() }, 15000)
   try {
-    const results = await searchDriveDestinations(addressQuery.value, controller.signal)
+    const results = await searchDriveDestinations(chatStore, props.channelId, addressQuery.value, controller.signal)
     if (disposed || searchController !== controller) return
     searchResults.value = results
     if (!results.length) searchError.value = 'No matching address found. Try adding a city or postcode.'
   } catch (error) {
     if (disposed || searchController !== controller) return
-    searchError.value = timedOut ? 'Address search timed out. Please try again.'
-      : error instanceof Error ? error.message : 'Address search failed. Please try again.'
+    searchError.value = error instanceof Error ? error.message : 'Address search failed. Please try again.'
   } finally {
-    clearTimeout(timeout)
     if (searchController === controller) {
       searchController = null
       isSearching.value = false
@@ -101,7 +137,7 @@ const leaveDriveChannel = () => {
   if (props.phoneLayout) emit('back')
 }
 
-const syncMap = () => {
+const syncMap = (forceFit = false) => {
   if (!map || !leaflet) return
   const points = visibleLocations.value
   const userIds = new Set(points.map((point) => point.user_id))
@@ -112,13 +148,13 @@ const syncMap = () => {
     }
   }
   for (const [userId, line] of destinationLines) {
-    if (!destination.value || !userIds.has(userId)) {
+    if (!destination.value || !userIds.has(userId) || !renderedMap.value.paths.has(userId)) {
       line.remove()
       destinationLines.delete(userId)
+      linePositions.delete(userId)
     }
   }
-  const coordinates = getDriveMapCoordinates(points, destination.value)
-  const bounds = leaflet.latLngBounds(coordinates)
+  const { coordinates, paths } = renderedMap.value
   const target = destination.value ? coordinates[points.length]! : null
   if (target && destination.value) {
     if (!destinationMarker) {
@@ -138,13 +174,18 @@ const syncMap = () => {
     const user = participants.value.find((participant) => participant.id === point.user_id)
     const isSelf = point.user_id === chatStore.currentUser?.id
     const color = webrtcStore.isUserSpeaking(point.user_id) ? '#22c55e' : isSelf ? '#818cf8' : '#38bdf8'
-    if (target) {
+    const roadCoordinates = paths.get(point.user_id)
+    if (target && roadCoordinates) {
       let line = destinationLines.get(point.user_id)
       if (!line) {
-        line = leaflet.polyline([latLng, target], { weight: 2, opacity: 0.8, dashArray: '6 8', interactive: false }).addTo(map)
+        line = leaflet.polyline(roadCoordinates, { weight: 4, opacity: 0.85, interactive: false }).addTo(map)
         destinationLines.set(point.user_id, line)
       }
-      line.setLatLngs([latLng, target]).setStyle({ color }).bringToBack()
+      if (linePositions.get(point.user_id) !== roadCoordinates) {
+        line.setLatLngs(roadCoordinates)
+        linePositions.set(point.user_id, roadCoordinates)
+      }
+      line.setStyle({ color }).bringToBack()
     }
     let marker = markers.get(point.user_id)
     if (!marker) {
@@ -153,20 +194,25 @@ const syncMap = () => {
     }
     marker.setLatLng(latLng).setStyle({ fillColor: color })
     const label = document.createElement('span')
-    label.textContent = `${user?.username || 'Participant'}${isSelf ? ' (you)' : ''} - accuracy ${Math.round(point.accuracy)} m`
+    const route = routes.value.get(point.user_id)
+    const routeSummary = route ? ` - ${(route.distance_m / 1000).toFixed(1)} km, ${Math.ceil(route.duration_s / 60)} min to destination` : ''
+    label.textContent = `${user?.username || 'Participant'}${isSelf ? ' (you)' : ''} - accuracy ${Math.round(point.accuracy)} m${routeSummary}`
     if (marker.getTooltip()) marker.setTooltipContent(label)
     else marker.bindTooltip(label, { permanent: true, direction: 'top', offset: [0, -10] })
   }
+  if (!forceFit && coordinates === lastMapCoordinates) return
   const size = map.getSize()
   if (size.x <= 0 || size.y <= 0) return
+  const bounds = leaflet.latLngBounds(coordinates)
   if (bounds.isValid()) map.fitBounds(bounds, {
     paddingTopLeft: [Math.min(55, size.x / 4), Math.min((navigationElement.value?.offsetHeight ?? 0) + 30, size.y * 0.6)],
     paddingBottomRight: [Math.min(55, size.x / 4), Math.min(65, size.y / 4)], maxZoom: 16, animate: false
   })
   else map.setView([20, 0], 2, { animate: false })
+  lastMapCoordinates = coordinates
 }
 
-watch([visibleLocations, destination, participants, () => [...webrtcStore.speakingUserIds]], syncMap, { deep: true })
+watch([visibleLocations, destination, routes, participants, () => [...webrtcStore.speakingUserIds]], () => syncMap(), { deep: true })
 onMounted(async () => {
   try {
     const [module] = await Promise.all([import('leaflet'), import('leaflet/dist/leaflet.css')])
@@ -181,7 +227,7 @@ onMounted(async () => {
     }).addTo(map)
     resizeObserver = new ResizeObserver(() => {
       map?.invalidateSize({ animate: false, pan: false })
-      syncMap()
+      syncMap(true)
     })
     resizeObserver.observe(mapElement.value)
     if (navigationElement.value) resizeObserver.observe(navigationElement.value)
@@ -198,6 +244,7 @@ onBeforeUnmount(() => {
   map = null
   markers.clear()
   destinationLines.clear()
+  linePositions.clear()
   destinationMarker = null
 })
 </script>
@@ -242,7 +289,9 @@ onBeforeUnmount(() => {
           <p class="min-w-0 flex-1 text-xs leading-relaxed text-zinc-200">{{ destination.label }}</p>
           <button type="button" class="shrink-0 rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-white" aria-label="Clear destination" @click="clearDestination"><X class="h-3.5 w-3.5" /></button>
         </div>
-        <p class="mt-2 text-[10px] leading-relaxed text-zinc-500">Straight lines, not road routes. Submitted addresses go to <a href="https://photon.komoot.io" target="_blank" rel="noopener noreferrer" class="text-indigo-300 hover:underline">Photon</a> (OpenStreetMap).</p>
+        <p v-if="destination && isJoined" class="mt-2 text-[11px] text-zinc-400" role="status">{{ routes.size }}/{{ visibleLocations.length }} street routes<span v-if="isRouting">, updating...</span></p>
+        <div v-if="routingErrors.length" class="mt-2 max-h-24 space-y-1 overflow-y-auto" role="alert"><p v-for="entry in routingErrors" :key="entry.userId" class="text-xs text-amber-300">{{ entry.username }}: {{ entry.error }}</p></div>
+        <p class="mt-2 text-[10px] leading-relaxed text-zinc-500">Address search through your guild: <a href="https://photon.komoot.io" target="_blank" rel="noopener noreferrer" class="text-indigo-300 hover:underline">Photon / OpenStreetMap</a>. Street routes: <a href="https://project-osrm.org" target="_blank" rel="noopener noreferrer" class="text-indigo-300 hover:underline">OSRM</a>.</p>
       </div>
       <div v-if="(!visibleLocations.length && !destination) || mapError" class="pointer-events-none absolute inset-x-4 bottom-4 z-10 mx-auto max-w-md rounded-xl border border-white/10 bg-zinc-950/90 p-4 text-center shadow-xl backdrop-blur">
         <MapPin class="mx-auto mb-2 h-6 w-6 text-indigo-400" />
@@ -259,7 +308,7 @@ onBeforeUnmount(() => {
           <span v-if="driveStore.getSpeedLabel(participant.id, channelId)" class="tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(participant.id, channelId) }}</span>
         </span>
       </div>
-      <p class="text-[11px] leading-relaxed text-zinc-500">GPS is shared only with people in this call and stops when you leave. Locations are not saved. Map tiles are loaded from OpenStreetMap. Screen sharing is disabled.</p>
+      <p class="text-[11px] leading-relaxed text-zinc-500">GPS sharing stops when you leave. For street routes, driver positions are sent through your guild to its configured OSRM server. Your guild does not save live GPS or routes; address results are cached in its database. Map tiles come from OpenStreetMap. Screen sharing is disabled.</p>
     </footer>
   </section>
 </template>
