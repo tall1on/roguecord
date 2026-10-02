@@ -6,7 +6,7 @@ import { useChatStore } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 import { useDriveStore } from '../../stores/drive'
 import { useDriveRoutes } from '../../composables/useDriveRoutes'
-import { getDriveMapCoordinates, rankDriveParticipants, searchDriveDestinations, setDriveDestination, type DriveDestination } from '../../utils/driveNavigation'
+import { DRIVE_SELF_COLOR, getDriveMapCoordinates, pickDriveColor, rankDriveParticipants, searchDriveDestinations, setDriveDestination, type DriveDestination } from '../../utils/driveNavigation'
 
 const props = withDefaults(defineProps<{ channelId: string; channelName: string; phoneLayout?: boolean }>(), { phoneLayout: false })
 const emit = defineEmits<{ (e: 'back'): void }>()
@@ -36,6 +36,15 @@ const selfLocation = computed(() => {
 const navMode = ref(false)
 const canUseNav = computed(() => isJoined.value && driveStore.isSharing && !!selfLocation.value)
 watch(canUseNav, (value) => { if (!value) navMode.value = false })
+const driverColors = new Map<string, string>()
+const driverColor = (userId: string): string => {
+  const existing = driverColors.get(userId)
+  if (existing) return existing
+  const color = pickDriveColor(new Set(driverColors.values()), userId === chatStore.currentUser?.id)
+  driverColors.set(userId, color)
+  return color
+}
+const selfColor = (): string => chatStore.currentUser ? driverColor(chatStore.currentUser.id) : DRIVE_SELF_COLOR
 const rankedParticipants = computed(() => rankDriveParticipants(participants.value,
   isJoined.value ? driveStore.locations : new Map(), destination.value))
 const podiumClasses = [
@@ -109,7 +118,7 @@ const updateDirectionArrow = (point: { latitude: number; longitude: number }) =>
   const latLng: [number, number] = [point.latitude, point.longitude]
   if (directionArrow) directionArrow.setLatLng(latLng)
   if (directionArrow && directionArrowHeading === heading) return
-  const html = `<span style="display:block;width:100%;height:100%;transform:rotate(${heading}deg);transform-origin:50% 50%"><svg viewBox="0 0 24 24" width="100%" height="100%" style="filter:drop-shadow(0 1px 2px rgba(0,0,0,.65))"><path d="M12 2 L20.5 21 L12 16.5 L3.5 21 Z" fill="#818cf8" stroke="#ffffff" stroke-width="1.4" stroke-linejoin="round"/></svg></span>`
+  const html = `<span style="display:block;width:100%;height:100%;transform:rotate(${heading}deg);transform-origin:50% 50%"><svg viewBox="0 0 24 24" width="100%" height="100%" style="filter:drop-shadow(0 1px 2px rgba(0,0,0,.65))"><path d="M12 2 L20.5 21 L12 16.5 L3.5 21 Z" fill="${selfColor()}" stroke="#ffffff" stroke-width="1.4" stroke-linejoin="round"/></svg></span>`
   const icon = leaflet.divIcon({ className: 'drive-direction-icon', html, iconSize: [30, 30], iconAnchor: [15, 15] })
   directionArrowHeading = heading
   if (directionArrow) directionArrow.setIcon(icon)
@@ -209,6 +218,10 @@ const syncMap = (forceFit = false) => {
       linePositions.delete(userId)
     }
   }
+  const participantIds = new Set(participants.value.map((participant) => participant.id))
+  for (const userId of [...driverColors.keys()]) {
+    if (!userIds.has(userId) && !participantIds.has(userId)) driverColors.delete(userId)
+  }
   const { coordinates, paths } = renderedMap.value
   const target = destination.value ? coordinates[points.length]! : null
   if (target && destination.value) {
@@ -228,7 +241,8 @@ const syncMap = (forceFit = false) => {
     const latLng = coordinates[index]!
     const user = participants.value.find((participant) => participant.id === point.user_id)
     const isSelf = point.user_id === chatStore.currentUser?.id
-    const color = webrtcStore.isUserSpeaking(point.user_id) ? '#22c55e' : isSelf ? '#818cf8' : '#38bdf8'
+    const isSpeaking = webrtcStore.isUserSpeaking(point.user_id)
+    const color = driverColor(point.user_id)
     const roadCoordinates = paths.get(point.user_id)
     if (target && roadCoordinates) {
       let line = destinationLines.get(point.user_id)
@@ -240,14 +254,16 @@ const syncMap = (forceFit = false) => {
         line.setLatLngs(roadCoordinates)
         linePositions.set(point.user_id, roadCoordinates)
       }
-      line.setStyle({ color }).bringToBack()
+      line.setStyle({ color, opacity: isSpeaking ? 1 : 0.85 }).bringToBack()
     }
     let marker = markers.get(point.user_id)
     if (!marker) {
       marker = leaflet.circleMarker(latLng, { radius: 9, weight: 3, color: '#ffffff', fillOpacity: 1 }).addTo(map)
       markers.set(point.user_id, marker)
     }
-    marker.setLatLng(latLng).setStyle({ fillColor: color })
+    marker.setLatLng(latLng).setStyle({ fillColor: color, weight: isSpeaking ? 5 : 3 })
+    const markerElement = marker.getElement()
+    if (markerElement) markerElement.classList.toggle('drive-marker-speaking', isSpeaking)
     const label = document.createElement('span')
     const route = routes.value.get(point.user_id)
     const routeSummary = route ? ` - ${(route.distance_m / 1000).toFixed(1)} km, ${Math.ceil(route.duration_s / 60)} min to destination` : ''
@@ -315,6 +331,7 @@ onBeforeUnmount(() => {
   markers.clear()
   destinationLines.clear()
   linePositions.clear()
+  driverColors.clear()
   destinationMarker = null
 })
 </script>
@@ -374,6 +391,7 @@ onBeforeUnmount(() => {
     <footer class="drive-footer shrink-0 border-t border-white/5 px-4 py-3">
       <div class="mb-2 flex max-h-24 flex-wrap gap-2 overflow-y-auto">
         <span v-for="entry in rankedParticipants" :key="entry.participant.id" class="driver-chip flex items-center gap-2 rounded-full border px-3 py-1 text-xs" :data-rank="entry.rank ?? undefined" :class="[entry.rank !== null && entry.rank <= 3 ? podiumClasses[entry.rank - 1] : webrtcStore.isUserSpeaking(entry.participant.id) ? 'border-green-500/50 text-green-300' : 'border-white/10 text-zinc-300', webrtcStore.isUserSpeaking(entry.participant.id) && entry.rank !== null && entry.rank <= 3 ? 'ring-1 ring-green-500/60' : '']" :title="entry.distance_m !== null ? `${Math.round(entry.distance_m)} m GPS distance to the shared destination` : undefined">
+          <span class="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-white/30" :style="{ backgroundColor: driverColor(entry.participant.id) }" aria-hidden="true" />
           <span v-if="entry.rank !== null" class="min-w-4 font-bold tabular-nums">{{ entry.rank }}.</span>
           <MicOff v-if="entry.participant.isMuted || entry.participant.isDeafened" class="h-3 w-3 text-red-400" />
           {{ entry.participant.username }}
@@ -419,6 +437,9 @@ onBeforeUnmount(() => {
 .drive-map :deep(.drive-direction-icon) {
   background: transparent;
   border: 0;
+}
+.drive-map :deep(.drive-marker-speaking) {
+  filter: drop-shadow(0 0 5px #22c55e) drop-shadow(0 0 3px #22c55e);
 }
 .drive-map :deep(.leaflet-tile-pane) {
   filter: invert(1) hue-rotate(180deg) brightness(0.75) saturate(0.65) contrast(1.1);
