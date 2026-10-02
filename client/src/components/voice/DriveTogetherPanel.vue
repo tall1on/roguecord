@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Car, Flag, Headphones, LocateFixed, MapPin, Mic, MicOff, Navigation, PhoneOff, Search, X } from 'lucide-vue-next'
-import type { CircleMarker, Map as LeafletMap, Marker as LeafletMarker, Polyline } from 'leaflet'
+import type { CircleMarker, LatLngBounds, Map as LeafletMap, Marker as LeafletMarker, Polyline } from 'leaflet'
 import { useChatStore } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 import { useDriveStore } from '../../stores/drive'
@@ -109,7 +109,8 @@ const markers = new Map<string, LeafletMarker>()
 const driverMarkerSignatures = new Map<string, string>()
 const destinationLines = new Map<string, Polyline>()
 const linePositions = new Map<string, [number, number][]>()
-let lastMapCoordinates: [number, number][] | null = null
+let lastFittedBounds: LatLngBounds | null = null
+let lastFitSignature = ''
 let destinationMarker: CircleMarker | null = null
 const driverAvatarSignature = (avatarUrl: string | null): string => {
   if (!avatarUrl) return ''
@@ -405,7 +406,7 @@ const syncMap = (forceFit = false) => {
       }
       startBearingAnimation()
       applyNavView()
-      lastMapCoordinates = null
+      lastFittedBounds = null
       return
     }
   }
@@ -414,16 +415,26 @@ const syncMap = (forceFit = false) => {
   if (displayedHeading !== 0) bearingExitRefit = true
   targetHeading = 0
   startBearingAnimation()
-  if (!forceFit && coordinates === lastMapCoordinates) return
   const size = map.getSize()
   if (size.x <= 0 || size.y <= 0) return
   const bounds = leaflet.latLngBounds(coordinates)
-  if (bounds.isValid()) map.fitBounds(bounds, {
+  if (!bounds.isValid()) {
+    map.setView([20, 0], 2, { animate: false })
+    lastFittedBounds = map.getBounds()
+    lastFitSignature = ''
+    return
+  }
+  // Refit only when the driver/destination set changes or someone leaves the current view.
+  // GPS ticks that keep everyone visible just move the markers, avoiding per-second zoom/tile flashes.
+  const fitSignature = `${destination.value?.label ?? ''}|${points.map((point) => point.user_id).sort().join(',')}`
+  const shouldRefit = forceFit || !lastFittedBounds || fitSignature !== lastFitSignature || !lastFittedBounds.contains(bounds)
+  if (!shouldRefit) return
+  map.fitBounds(bounds, {
     paddingTopLeft: [Math.min(55, size.x / 4), Math.min((navigationElement.value?.offsetHeight ?? 0) + 30, size.y * 0.6)],
     paddingBottomRight: [Math.min(55, size.x / 4), Math.min(65, size.y / 4)], maxZoom: 16, animate: false
   })
-  else map.setView([20, 0], 2, { animate: false })
-  lastMapCoordinates = coordinates
+  lastFittedBounds = map.getBounds()
+  lastFitSignature = fitSignature
 }
 
 watch([visibleLocations, destination, routes, participants, () => [...webrtcStore.speakingUserIds], navMode, () => chatStore.getLocalDriverAvatar(), () => chatStore.currentUser?.driver_avatar_url], () => syncMap(), { deep: true })
