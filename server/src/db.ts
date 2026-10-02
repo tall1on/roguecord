@@ -2,6 +2,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { migrateChannelsSchema } from './channelMigration';
 import {
   ADMIN_ROLE_KEY,
   ALL_SERVER_PERMISSIONS,
@@ -68,6 +69,7 @@ function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'user_server_r
 export const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error('Error opening database:', err.message);
+    failSchemaInitialization(err);
   } else {
     console.log('Connected to the SQLite database.');
     initializeDatabase();
@@ -312,7 +314,7 @@ function initializeDatabase() {
         id TEXT PRIMARY KEY,
         category_id TEXT,
         name TEXT NOT NULL,
-        type TEXT NOT NULL CHECK(type IN ('text', 'voice', 'rss', 'folder')),
+        type TEXT NOT NULL CHECK(type IN ('text', 'voice', 'rss', 'folder', 'drive')),
         position INTEGER NOT NULL DEFAULT 0,
         feed_url TEXT,
         FOREIGN KEY (category_id) REFERENCES categories(id)
@@ -690,92 +692,13 @@ function initializeDatabase() {
 }
 
 function migrateChannelsTableSchema(done: (error?: Error) => void) {
-  db.all('PRAGMA table_info(channels)', (pragmaErr, columns: any[]) => {
-    if (pragmaErr) {
-      console.error('Failed to inspect channels table for migration:', pragmaErr.message);
-      done(pragmaErr);
-      return;
-    }
-
-    const hasFeedUrl = columns.some((column) => column.name === 'feed_url');
-    db.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'channels'", (schemaErr, schemaRow: any) => {
-      if (schemaErr) {
-        done(schemaErr);
-        return;
-      }
-
-      const tableSql = typeof schemaRow?.sql === 'string' ? schemaRow.sql.toLowerCase() : '';
-      const supportsFolderType = tableSql.includes("'folder'");
-
-      if (hasFeedUrl && supportsFolderType) {
-        db.serialize(() => {
-          db.run('CREATE INDEX IF NOT EXISTS idx_channels_category_position ON channels(category_id, position)');
-          db.run('CREATE INDEX IF NOT EXISTS idx_channels_position ON channels(position)');
-        });
-        done();
-        return;
-      }
-
-      db.run(
-        `
-        CREATE TABLE IF NOT EXISTS channels_new (
-          id TEXT PRIMARY KEY,
-          category_id TEXT,
-          name TEXT NOT NULL,
-          type TEXT NOT NULL CHECK(type IN ('text', 'voice', 'rss', 'folder')),
-          position INTEGER NOT NULL DEFAULT 0,
-          feed_url TEXT,
-          FOREIGN KEY (category_id) REFERENCES categories(id)
-        )
-        `,
-        (createErr) => {
-          if (createErr) {
-            console.error('Failed to create channels_new migration table:', createErr.message);
-            done(createErr);
-            return;
-          }
-
-          const feedUrlSelect = hasFeedUrl ? 'feed_url' : 'NULL';
-          db.run(
-            `
-            INSERT INTO channels_new (id, category_id, name, type, position, feed_url)
-            SELECT id, category_id, name, type, position, ${feedUrlSelect} FROM channels
-            `,
-            (copyErr) => {
-              if (copyErr) {
-                console.error('Failed to copy channels into migration table:', copyErr.message);
-                db.run('DROP TABLE IF EXISTS channels_new', () => {});
-                done(copyErr);
-                return;
-              }
-
-              db.run('DROP TABLE channels', (dropErr) => {
-                if (dropErr) {
-                  console.error('Failed to drop old channels table during migration:', dropErr.message);
-                  db.run('DROP TABLE IF EXISTS channels_new', () => {});
-                  done(dropErr);
-                  return;
-                }
-
-                db.run('ALTER TABLE channels_new RENAME TO channels', (renameErr) => {
-                  if (renameErr) {
-                    console.error('Failed to rename channels_new table during migration:', renameErr.message);
-                    done(renameErr);
-                    return;
-                  }
-                  db.serialize(() => {
-                    db.run('CREATE INDEX IF NOT EXISTS idx_channels_category_position ON channels(category_id, position)');
-                    db.run('CREATE INDEX IF NOT EXISTS idx_channels_position ON channels(position)');
-                  });
-                  console.log('Migrated channels table schema to support rss feed_url, folder channels, and channel ordering indexes.');
-                  done();
-                });
-              });
-            }
-          );
-        }
-      );
-    });
+  const migrationDb = new sqlite3.Database(dbPath, (error) => {
+    if (error) return done(error);
+    migrationDb.configure('busyTimeout', 10000);
+    migrateChannelsSchema(migrationDb).then(
+      () => migrationDb.close((error) => done(error || undefined)),
+      (error) => migrationDb.close(() => done(error))
+    );
   });
 }
 

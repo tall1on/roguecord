@@ -1,4 +1,5 @@
 import { ClientConnection, connectionManager } from './connectionManager';
+import { driveParticipants } from './drive';
 import {
   createUser,
   getUserByPublicKey,
@@ -1736,10 +1737,33 @@ const runStorageMigration = async (input: {
 };
 
 export const handleMessage = async (client: ClientConnection, messageStr: string) => {
+  let requestId: string | undefined;
+  let messageType: string | undefined;
   try {
     const message = JSON.parse(messageStr);
     const { type, payload } = message;
+    messageType = type;
+    requestId = typeof payload?.request_id === 'string' ? payload.request_id : undefined;
     console.log(`[WS DEBUG] Handling message type: ${type} for user: ${client.userId || 'unauthenticated'}`);
+    if ((type === 'auth:request' || type === 'auth:response') && driveParticipants.channelsFor(client).length) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Leave drive channels before changing identity' } }));
+      return;
+    }
+
+    if (['create_webrtc_transport', 'connect_webrtc_transport', 'produce', 'close_producer', 'consume', 'resume_consumer', 'get_producers', 'voice_state_update'].includes(type)) {
+      const room = rooms.get(payload?.channel_id);
+      const channel = !room?.type && typeof payload?.channel_id === 'string' ? await getChannelById(payload.channel_id) : undefined;
+      if (channel?.type === 'drive' || room?.type === 'drive') {
+        if (!client.userId || client.ws.readyState !== 1 || !driveParticipants.owns(payload.channel_id, client) || !room?.peers.has(client.userId)) {
+          client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Join the drive channel before media signaling', request_id: requestId || null } }));
+          return;
+        }
+        if (type === 'produce' && payload.source === 'screen') {
+          client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Screen sharing is not allowed in drive channels', request_id: requestId || null } }));
+          return;
+        }
+      }
+    }
 
     switch (type) {
       case 'auth:request':
@@ -1816,6 +1840,13 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'join_voice_channel':
         await handleJoinVoiceChannel(client, payload);
+        break;
+      case 'drive_location_update':
+        if (!client.userId || rooms.get(payload?.channel_id)?.type !== 'drive' || !rooms.get(payload?.channel_id)?.peers.has(client.userId)) {
+          client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Join the drive channel before sharing location' } }));
+          break;
+        }
+        driveParticipants.update(payload?.channel_id, client, payload?.location);
         break;
       case 'create_webrtc_transport':
         await handleCreateWebRtcTransport(client, payload);
@@ -1905,8 +1936,12 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         console.warn(`[WS DEBUG] Unknown message type: ${type}`);
     }
   } catch (error) {
-    console.error('[WS DEBUG] Error handling message:', error);
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Internal server error' } }));
+    // JSON parse errors can include the original input, including private coordinates.
+    console.error('[WS DEBUG] Error handling message type:', messageType || 'invalid JSON');
+    client.ws.send(JSON.stringify({ type: 'error', payload: {
+      message: messageType === 'drive_location_update' && error instanceof Error ? error.message : 'Internal server error',
+      ...(requestId ? { request_id: requestId } : {})
+    } }));
   }
 };
 
@@ -2270,7 +2305,7 @@ const handleMarkChannelRead = async (
 
 const handleCreateChannel = async (
   client: ClientConnection,
-  payload: { category_id: string | null, name: string, type: 'text' | 'voice' | 'rss' | 'folder', feed_url?: string }
+  payload: { category_id: string | null, name: string, type: 'text' | 'voice' | 'rss' | 'folder' | 'drive', feed_url?: string }
 ) => {
   if (!client.userId) return;
   const { category_id, name, type } = payload;
@@ -2281,7 +2316,7 @@ const handleCreateChannel = async (
     return;
   }
 
-  if (type !== 'text' && type !== 'voice' && type !== 'rss' && type !== 'folder') {
+  if (type !== 'text' && type !== 'voice' && type !== 'rss' && type !== 'folder' && type !== 'drive') {
     client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid channel type' } }));
     return;
   }
@@ -2550,7 +2585,8 @@ const handleDeleteChannel = async (client: ClientConnection, payload: { channel_
   try {
     await deleteChannel(channel_id);
 
-    if (channel.type === 'voice') {
+    if (channel.type === 'voice' || channel.type === 'drive') {
+      driveParticipants.removeChannel(channel_id);
       const room = rooms.get(channel_id);
       if (room) {
         for (const peer of room.peers.values()) {
@@ -2559,6 +2595,7 @@ const handleDeleteChannel = async (client: ClientConnection, payload: { channel_
           }
         }
         logVoiceCallEnded(channel_id, room);
+        if (channel.type === 'drive') room.router.close();
         rooms.delete(channel_id);
       }
     }
@@ -3463,8 +3500,13 @@ const handleDeleteMessage = async (
 export const handleClientDisconnect = (client: ClientConnection) => {
   if (!client.userId) return;
 
+  for (const channel_id of driveParticipants.channelsFor(client)) {
+    handleLeaveVoiceChannel(client, { channel_id }).catch(console.error);
+    driveParticipants.leave(channel_id, client);
+  }
+
   for (const [channel_id, room] of rooms.entries()) {
-    if (room.peers.has(client.userId)) {
+    if (room.type !== 'drive' && room.peers.has(client.userId)) {
       handleLeaveVoiceChannel(client, { channel_id }).catch(console.error);
     }
   }
@@ -3476,18 +3518,48 @@ export const handleClientDisconnect = (client: ClientConnection) => {
 };
 
 const handleJoinVoiceChannel = async (client: ClientConnection, payload: { channel_id: string, isMuted?: boolean, isDeafened?: boolean }) => {
-  if (!client.userId) return;
+  const userId = client.userId;
+  if (!userId) return;
   const { channel_id, isMuted = false, isDeafened = false } = payload;
   if (!channel_id) return;
 
-  const room = await getOrCreateRoom(channel_id);
-  const peer = getPeer(room, client.userId);
+  const user = await getUserById(userId);
+  if (!user || client.ws.readyState !== 1) return;
+  const avatarUrl = (await getResolvedUser(user.id))?.avatar_url || user.avatar_url;
+  // Validate immediately before admission so deletion or identity changes during lookups cannot create a stale room.
+  const channel = await getChannelById(channel_id);
+  if (client.ws.readyState !== 1 || client.userId !== userId) return;
+  if (!channel || (channel.type !== 'voice' && channel.type !== 'drive')) {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Voice or drive channel not found' } }));
+    return;
+  }
+  if (channel.type === 'drive') {
+    try {
+      driveParticipants.admit(channel_id, client);
+    } catch (error) {
+      client.ws.send(JSON.stringify({ type: 'error', payload: { message: (error as Error).message } }));
+      return;
+    }
+  }
+  let room;
+  try {
+    room = await getOrCreateRoom(channel_id);
+  } catch (error) {
+    if (channel.type === 'drive') driveParticipants.leave(channel_id, client);
+    throw error;
+  }
+  room.type = channel.type;
+  if (channel.type === 'drive' && !driveParticipants.owns(channel_id, client)) {
+    if (!driveParticipants.hasChannel(channel_id) && room.peers.size === 0) {
+      room.router.close();
+      rooms.delete(channel_id);
+    }
+    return;
+  }
+  const peer = getPeer(room, userId);
   
   peer.isMuted = isMuted;
   peer.isDeafened = isDeafened;
-
-  const user = await getUserById(client.userId);
-  if (!user) return;
 
   // Call-start detection (idempotent): callStartedAt is null ONLY when this is the first member of an empty channel.
   // Re-joins by an existing member, or additional members joining an active call, leave it untouched (timer persists).
@@ -3502,7 +3574,7 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
     type: 'user_joined_voice',
     payload: {
       channel_id,
-      user: { id: user.id, username: user.username, avatar_url: (await getResolvedUser(user.id))?.avatar_url || user.avatar_url, isMuted: peer.isMuted, isDeafened: peer.isDeafened }
+      user: { id: user.id, username: user.username, avatar_url: avatarUrl, isMuted: peer.isMuted, isDeafened: peer.isDeafened }
     }
   });
 
@@ -3521,6 +3593,7 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
     }
   }
 
+  if (channel.type === 'drive' && (!driveParticipants.owns(channel_id, client) || rooms.get(channel_id) !== room || room.peers.get(client.userId) !== peer)) return;
   client.ws.send(JSON.stringify({
     type: 'voice_channel_joined',
     payload: {
@@ -3530,6 +3603,7 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
       started_at: room.callStartedAt
     }
   }));
+  if (channel.type === 'drive') driveParticipants.snapshot(channel_id, client);
 };
 
 const handleCreateWebRtcTransport = async (client: ClientConnection, payload: { channel_id: string, direction: 'send' | 'recv' }) => {
@@ -3541,6 +3615,10 @@ const handleCreateWebRtcTransport = async (client: ClientConnection, payload: { 
   
   const peer = getPeer(room, client.userId);
   const transport = await createWebRtcTransport(room.router);
+  if (room.type === 'drive' && (!driveParticipants.owns(channel_id, client) || rooms.get(channel_id) !== room || room.peers.get(client.userId) !== peer)) {
+    transport.close();
+    return;
+  }
   
   peer.transports.set(transport.id, transport);
 
@@ -3597,6 +3675,10 @@ const handleProduce = async (client: ClientConnection, payload: { channel_id: st
       userId: client.userId
     }
   });
+  if (room.type === 'drive' && (!driveParticipants.owns(channel_id, client) || rooms.get(channel_id) !== room || room.peers.get(client.userId) !== peer)) {
+    producer.close();
+    return;
+  }
   peer.producers.set(producer.id, producer);
 
   // Voice mute/deafen flags should only gate microphone producers.
@@ -3699,6 +3781,10 @@ const handleConsume = async (client: ClientConnection, payload: { channel_id: st
     rtpCapabilities,
     paused: true,
   });
+  if (room.type === 'drive' && (!driveParticipants.owns(channel_id, client) || rooms.get(channel_id) !== room || room.peers.get(client.userId) !== peer)) {
+    consumer.close();
+    return;
+  }
 
   const producerSource = (producer?.appData as { source?: unknown } | undefined)?.source;
   const source: 'mic' | 'screen' | 'camera' =
@@ -3742,7 +3828,14 @@ const handleLeaveVoiceChannel = async (client: ClientConnection, payload: { chan
   const { channel_id } = payload;
   
   const room = rooms.get(channel_id);
-  if (!room) return;
+  if (!room) {
+    driveParticipants.leave(channel_id, client);
+    return;
+  }
+  if (room.type === 'drive') {
+    if (!driveParticipants.owns(channel_id, client)) return;
+    driveParticipants.leave(channel_id, client);
+  }
   
   const peer = room.peers.get(client.userId);
   if (peer) {
@@ -3760,6 +3853,7 @@ const handleLeaveVoiceChannel = async (client: ClientConnection, payload: { chan
 
   if (room.peers.size === 0) {
     logVoiceCallEnded(channel_id, room);
+    if (room.type === 'drive') room.router.close();
     rooms.delete(channel_id);
     connectionManager.broadcastToAuthenticated({
       type: 'voice_call_ended',
@@ -4796,6 +4890,14 @@ const isProtectedSystemOrRssBotUser = (user: { role?: string | null; public_key?
   return role === 'bot' && username === 'RSS Bot';
 };
 
+const removeUserFromDriveChannels = async (userId: string) => {
+  for (const connection of connectionManager.getClients()) {
+    if (connection.userId === userId) {
+      for (const channel_id of driveParticipants.channelsFor(connection)) await handleLeaveVoiceChannel(connection, { channel_id });
+    }
+  }
+};
+
 const handleKickMember = async (
   client: ClientConnection,
   payload: {
@@ -4893,6 +4995,7 @@ const handleKickMember = async (
       }
     });
     connectionManager.closeUserConnections(targetUser.id);
+    await removeUserFromDriveChannels(targetUser.id);
   }
 
   client.ws.send(JSON.stringify({
@@ -5034,6 +5137,7 @@ const handleBanMember = async (
       }
     });
     connectionManager.closeUserConnections(targetUser.id);
+    await removeUserFromDriveChannels(targetUser.id);
   }
 
   client.ws.send(JSON.stringify({

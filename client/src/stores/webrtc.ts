@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, shallowRef, watch } from 'vue';
+import { computed, ref, shallowRef, watch } from 'vue';
 import { Device } from 'mediasoup-client';
 import { useChatStore } from './chat';
 
@@ -87,6 +87,9 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const consumers = shallowRef<Map<string, any>>(new Map());
   
   const activeVoiceChannelId = ref<string | null>(null);
+  const isDriveChannel = computed(() => chatStore.channels.some(
+    (channel) => channel.id === activeVoiceChannelId.value && channel.type === 'drive'
+  ));
   const lastActiveVoiceChannelId = ref<string | null>(null);
   const voiceParticipants = ref<any[]>([]);
   const channelParticipants = ref<Map<string, any[]>>(new Map());
@@ -638,8 +641,13 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       screenShareError.value = 'Join a voice channel before sharing your screen.';
       return;
     }
+    if (isDriveChannel.value) {
+      screenShareError.value = 'Screen sharing is not available in Drive Together channels.';
+      return;
+    }
     if (screenProducer.value) return;
 
+    const channelId = activeVoiceChannelId.value;
     screenShareError.value = null;
     console.info('[WebRTC][screen] Share requested', {
       channelId: activeVoiceChannelId.value,
@@ -647,6 +655,10 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     });
 
     const readySendTransport = await waitForSendTransport();
+    const isRequestCurrent = () => activeVoiceChannelId.value === channelId
+      && !isDriveChannel.value
+      && sendTransport.value === readySendTransport;
+    if (!isRequestCurrent()) return;
     if (!readySendTransport) {
       screenShareError.value = 'Screen share is not ready yet. Please try again in a moment.';
       console.warn('[WebRTC][screen] Share failed: send transport not ready');
@@ -666,6 +678,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       return;
     }
 
+    let requestedDisplayStream: MediaStream | null = null;
     try {
       let displayStream: MediaStream;
       try {
@@ -679,12 +692,29 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           } as MediaTrackConstraints
         });
       } catch (displayAudioError) {
+        if (!isRequestCurrent()) return;
         console.warn('[WebRTC][screen] getDisplayMedia with audio constraints failed, retrying with audio=true', displayAudioError);
         displayStream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
           audio: true
         });
       }
+
+      requestedDisplayStream = displayStream;
+      // A channel switch can happen while the browser picker or a producer is pending.
+      const abortStaleShare = (pendingProducer?: any) => {
+        if (isRequestCurrent()) return false;
+        displayStream.getTracks().forEach((track) => track.stop());
+        if (pendingProducer) {
+          pendingProducer.close();
+          chatStore.send('close_producer', { channel_id: channelId, producer_id: pendingProducer.id });
+        }
+        if (screenShareStream.value === displayStream) {
+          cleanupScreenShareProducer();
+        }
+        return true;
+      };
+      if (abortStaleShare()) return;
 
       console.info('[WebRTC][screen] getDisplayMedia resolved', {
         streamId: displayStream.id,
@@ -709,6 +739,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         const preferredScreenPreference = getScreenStreamPreference(localUserId);
         await applyScreenTrackPreference(videoTrack, preferredScreenPreference);
       }
+      if (abortStaleShare()) return;
 
       screenShareStream.value = displayStream;
       videoTrack.onended = () => {
@@ -736,7 +767,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         };
       }
 
-      screenProducer.value = await readySendTransport.produce({
+      const newScreenProducer = await readySendTransport.produce({
         track: videoTrack,
         encodings: [
           {
@@ -749,12 +780,16 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         ],
         appData: { source: 'screen' as MediaSourceType }
       });
+      if (abortStaleShare(newScreenProducer)) return;
+      screenProducer.value = newScreenProducer;
 
       if (audioTrack && device.value?.canProduce('audio')) {
-        screenAudioProducer.value = await readySendTransport.produce({
+        const newScreenAudioProducer = await readySendTransport.produce({
           track: audioTrack,
           appData: { source: 'screen' as MediaSourceType }
         });
+        if (abortStaleShare(newScreenAudioProducer)) return;
+        screenAudioProducer.value = newScreenAudioProducer;
 
         screenAudioProducer.value.on('transportclose', () => {
           screenAudioProducer.value = null;
@@ -774,6 +809,13 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         cleanupScreenShareProducer(false);
       });
     } catch (error) {
+      if (!isRequestCurrent()) {
+        requestedDisplayStream?.getTracks().forEach((track) => track.stop());
+        if (requestedDisplayStream && screenShareStream.value === requestedDisplayStream) {
+          cleanupScreenShareProducer();
+        }
+        return;
+      }
       screenShareError.value = 'Failed to start screen share. Please try again.';
       console.error('[WebRTC][screen] Failed to start screen share:', error);
       cleanupScreenShareProducer();
@@ -1996,6 +2038,7 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
 
   return {
     activeVoiceChannelId,
+    isDriveChannel,
     voiceParticipants,
     channelParticipants,
     callStartedAt,

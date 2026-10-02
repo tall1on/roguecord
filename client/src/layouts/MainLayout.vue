@@ -3,8 +3,9 @@ import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, shallowRef
 import { RouterView } from 'vue-router'
 import { useRouter } from 'vue-router'
 import { Minus, Square, X, AlertCircle } from 'lucide-vue-next'
-import { useChatStore, type ServerPermission } from '../stores/chat'
+import { useChatStore, type Channel, type ServerPermission } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
+import { useDriveStore } from '../stores/drive'
 import LoginModal from '../components/layout/modals/LoginModal.vue'
 import CreateServerModal from '../components/layout/modals/CreateServerModal.vue'
 import CreateChannelModal from '../components/layout/modals/CreateChannelModal.vue'
@@ -29,6 +30,7 @@ type SettingsSection = 'general' | 'audio' | 'connections' | 'server'
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
+useDriveStore()
 const router = useRouter()
 const isTauriApp = isTauri()
 const cachyOSBuild = isCachyOS()
@@ -42,7 +44,7 @@ const isMaximized = ref(false)
 
 const showCreateChannelModal = ref(false)
 const newChannelName = ref('')
-const newChannelType = ref<'text' | 'voice' | 'rss' | 'folder'>('text')
+const newChannelType = ref<Channel['type']>('text')
 const newChannelFeedUrl = ref('')
 const selectedCategoryId = ref<string | null>(null)
 const createChannelError = ref<string | null>(null)
@@ -361,7 +363,7 @@ const handleCreateServer = async () => {
   }
 }
 
-const openCreateChannelModal = (payload: { categoryId: string | null; type?: 'text' | 'voice' | 'rss' | 'folder'; createCategory?: boolean }) => {
+const openCreateChannelModal = (payload: { categoryId: string | null; type?: Channel['type']; createCategory?: boolean }) => {
   if (!canManageChannels.value) return
 
   createChannelError.value = null
