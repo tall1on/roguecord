@@ -60,6 +60,7 @@ const driverAvatarUrlFor = (userId: string): string | null => {
 }
 const rankedParticipants = computed(() => rankDriveParticipants(participants.value,
   isJoined.value ? driveStore.locations : new Map(), destination.value))
+const formatDistance = (meters: number): string => meters < 1000 ? `${Math.round(meters)} m` : `${(meters / 1000).toFixed(1)} km`
 const podiumClasses = [
   'border-amber-400/50 bg-amber-400/10 text-amber-200',
   'border-slate-300/50 bg-slate-300/10 text-slate-200',
@@ -490,33 +491,28 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="flex min-h-0 min-w-0 flex-1 bg-zinc-950" :class="phoneLayout ? 'phone-drive-panel flex-col-reverse' : 'flex-col'">
-    <header class="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-white/5 px-4 py-3 md:px-6">
-      <div class="flex min-w-0 items-center gap-3" :class="phoneLayout ? 'min-h-11 w-full' : ''">
-        <Car class="h-6 w-6 shrink-0 text-indigo-400" />
-        <div class="min-w-0">
-          <h2 class="truncate font-bold text-white">{{ channelName }}</h2>
-          <p class="text-xs text-zinc-400">Drive Together - {{ visibleLocations.length }} live locations</p>
-        </div>
-      </div>
-      <div class="flex items-center gap-2" :class="phoneLayout ? 'w-full' : ''">
-        <button v-if="!isJoined" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500" :class="phoneLayout ? 'min-h-11 flex-1' : ''" @click="webrtcStore.joinVoiceChannel(channelId)">Join Drive Together</button>
-        <template v-if="isJoined">
-          <button class="rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold transition-colors hover:bg-zinc-800" :class="[driveStore.isSharing ? 'text-indigo-300' : 'text-zinc-300', phoneLayout ? 'min-h-11 min-w-0 flex-1' : '']" :aria-label="driveStore.isSharing ? 'Stop sharing GPS' : 'Share GPS'" :aria-pressed="driveStore.isSharing" @click="driveStore.isSharing ? driveStore.stopSharing() : driveStore.startSharing()">
-            <LocateFixed class="mr-1 inline h-4 w-4" />{{ driveStore.isSharing ? (phoneLayout ? 'GPS on' : 'Stop sharing GPS') : 'Share GPS' }}
-          </button>
-          <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors disabled:cursor-not-allowed disabled:opacity-40" :class="[navMode ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :disabled="!canUseNav" :aria-pressed="navMode" :aria-label="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Start navigation close-up of your position') : 'Navigation close-up needs active GPS sharing'" :title="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Navigation close-up of your position') : 'Share your GPS to use navigation close-up'" @click="navMode = !navMode"><Navigation class="h-5 w-5" /></button>
-        </template>
-        <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors" :class="[navPanelOpen ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-expanded="navPanelOpen" aria-controls="drive-navigation-panel" :aria-label="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" :title="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" @click="navPanelOpen = !navPanelOpen"><Flag class="h-5 w-5" /></button>
-        <template v-if="isJoined">
-          <button class="inline-flex items-center justify-center rounded-lg p-2 hover:bg-zinc-800" :class="[webrtcStore.isMuted || webrtcStore.isDeafened ? 'text-red-400' : 'text-zinc-300', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-label="webrtcStore.isMuted || webrtcStore.isDeafened ? 'Unmute microphone' : 'Mute microphone'" @click="webrtcStore.toggleMute()">
-            <MicOff v-if="webrtcStore.isMuted || webrtcStore.isDeafened" class="h-5 w-5" /><Mic v-else class="h-5 w-5" />
-          </button>
-          <button v-if="phoneLayout" class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg p-2 hover:bg-zinc-800" :class="webrtcStore.isDeafened ? 'text-red-400' : 'text-zinc-300'" :aria-label="webrtcStore.isDeafened ? 'Undeafen' : 'Deafen'" @click="webrtcStore.toggleDeafen()"><Headphones class="h-5 w-5" /></button>
-          <button class="inline-flex items-center justify-center rounded-lg p-2 text-red-400 hover:bg-red-500/10" :class="phoneLayout ? 'h-11 w-11 shrink-0' : ''" aria-label="Leave Drive Together" @click="leaveDriveChannel"><PhoneOff class="h-5 w-5" /></button>
-        </template>
+  <section class="flex min-h-0 min-w-0 flex-1 flex-col bg-zinc-950" :class="{ 'phone-drive-panel': phoneLayout }">
+    <header class="flex shrink-0 items-center gap-3 border-b border-white/5 px-4 py-3 md:px-6" :class="phoneLayout ? 'pl-12' : ''">
+      <Car class="h-6 w-6 shrink-0 text-indigo-400" />
+      <div class="min-w-0">
+        <h2 class="truncate font-bold text-white">{{ channelName }}</h2>
+        <p class="text-xs text-zinc-400">Drive Together - {{ visibleLocations.length }} live locations</p>
       </div>
     </header>
+    <div class="drive-leaderboard shrink-0 border-b border-white/5 px-4 py-2 md:px-6">
+      <div class="drive-leaderboard-list flex flex-col gap-1 overflow-y-auto" aria-label="Driver leaderboard">
+        <span v-for="entry in rankedParticipants" :key="entry.participant.id" class="driver-row flex w-full min-w-0 items-center gap-2 rounded-lg border px-3 py-1.5 text-xs" :data-rank="entry.rank ?? undefined" :class="[entry.rank !== null && entry.rank <= 3 ? podiumClasses[entry.rank - 1] : webrtcStore.isUserSpeaking(entry.participant.id) ? 'border-green-500/50 text-green-300' : 'border-white/10 text-zinc-300', webrtcStore.isUserSpeaking(entry.participant.id) && entry.rank !== null && entry.rank <= 3 ? 'ring-1 ring-green-500/60' : '']" :title="entry.distance_m !== null ? `${Math.round(entry.distance_m)} m GPS distance to the shared destination` : undefined">
+          <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-black/20 text-[10px] font-bold tabular-nums" :class="entry.rank !== null ? '' : 'text-zinc-500'">{{ entry.rank ?? '-' }}</span>
+          <span class="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-white/30" :style="{ backgroundColor: driverColor(entry.participant.id) }" aria-hidden="true" />
+          <MicOff v-if="entry.participant.isMuted || entry.participant.isDeafened" class="h-3 w-3 shrink-0 text-red-400" />
+          <span class="min-w-0 flex-1 truncate">{{ entry.participant.username }}</span>
+          <MapPin v-if="isJoined && driveStore.locations.has(entry.participant.id)" class="h-3 w-3 shrink-0 text-indigo-400" />
+          <span v-if="driveStore.getSpeedLabel(entry.participant.id, channelId)" class="shrink-0 tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(entry.participant.id, channelId) }}</span>
+          <span v-if="entry.distance_m !== null" class="shrink-0 tabular-nums text-zinc-400">{{ formatDistance(entry.distance_m) }}</span>
+        </span>
+        <p v-if="!rankedParticipants.length" class="px-1 py-2 text-xs text-zinc-500">No drivers in this room yet.</p>
+      </div>
+    </div>
     <p v-if="driveStore.locationError && isJoined" class="drive-location-error shrink-0 bg-amber-950/30 px-4 py-3 text-sm text-amber-200" role="alert">{{ driveStore.locationError }}</p>
     <div class="drive-map-area relative min-h-[16rem] flex-1 isolate">
       <div ref="mapElement" class="drive-map absolute inset-0 z-0" aria-label="Dark OpenStreetMap showing participant GPS locations" />
@@ -546,16 +542,23 @@ onBeforeUnmount(() => {
         <p class="mt-1 text-xs text-zinc-400">Voice works even if you do not share your location. The map always fits all known positions.</p>
       </div>
     </div>
-    <footer class="drive-footer shrink-0 border-t border-white/5 px-4 py-3" :class="phoneLayout ? 'pl-12' : ''">
-      <div class="mb-2 flex max-h-24 flex-wrap gap-2 overflow-y-auto">
-        <span v-for="entry in rankedParticipants" :key="entry.participant.id" class="driver-chip flex items-center gap-2 rounded-full border px-3 py-1 text-xs" :data-rank="entry.rank ?? undefined" :class="[entry.rank !== null && entry.rank <= 3 ? podiumClasses[entry.rank - 1] : webrtcStore.isUserSpeaking(entry.participant.id) ? 'border-green-500/50 text-green-300' : 'border-white/10 text-zinc-300', webrtcStore.isUserSpeaking(entry.participant.id) && entry.rank !== null && entry.rank <= 3 ? 'ring-1 ring-green-500/60' : '']" :title="entry.distance_m !== null ? `${Math.round(entry.distance_m)} m GPS distance to the shared destination` : undefined">
-          <span class="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-white/30" :style="{ backgroundColor: driverColor(entry.participant.id) }" aria-hidden="true" />
-          <span v-if="entry.rank !== null" class="min-w-4 font-bold tabular-nums">{{ entry.rank }}.</span>
-          <MicOff v-if="entry.participant.isMuted || entry.participant.isDeafened" class="h-3 w-3 text-red-400" />
-          {{ entry.participant.username }}
-          <MapPin v-if="isJoined && driveStore.locations.has(entry.participant.id)" class="h-3 w-3 text-indigo-400" />
-          <span v-if="driveStore.getSpeedLabel(entry.participant.id, channelId)" class="tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(entry.participant.id, channelId) }}</span>
-        </span>
+    <footer class="drive-controls shrink-0 border-t border-white/5 px-4 py-3 md:px-6">
+      <div class="flex items-center gap-2" :class="phoneLayout ? 'w-full' : 'justify-end'">
+        <button v-if="!isJoined" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500" :class="phoneLayout ? 'min-h-11 flex-1' : ''" @click="webrtcStore.joinVoiceChannel(channelId)">Join Drive Together</button>
+        <template v-if="isJoined">
+          <button class="rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold transition-colors hover:bg-zinc-800" :class="[driveStore.isSharing ? 'text-indigo-300' : 'text-zinc-300', phoneLayout ? 'min-h-11 min-w-0 flex-1' : '']" :aria-label="driveStore.isSharing ? 'Stop sharing GPS' : 'Share GPS'" :aria-pressed="driveStore.isSharing" @click="driveStore.isSharing ? driveStore.stopSharing() : driveStore.startSharing()">
+            <LocateFixed class="mr-1 inline h-4 w-4" />{{ driveStore.isSharing ? (phoneLayout ? 'GPS on' : 'Stop sharing GPS') : 'Share GPS' }}
+          </button>
+          <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors disabled:cursor-not-allowed disabled:opacity-40" :class="[navMode ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :disabled="!canUseNav" :aria-pressed="navMode" :aria-label="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Start navigation close-up of your position') : 'Navigation close-up needs active GPS sharing'" :title="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Navigation close-up of your position') : 'Share your GPS to use navigation close-up'" @click="navMode = !navMode"><Navigation class="h-5 w-5" /></button>
+        </template>
+        <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors" :class="[navPanelOpen ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-expanded="navPanelOpen" aria-controls="drive-navigation-panel" :aria-label="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" :title="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" @click="navPanelOpen = !navPanelOpen"><Flag class="h-5 w-5" /></button>
+        <template v-if="isJoined">
+          <button class="inline-flex items-center justify-center rounded-lg p-2 hover:bg-zinc-800" :class="[webrtcStore.isMuted || webrtcStore.isDeafened ? 'text-red-400' : 'text-zinc-300', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-label="webrtcStore.isMuted || webrtcStore.isDeafened ? 'Unmute microphone' : 'Mute microphone'" @click="webrtcStore.toggleMute()">
+            <MicOff v-if="webrtcStore.isMuted || webrtcStore.isDeafened" class="h-5 w-5" /><Mic v-else class="h-5 w-5" />
+          </button>
+          <button v-if="phoneLayout" class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg p-2 hover:bg-zinc-800" :class="webrtcStore.isDeafened ? 'text-red-400' : 'text-zinc-300'" :aria-label="webrtcStore.isDeafened ? 'Undeafen' : 'Deafen'" @click="webrtcStore.toggleDeafen()"><Headphones class="h-5 w-5" /></button>
+          <button class="inline-flex items-center justify-center rounded-lg p-2 text-red-400 hover:bg-red-500/10" :class="phoneLayout ? 'h-11 w-11 shrink-0' : ''" aria-label="Leave Drive Together" @click="leaveDriveChannel"><PhoneOff class="h-5 w-5" /></button>
+        </template>
       </div>
     </footer>
   </section>
@@ -572,21 +575,20 @@ onBeforeUnmount(() => {
   max-height: 5rem;
   overflow-y: auto;
 }
-.phone-drive-panel .drive-footer {
-  max-height: 28vh;
-  max-height: 28dvh;
-  overflow-y: auto;
+.drive-leaderboard-list {
+  max-height: 10rem;
 }
-.phone-drive-panel .drive-footer > div {
-  max-height: 4.5rem;
+.phone-drive-panel .drive-leaderboard-list {
+  max-height: 26vh;
+  max-height: 26dvh;
 }
 .phone-drive-panel .drive-navigation {
   max-height: max(0px, calc(60% - 30px));
 }
 @media (max-height: 500px) {
-  .phone-drive-panel .drive-footer {
-    max-height: 22vh;
-    max-height: 22dvh;
+  .phone-drive-panel .drive-leaderboard-list {
+    max-height: 20vh;
+    max-height: 20dvh;
   }
 }
 .drive-map {
