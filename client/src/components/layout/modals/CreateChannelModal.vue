@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { Folder, Hash, Rss, Volume2 } from 'lucide-vue-next'
+import { Car, Folder, Hash, Rss, Volume2 } from 'lucide-vue-next'
+import type { Channel } from '../../../stores/chat'
 
 const visible = defineModel<boolean>('visible', { required: true })
 const channelName = defineModel<string>('channelName', { required: true })
-const channelType = defineModel<'text' | 'voice' | 'rss' | 'folder'>('channelType', { required: true })
+const channelType = defineModel<Channel['type']>('channelType', { required: true })
 const channelFeedUrl = defineModel<string>('channelFeedUrl', { required: true })
 
 withDefaults(defineProps<{
@@ -28,7 +29,7 @@ const emit = defineEmits<{
 
 <template>
   <div v-if="visible" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
-    <div class="bg-zinc-950 border border-white/10 p-6 rounded-xl shadow-2xl w-[440px]">
+    <div class="bg-zinc-950 border border-white/10 p-6 rounded-xl shadow-2xl w-[440px] max-w-[95vw] max-h-[95vh] overflow-y-auto">
       <h2 class="text-xl font-bold text-white mb-6">{{ title }}</h2>
 
       <div v-if="showTypeSelector" class="mb-6">
@@ -48,6 +49,14 @@ const emit = defineEmits<{
             <div>
               <div class="text-white font-medium">Voice</div>
               <div class="text-xs text-zinc-400">Hang out together with voice, video, and screen share</div>
+            </div>
+          </label>
+          <label class="flex items-start p-4 bg-zinc-900 border border-white/5 rounded-xl cursor-pointer hover:bg-zinc-800/80 hover:border-white/10 transition-all" :class="channelType === 'drive' ? 'ring-1 ring-indigo-500/50 bg-zinc-800/50' : ''">
+            <input v-model="channelType" type="radio" value="drive" class="mt-0.5 mr-4 text-indigo-500 focus:ring-indigo-500 bg-zinc-950 border-white/10">
+            <Car class="w-5 h-5 text-zinc-400 mr-3 mt-0.5" :class="channelType === 'drive' ? 'text-indigo-400' : ''" />
+            <div>
+              <div class="text-white font-medium text-sm">Drive Together</div>
+              <div class="text-xs text-zinc-500 mt-0.5 leading-relaxed">Voice and live GPS on a shared map, without screen sharing</div>
             </div>
           </label>
           <label class="flex items-center p-4 bg-zinc-900 border border-white/5 rounded-xl cursor-pointer hover:bg-zinc-800/80 hover:border-white/10 transition-all" :class="channelType === 'rss' ? 'ring-1 ring-indigo-500/50 bg-zinc-800/50' : ''">
@@ -75,6 +84,7 @@ const emit = defineEmits<{
           <div class="pl-3 pr-2 text-zinc-500">
             <Hash v-if="channelType === 'text'" class="w-4 h-4" />
             <Volume2 v-else-if="channelType === 'voice'" class="w-4 h-4 text-zinc-400" />
+            <Car v-else-if="channelType === 'drive'" class="w-4 h-4 text-zinc-400" />
             <Rss v-else-if="channelType === 'rss'" class="w-4 h-4 text-zinc-400" />
             <Folder v-else class="w-4 h-4 text-zinc-400" />
           </div>

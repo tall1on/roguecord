@@ -1009,7 +1009,7 @@ export interface Channel {
   id: string;
   category_id: string | null;
   name: string;
-  type: 'text' | 'voice' | 'rss' | 'folder';
+  type: 'text' | 'voice' | 'rss' | 'folder' | 'drive';
   position: number;
   feed_url: string | null;
 }
@@ -1017,7 +1017,7 @@ export interface Channel {
 export const createChannel = async (
   category_id: string | null,
   name: string,
-  type: 'text' | 'voice' | 'rss' | 'folder',
+  type: Channel['type'],
   position: number = 0,
   feedUrl: string | null = null
 ): Promise<Channel> => {

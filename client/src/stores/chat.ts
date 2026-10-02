@@ -53,7 +53,7 @@ export interface Channel {
   id: string;
   category_id: string | null;
   name: string;
-  type: 'text' | 'voice' | 'rss' | 'folder';
+  type: 'text' | 'voice' | 'drive' | 'rss' | 'folder';
   position: number;
   feed_url?: string | null;
 }
@@ -2319,7 +2319,7 @@ export const useChatStore = defineStore('chat', () => {
           setFallbackActiveTextChannel(channels.value);
         } else if (deletedChannel?.type === 'folder' && activeMainPanel.value.type === 'folder' && activeMainPanel.value.channelId === deletedChannelId) {
           setFallbackActiveTextChannel(channels.value);
-        } else if (deletedChannel?.type === 'voice' && activeMainPanel.value.type === 'voice' && activeMainPanel.value.channelId === deletedChannelId) {
+        } else if ((deletedChannel?.type === 'voice' || deletedChannel?.type === 'drive') && activeMainPanel.value.type === 'voice' && activeMainPanel.value.channelId === deletedChannelId) {
           setFallbackActiveTextChannel(channels.value);
         }
         break;
@@ -2518,7 +2518,7 @@ export const useChatStore = defineStore('chat', () => {
     activateChannel(firstTextChannel || null);
   };
 
-  const createChannel = (category_id: string | null, name: string, type: 'text' | 'voice' | 'rss' | 'folder', feed_url?: string) => {
+  const createChannel = (category_id: string | null, name: string, type: Channel['type'], feed_url?: string) => {
     if (!name.trim()) {
       lastError.value = 'Channel name is required';
       return;

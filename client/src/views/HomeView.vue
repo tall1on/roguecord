@@ -11,6 +11,7 @@ import { openExternalUrl } from '../utils/openExternalUrl'
 const MessageAttachmentVideoPlayer = defineAsyncComponent(() => import('../components/chat/MessageAttachmentVideoPlayer.vue'))
 const MessageReactionChip = defineAsyncComponent(() => import('../components/chat/MessageReactionChip.vue'))
 const CallDurationLabel = defineAsyncComponent(() => import('../components/voice/CallDurationLabel.vue'))
+const DriveTogetherPanel = defineAsyncComponent(() => import('../components/voice/DriveTogetherPanel.vue'))
 
 type TwemojiPickerSelection = {
   i?: string
@@ -58,7 +59,7 @@ const activeTextChannel = computed(() => {
 const activeVoiceChannel = computed(() => {
   if (chatStore.activeMainPanel.type !== 'voice' || !chatStore.activeMainPanel.channelId) return null
   const channels = chatStore.channels || []
-  return channels.find(c => c.id === chatStore.activeMainPanel.channelId && c.type === 'voice')
+  return channels.find(c => c.id === chatStore.activeMainPanel.channelId && (c.type === 'voice' || c.type === 'drive'))
 })
 
 const activeFolderChannel = computed(() => {
@@ -1876,6 +1877,13 @@ watch(
         </div>
       </main>
     </template>
+
+    <DriveTogetherPanel
+      v-else-if="activeVoiceChannel?.type === 'drive'"
+      :key="activeVoiceChannel.id"
+      :channel-id="activeVoiceChannel.id"
+      :channel-name="activeVoiceChannel.name"
+    />
 
     <template v-else-if="activeVoiceChannel">
       <header class="h-14 border-b border-white/5 flex items-center px-6 shadow-sm shrink-0 bg-zinc-950">

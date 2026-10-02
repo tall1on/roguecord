@@ -350,6 +350,7 @@ const resolveSafeStoredFilePath = (channelId: string, storageName: string) => {
 };
 
 async function startServer() {
+    await channelsSchemaReady;
     const server = http.createServer(async (req, res) => {
         const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
@@ -538,7 +539,8 @@ async function startServer() {
         });
 
         ws.on('message', async (message) => {
-            console.log(`[WS DEBUG] Received message from ${client.userId || 'unauthenticated'}: ${message}`);
+            // Never log raw payloads: GPS coordinates can also occur in malformed or spoofed messages.
+            console.log(`[WS DEBUG] Received message from ${client.userId || 'unauthenticated'}`);
             await handleMessage(client, message.toString());
         });
 
@@ -556,12 +558,6 @@ async function startServer() {
     server.listen(PORT, HOST, async () => {
         console.log(`HTTP Server listening on http://${HOST}:${PORT}`);
         console.log(`WebSocket Server listening on ws://${HOST}:${PORT}`);
-        try {
-            await channelsSchemaReady;
-        } catch (error) {
-            console.error('Database schema initialization failed:', error);
-            process.exit(1);
-        }
         try {
             await migrateLegacyUserAvatarDataUrls();
         } catch (error) {
@@ -581,4 +577,7 @@ async function startServer() {
     });
 }
 
-startServer().catch(console.error);
+startServer().catch((error) => {
+    console.error('Server startup failed:', error);
+    process.exit(1);
+});
