@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { computed, ref, shallowRef, watch } from 'vue';
 import { Device } from 'mediasoup-client';
 import { useChatStore } from './chat';
+import { useDriveCameraShare } from '../composables/useDriveCameraShare';
 
 type AudioElementWithSinkId = HTMLAudioElement & {
   setSinkId?: (sinkId: string) => Promise<void>;
@@ -85,6 +86,7 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const screenAudioProducer = shallowRef<any | null>(null);
   const screenShareStream = shallowRef<MediaStream | null>(null);
   const screenShareError = ref<string | null>(null);
+  const cameraReceivingEnabled = ref(false);
   const consumers = shallowRef<Map<string, any>>(new Map());
   
   const activeVoiceChannelId = ref<string | null>(null);
@@ -104,7 +106,10 @@ export const useWebRtcStore = defineStore('webrtc', () => {
   const producerToSource = new Map<string, MediaSourceType>();
   const consumerToProducer = new Map<string, string>();
   const screenShareNotificationProducerIds = new Set<string>();
+  const cameraProducersPendingSubscription = new Set<string>();
+  const pendingConsumerProducerIds = new Set<string>();
   const userScreenStreams = shallowRef<Map<string, MediaStream>>(new Map());
+  const userCameraStreams = shallowRef<Map<string, MediaStream>>(new Map());
   const screenStreamMuteState = ref<Map<string, boolean>>(new Map());
   const screenStreamPreferenceState = ref<Map<string, ScreenStreamPreference>>(new Map());
   const screenStreamVolumeState = ref<Map<string, number>>(new Map());
@@ -529,6 +534,17 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     userScreenStreams.value = new Map(userScreenStreams.value);
   };
 
+  const setUserCameraStream = (userId: string, stream: MediaStream) => {
+    userCameraStreams.value.set(userId, stream);
+    userCameraStreams.value = new Map(userCameraStreams.value);
+  };
+
+  const deleteUserCameraStream = (userId: string) => {
+    if (!userCameraStreams.value.has(userId)) return;
+    userCameraStreams.value.delete(userId);
+    userCameraStreams.value = new Map(userCameraStreams.value);
+  };
+
   const cleanupScreenShareProducer = (notifyServer: boolean = true) => {
     const currentScreenProducerId = screenProducer.value?.id as string | undefined;
     const currentScreenAudioProducerId = screenAudioProducer.value?.id as string | undefined;
@@ -621,6 +637,48 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     }
   };
 
+  const removeUserCameraByProducer = (producerId: string) => {
+    if (producerToSource.get(producerId) !== 'camera') return;
+    const userId = producerToUser.get(producerId);
+    if (!userId) return;
+
+    const hasAnotherCameraProducer = [...producerToUser.entries()].some(([otherProducerId, otherUserId]) =>
+      otherProducerId !== producerId && otherUserId === userId && producerToSource.get(otherProducerId) === 'camera');
+    if (hasAnotherCameraProducer) return;
+
+    const existing = userCameraStreams.value.get(userId);
+    existing?.getTracks().forEach((track) => {
+      try {
+        track.stop();
+      } catch (_e) {
+        // no-op
+      }
+    });
+    deleteUserCameraStream(userId);
+  };
+
+  const setCameraReceivingEnabled = (enabled: boolean) => {
+    const nextEnabled = enabled && !!activeVoiceChannelId.value && isDriveChannel.value;
+    if (cameraReceivingEnabled.value === nextEnabled) return;
+    cameraReceivingEnabled.value = nextEnabled;
+
+    const channelId = activeVoiceChannelId.value;
+    if (!channelId) return;
+    for (const [consumerId, producerId] of consumerToProducer) {
+      if (producerToSource.get(producerId) !== 'camera') continue;
+      const consumer = consumers.value.get(consumerId);
+      if (consumer) consumer.track.enabled = nextEnabled;
+      chatStore.send(nextEnabled ? 'resume_consumer' : 'pause_consumer', {
+        channel_id: channelId,
+        consumer_id: consumerId
+      });
+    }
+
+    if (nextEnabled && cameraProducersPendingSubscription.size > 0 && recvTransport.value) {
+      chatStore.send('get_producers', { channel_id: channelId });
+    }
+  };
+
   const stopScreenShare = () => {
     screenShareError.value = null;
     cleanupScreenShareProducer(true);
@@ -636,6 +694,25 @@ export const useWebRtcStore = defineStore('webrtc', () => {
 
     return sendTransport.value;
   };
+
+  const {
+    producer: cameraProducer,
+    error: cameraShareError,
+    starting: cameraShareStarting,
+    cleanup: cleanupCameraShareProducer,
+    start: startCameraShare,
+    stop: stopCameraShare
+  } = useDriveCameraShare({
+    getChannelId: () => activeVoiceChannelId.value,
+    isDriveChannel: () => isDriveChannel.value,
+    getSendTransport: () => sendTransport.value,
+    getDevice: () => device.value,
+    waitForSendTransport,
+    getUserId: () => chatStore.currentUser?.id,
+    setUserStream: setUserCameraStream,
+    deleteUserStream: deleteUserCameraStream,
+    send: (type, payload) => chatStore.send(type, payload)
+  });
 
   const startScreenShare = async () => {
     if (!activeVoiceChannelId.value) {
@@ -1470,6 +1547,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     
     stopLocalInput();
     cleanupScreenShareProducer();
+    cleanupCameraShareProducer();
+    cameraShareError.value = null;
 
     if (localStream.value) {
       localStream.value.getTracks().forEach(track => track.stop());
@@ -1505,6 +1584,9 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     producerToUser.clear();
     producerToSource.clear();
     consumerToProducer.clear();
+    cameraReceivingEnabled.value = false;
+    cameraProducersPendingSubscription.clear();
+    pendingConsumerProducerIds.clear();
     userScreenStreams.value.forEach((stream) => {
       stream.getTracks().forEach((track) => {
         try {
@@ -1516,6 +1598,17 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     });
     userScreenStreams.value.clear();
     userScreenStreams.value = new Map(userScreenStreams.value);
+    userCameraStreams.value.forEach((stream) => {
+      stream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (_e) {
+          // no-op
+        }
+      });
+    });
+    userCameraStreams.value.clear();
+    userCameraStreams.value = new Map(userCameraStreams.value);
 
     remoteStreams.value.clear();
     voiceParticipants.value = [];
@@ -1629,7 +1722,10 @@ export const useWebRtcStore = defineStore('webrtc', () => {
             if (userId === payload.user_id) {
               producersToRemove.add(prodId);
               screenShareNotificationProducerIds.delete(prodId);
+              cameraProducersPendingSubscription.delete(prodId);
+              pendingConsumerProducerIds.delete(prodId);
               removeUserScreenByProducer(prodId);
+              removeUserCameraByProducer(prodId);
               producerToUser.delete(prodId);
               producerToSource.delete(prodId);
             }
@@ -1759,6 +1855,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
               cleanupProducedWait();
               if (source === 'screen') {
                 screenShareError.value = 'Screen share did not start (produce acknowledgement timeout). Please retry.';
+              } else if (source === 'camera') {
+                cameraShareError.value = 'Camera share did not start. Please retry.';
               }
               console.warn('[WebRTC][produce] ACK timeout', {
                 source,
@@ -1827,19 +1925,31 @@ export const useWebRtcStore = defineStore('webrtc', () => {
         }
         break;
         
-      case 'new_producer':
+      case 'new_producer': {
         if (payload.channel_id !== activeVoiceChannelId.value || !device.value || !recvTransport.value) return;
 
-          producerToUser.set(payload.producer_id, payload.user_id);
-          producerToSource.set(payload.producer_id, (payload.source as MediaSourceType | undefined) || (payload.kind === 'audio' ? 'mic' : 'camera'));
+        const producerId = payload.producer_id as string;
+        const source = (payload.source as MediaSourceType | undefined) || (payload.kind === 'audio' ? 'mic' : 'camera');
+        producerToUser.set(producerId, payload.user_id);
+        producerToSource.set(producerId, source);
+
+        if (source === 'camera' && isDriveChannel.value && !cameraReceivingEnabled.value) {
+          cameraProducersPendingSubscription.add(producerId);
+          break;
+        }
+        cameraProducersPendingSubscription.delete(producerId);
+        if (pendingConsumerProducerIds.has(producerId)
+          || [...consumerToProducer.values()].includes(producerId)) break;
+        pendingConsumerProducerIds.add(producerId);
         
         chatStore.send('consume', {
           channel_id: payload.channel_id,
           transport_id: recvTransport.value.id,
-          producer_id: payload.producer_id,
+          producer_id: producerId,
           rtpCapabilities: device.value.rtpCapabilities
         });
         break;
+      }
         
       case 'consumed':
         if (payload.channel_id !== activeVoiceChannelId.value || !recvTransport.value) return;
@@ -1851,7 +1961,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
             kind: payload.kind,
             rtpParameters: payload.rtpParameters,
           });
-          
+
+          pendingConsumerProducerIds.delete(payload.producer_id);
           consumers.value.set(consumer.id, consumer);
           consumerToProducer.set(consumer.id, payload.producer_id);
 
@@ -1868,7 +1979,9 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
 
           consumer.on('producerclose', () => {
             closeConsumer(consumer.id, 'producerclose event');
+            pendingConsumerProducerIds.delete(payload.producer_id);
             removeUserScreenByProducer(payload.producer_id);
+            removeUserCameraByProducer(payload.producer_id);
             producerToUser.delete(payload.producer_id);
             producerToSource.delete(payload.producer_id);
             remoteStreams.value = new Map(remoteStreams.value);
@@ -1901,15 +2014,21 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
               });
             };
 
-            consumer.track.onunmute = () => {
-              console.info('[WebRTC][screen] Remote screen track unmuted', {
-                consumerId: consumer.id,
-                producerId: payload.producer_id,
-                remoteUserId,
-                readyState: consumer.track.readyState
-              });
-            };
-          }
+              consumer.track.onunmute = () => {
+                console.info('[WebRTC][screen] Remote screen track unmuted', {
+                  consumerId: consumer.id,
+                  producerId: payload.producer_id,
+                  remoteUserId,
+                  readyState: consumer.track.readyState
+                });
+              };
+            } else if (remoteSource === 'camera' && payload.kind === 'video') {
+              consumer.track.onended = () => {
+                closeConsumer(consumer.id, 'remote camera track ended');
+                if (remoteUserId) removeUserCameraByProducer(payload.producer_id);
+                remoteStreams.value = new Map(remoteStreams.value);
+              };
+            }
 
           if (remoteUserId) {
             if (remoteSource === 'screen' && payload.kind === 'video') {
@@ -1918,6 +2037,8 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
                 playScreenShareNotificationSound();
               }
               setUserScreenStream(remoteUserId, stream);
+            } else if (remoteSource === 'camera' && payload.kind === 'video') {
+              setUserCameraStream(remoteUserId, stream);
             } else if (payload.kind === 'audio') {
               addSpeakingDetector(consumer.id, remoteUserId, stream);
             }
@@ -1958,12 +2079,16 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
           
           // Trigger reactivity
           remoteStreams.value = new Map(remoteStreams.value);
-          
-          chatStore.send('resume_consumer', {
-            channel_id: payload.channel_id,
-            consumer_id: consumer.id
-          });
+          if (remoteSource === 'camera' && isDriveChannel.value && !cameraReceivingEnabled.value) {
+            consumer.track.enabled = false;
+          } else {
+            chatStore.send('resume_consumer', {
+              channel_id: payload.channel_id,
+              consumer_id: consumer.id
+            });
+          }
         } catch (error) {
+          pendingConsumerProducerIds.delete(payload.producer_id);
           console.error('Failed to consume:', error);
         }
         break;
@@ -1995,12 +2120,19 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
         }
 
         screenShareNotificationProducerIds.delete(producerId);
+        cameraProducersPendingSubscription.delete(producerId);
+        pendingConsumerProducerIds.delete(producerId);
 
         if (source === 'screen') {
           if (!producerToSource.has(producerId) && payload.user_id) {
             deleteUserScreenStream(payload.user_id as string);
           }
           removeUserScreenByProducer(producerId);
+        } else if (source === 'camera') {
+          if (!producerToSource.has(producerId) && payload.user_id) {
+            deleteUserCameraStream(payload.user_id as string);
+          }
+          removeUserCameraByProducer(producerId);
         }
 
         producerToUser.delete(producerId);
@@ -2048,9 +2180,13 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
     localStream,
     remoteStreams,
     userScreenStreams,
+    userCameraStreams,
     screenShareStream,
     screenShareError,
     screenProducer,
+    cameraProducer,
+    cameraShareError,
+    cameraShareStarting,
     ping,
     bandwidth,
     pingHistory,
@@ -2096,6 +2232,9 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
     toggleDeafen,
     startScreenShare,
     stopScreenShare,
+    startCameraShare,
+    stopCameraShare,
+    setCameraReceivingEnabled,
     initAudioSystem,
     refreshAudioDevices,
     setInputDevice,

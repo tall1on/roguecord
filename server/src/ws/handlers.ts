@@ -1829,7 +1829,7 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       return;
     }
 
-    if (['create_webrtc_transport', 'connect_webrtc_transport', 'produce', 'close_producer', 'consume', 'resume_consumer', 'get_producers', 'voice_state_update'].includes(type)) {
+    if (['create_webrtc_transport', 'connect_webrtc_transport', 'produce', 'close_producer', 'consume', 'pause_consumer', 'resume_consumer', 'get_producers', 'voice_state_update'].includes(type)) {
       const room = rooms.get(payload?.channel_id);
       const channel = !room?.type && typeof payload?.channel_id === 'string' ? await getChannelById(payload.channel_id) : undefined;
       if (channel?.type === 'drive' || room?.type === 'drive') {
@@ -1963,6 +1963,9 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
         break;
       case 'consume':
         await handleConsume(client, payload);
+        break;
+      case 'pause_consumer':
+        await handlePauseConsumer(client, payload);
         break;
       case 'resume_consumer':
         await handleResumeConsumer(client, payload);
@@ -3985,6 +3988,20 @@ const handleResumeConsumer = async (client: ClientConnection, payload: { channel
   if (!consumer) return;
 
   await consumer.resume();
+};
+
+const handlePauseConsumer = async (client: ClientConnection, payload: { channel_id: string, consumer_id: string }) => {
+  if (!client.userId) return;
+  const { channel_id, consumer_id } = payload;
+
+  const room = rooms.get(channel_id);
+  if (!room) return;
+
+  const peer = room.peers.get(client.userId);
+  const consumer = peer?.consumers.get(consumer_id);
+  if (!consumer) return;
+
+  await consumer.pause();
 };
 
 const handleLeaveVoiceChannel = async (client: ClientConnection, payload: { channel_id: string }) => {

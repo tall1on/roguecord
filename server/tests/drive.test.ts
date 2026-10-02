@@ -174,7 +174,7 @@ test('destinations clear on empty room, a fresh session, and channel deletion', 
   assert.equal(drive.destinationFor('trip', owner.client), null);
 });
 
-test('drive signaling rejects unrelated sockets and screen media before produce', async (t) => {
+test('drive signaling rejects unrelated sockets and screen media while allowing camera video', async (t) => {
   t.mock.method(Date, 'now', () => 10000);
   // Isolate handlers from the persisted database and mediasoup worker.
   const modelPath = require.resolve('../src/models');
@@ -283,13 +283,13 @@ test('drive signaling rejects unrelated sockets and screen media before produce'
   const clearCount = broadcastCount();
   await send(viewer.client, 'drive_set_destination', { ...setPayload, request_id: 'clear-again', destination: null });
   assert.equal(broadcastCount(), clearCount);
-  peer.transports.set('transport', { produce: async () => { produces++; return { id: 'producer', kind: 'audio' }; }, close: () => {} } as any);
+  peer.transports.set('transport', { produce: async ({ kind }: { kind: string }) => { produces++; return { id: `producer-${produces}`, kind }; }, close: () => {} } as any);
   for (const kind of ['audio', 'video']) {
     await send(owner.client, 'produce', { channel_id: 'drive', transport_id: 'transport', kind, source: 'screen', request_id: kind });
     assert.equal(owner.messages.at(-1).type, 'error');
     assert.equal(owner.messages.at(-1).payload.request_id, kind);
   }
-  for (const type of ['produce', 'consume', 'resume_consumer', 'connect_webrtc_transport', 'create_webrtc_transport', 'close_producer', 'get_producers', 'voice_state_update']) {
+  for (const type of ['produce', 'consume', 'pause_consumer', 'resume_consumer', 'connect_webrtc_transport', 'create_webrtc_transport', 'close_producer', 'get_producers', 'voice_state_update']) {
     await send(tab.client, type, { channel_id: 'drive', transport_id: 'transport', request_id: type });
     assert.equal(tab.messages.at(-1).type, 'error');
     assert.equal(tab.messages.at(-1).payload.request_id, type);
@@ -307,6 +307,20 @@ test('drive signaling rejects unrelated sockets and screen media before produce'
   await send(owner.client, 'produce', { channel_id: 'drive', transport_id: 'transport', kind: 'audio', source: 'mic', request_id: 'mic' });
   assert.equal(produces, 1);
   assert.equal(owner.messages.at(-1).type, 'produced');
+  await send(owner.client, 'produce', { channel_id: 'drive', transport_id: 'transport', kind: 'video', source: 'camera', request_id: 'camera' });
+  assert.equal(produces, 2);
+  assert.equal(owner.messages.at(-1).type, 'produced');
+  assert.equal(owner.messages.at(-1).payload.source, 'camera');
+  let cameraConsumerPauses = 0;
+  let cameraConsumerResumes = 0;
+  peer.consumers.set('camera-consumer', {
+    pause: async () => { cameraConsumerPauses++; },
+    resume: async () => { cameraConsumerResumes++; }
+  } as any);
+  await send(owner.client, 'pause_consumer', { channel_id: 'drive', consumer_id: 'camera-consumer' });
+  await send(owner.client, 'resume_consumer', { channel_id: 'drive', consumer_id: 'camera-consumer' });
+  assert.equal(cameraConsumerPauses, 1);
+  assert.equal(cameraConsumerResumes, 1);
   handleClientDisconnect(owner.client);
   assert.equal(room.peers.has('owner'), false);
   assert.equal(driveParticipants.owns('drive', owner.client), false);
