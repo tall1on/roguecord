@@ -1,22 +1,27 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Camera, CameraOff, Car, Flag, Headphones, LocateFixed, MapPin, Mic, MicOff, Navigation, PhoneOff, Search, X } from 'lucide-vue-next'
+import { ArrowLeft, Camera, CameraOff, Car, Flag, Headphones, LocateFixed, MapPin, Mic, MicOff, Navigation, PhoneOff, Route, Search, X } from 'lucide-vue-next'
 import type { CircleMarker, LatLngBounds, Map as LeafletMap, Marker as LeafletMarker, Polyline } from 'leaflet'
 import { useChatStore } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 import { useDriveStore } from '../../stores/drive'
+import { useDriveTracksStore } from '../../stores/driveTracks'
 import { useDriveRoutes } from '../../composables/useDriveRoutes'
 import { usePhoneLayout } from '../../composables/usePhoneLayout'
 import { DRIVE_SELF_COLOR, getDriveMapCoordinates, getRouteHeading, pickDriveColor, rankDriveParticipants, searchDriveDestinations, setDriveDestination, type DriveDestination } from '../../utils/driveNavigation'
+import { distanceToGate, getTrackHeading, type DriveTrack, type DriveTrackGate } from '../../utils/driveTracks'
 
 const DriveCameraStage = defineAsyncComponent(() => import('./DriveCameraStage.vue'))
+const TrackEditor = defineAsyncComponent(() => import('../drive/TrackEditor.vue'))
+const DriveTracksContent = defineAsyncComponent(() => import('../drive/DriveTracksContent.vue'))
 const props = withDefaults(defineProps<{ channelId: string; channelName: string; phoneLayout?: boolean }>(), { phoneLayout: false })
 const emit = defineEmits<{ (e: 'back'): void }>()
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
 const driveStore = useDriveStore()
 const isPhoneResponsive = usePhoneLayout()
-const cameraPhoneLayout = computed(() => props.phoneLayout || isPhoneResponsive.value)
+const isPhoneLayout = computed(() => props.phoneLayout || isPhoneResponsive.value)
+const cameraPhoneLayout = isPhoneLayout
 const mapElement = ref<HTMLElement | null>(null)
 const mapError = ref<string | null>(null)
 const navigationElement = ref<HTMLElement | null>(null)
@@ -33,6 +38,55 @@ let lastSearchAt = 0
 const isJoined = computed(() => driveStore.joinedChannelId === props.channelId)
 const participants = computed(() => webrtcStore.channelParticipants.get(props.channelId) || [])
 const visibleLocations = computed(() => isJoined.value ? [...driveStore.locations.values()] : [])
+const driveTracksStore = useDriveTracksStore()
+const tracksPanelOpen = ref(false)
+const trackEditorOpen = ref(false)
+const editingTrack = ref<DriveTrack | null>(null)
+const activeTrack = computed<DriveTrack | null>(() => driveTracksStore.activeTrack(props.channelId))
+const activeRun = computed(() => driveTracksStore.activeRun(props.channelId))
+const trackGates = computed<DriveTrackGate[]>(() => activeTrack.value ? driveTracksStore.gatesFor(activeTrack.value) : [])
+const trackMode = computed(() => isJoined.value && !!activeTrack.value)
+const trackElapsedMs = ref(0)
+const trackElapsed = () => { const run = activeRun.value; return run ? Math.max(0, (run.finished_at ?? Date.now()) - run.started_at) : 0 }
+let trackClockTimer: ReturnType<typeof setInterval> | null = null
+watch(trackMode, (on) => {
+  if (on) {
+    trackElapsedMs.value = trackElapsed()
+    trackClockTimer ??= setInterval(() => { trackElapsedMs.value = trackElapsed() }, 1000)
+  } else if (trackClockTimer) {
+    clearInterval(trackClockTimer)
+    trackClockTimer = null
+    trackElapsedMs.value = 0
+  }
+}, { immediate: true })
+const formatDuration = (ms: number): string => {
+  const total = Math.floor(ms / 1000)
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}` : `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+const trackNextGate = computed(() => {
+  const run = activeRun.value
+  if (!run || run.status !== 'active') return null
+  return trackGates.value[run.next_gate] ?? null
+})
+const trackNextGateDistance = computed(() => {
+  const point = selfLocation.value
+  const gate = trackNextGate.value
+  return point && gate ? distanceToGate(point, gate) : null
+})
+const toggleTracksPanel = () => {
+  tracksPanelOpen.value = !tracksPanelOpen.value
+  if (tracksPanelOpen.value) { navPanelOpen.value = false; void driveTracksStore.load() }
+}
+const closeTracksPanel = () => { tracksPanelOpen.value = false }
+const toggleNavPanel = () => {
+  navPanelOpen.value = !navPanelOpen.value
+  if (navPanelOpen.value) tracksPanelOpen.value = false
+}
+const openTrackEditor = (track: DriveTrack | null) => { editingTrack.value = track; trackEditorOpen.value = true }
+const handleTrackSaved = () => { trackEditorOpen.value = false; editingTrack.value = null }
 const toggleCameraShare = () => webrtcStore.cameraProducer ? webrtcStore.stopCameraShare() : webrtcStore.startCameraShare()
 const cameraView = ref<'map' | 'split' | 'cameras'>('map')
 const desktopViews = [
@@ -78,7 +132,7 @@ const podiumClasses = [
   'border-orange-400/50 bg-orange-700/15 text-orange-300'
 ]
 const { routes, routeErrors, isRouting } = useDriveRoutes(chatStore, () => props.channelId,
-  () => visibleLocations.value, () => destination.value, () => isJoined.value)
+  () => visibleLocations.value, () => trackMode.value ? null : destination.value, () => isJoined.value)
 const renderedStreets = computed(() => {
   const entries = [...routes.value]
   const positions = entries.flatMap(([, route]) => route.coordinates.map(([longitude, latitude]) => ({ latitude, longitude })))
@@ -104,11 +158,16 @@ const renderedStreets = computed(() => {
 const renderedMap = computed(() => {
   const streets = renderedStreets.value
   const points = visibleLocations.value
-  if (!destination.value || !streets.paths.size) return { coordinates: getDriveMapCoordinates(points, destination.value), paths: streets.paths }
+  const trackCoordinates = trackMode.value
+    ? trackGates.value.map<[number, number]>((gate) => [gate.latitude, gate.longitude])
+    : []
+  if (!destination.value || !streets.paths.size) {
+    return { coordinates: [...getDriveMapCoordinates(points, destination.value), ...trackCoordinates], paths: streets.paths }
+  }
   // Road geometry stays cached between route updates; GPS-only updates fit just markers and road bounds.
   const coordinates = points.map<[number, number]>((point) => [point.latitude,
     streets.centerLongitude + ((point.longitude - streets.centerLongitude) % 360 + 540) % 360 - 180])
-  coordinates.push(streets.target!, ...streets.bounds)
+  coordinates.push(streets.target!, ...streets.bounds, ...trackCoordinates)
   return { coordinates, paths: streets.paths }
 })
 const routingErrors = computed(() => [...routeErrors.value].map(([userId, error]) => ({
@@ -125,6 +184,36 @@ const linePositions = new Map<string, [number, number][]>()
 let lastFittedBounds: LatLngBounds | null = null
 let lastFitSignature = ''
 let destinationMarker: CircleMarker | null = null
+let trackLine: Polyline | null = null
+const trackGateMarkers = new Map<string, LeafletMarker>()
+let trackLayerSignature = ''
+const buildTrackGateIcon = (gate: DriveTrackGate) => {
+  const color = gate.kind === 'start' ? '#22c55e' : gate.kind === 'end' ? '#f59e0b' : '#a78bfa'
+  const label = gate.kind === 'start' ? 'S' : gate.kind === 'end' ? 'F' : String(gate.index)
+  const html = `<span style="display:flex;width:24px;height:24px;align-items:center;justify-content:center;border-radius:9999px;background:${color};color:#fff;font:700 11px/1 system-ui;border:2px solid #fff;box-shadow:0 1px 3px rgb(0 0 0/.6)">${label}</span>`
+  return leaflet!.divIcon({ className: 'drive-track-gate-icon', html, iconSize: [24, 24], iconAnchor: [12, 12] })
+}
+const clearTrackLayer = () => {
+  if (trackLine) { trackLine.remove(); trackLine = null }
+  for (const marker of trackGateMarkers.values()) marker.remove()
+  trackGateMarkers.clear()
+  trackLayerSignature = ''
+}
+const syncTrackLayer = () => {
+  if (!map || !leaflet) return
+  const track = trackMode.value ? activeTrack.value : null
+  if (!track) { clearTrackLayer(); return }
+  const gates = trackGates.value
+  const signature = `${track.id}|${gates.map((gate) => `${gate.latitude.toFixed(6)},${gate.longitude.toFixed(6)},${gate.kind}`).join(';')}`
+  if (signature === trackLayerSignature) return
+  clearTrackLayer()
+  trackLayerSignature = signature
+  const latLngs = gates.map((gate) => [gate.latitude, gate.longitude] as [number, number])
+  if (latLngs.length >= 2) trackLine = leaflet.polyline(latLngs, { color: '#a78bfa', weight: 5, opacity: 0.85, interactive: false }).addTo(map)
+  gates.forEach((gate) => {
+    trackGateMarkers.set(`${gate.kind}-${gate.index}`, leaflet!.marker([gate.latitude, gate.longitude], { icon: buildTrackGateIcon(gate), interactive: false, keyboard: false }).addTo(map!))
+  })
+}
 const driverAvatarSignature = (avatarUrl: string | null): string => {
   if (!avatarUrl) return ''
   return `${avatarUrl.length}:${avatarUrl.slice(0, 24)}:${avatarUrl.slice(-24)}`
@@ -175,14 +264,19 @@ const headingCenter = (point: { latitude: number; longitude: number }, heading: 
   return [latitude + latitudeOffset, point.longitude + longitudeOffset]
 }
 // Prefer the street route's next waypoint over the noisy GPS compass so the view turns early and holds steady.
+// An active track overrules the destination route so navigation follows the planned line.
 const routeHeading = (point: { latitude: number; longitude: number; speed: number | null }): number | null => {
+  const speed = typeof point.speed === 'number' && Number.isFinite(point.speed) ? point.speed : null
+  const lookAhead = speed === null
+    ? NAV_LOOK_AHEAD_MIN_METERS + 10
+    : Math.min(NAV_LOOK_AHEAD_MAX_METERS, Math.max(NAV_LOOK_AHEAD_MIN_METERS, NAV_LOOK_AHEAD_MIN_METERS + speed * 2))
+  if (trackMode.value && activeTrack.value && trackGates.value.length >= 2) {
+    const heading = getTrackHeading(point, trackGates.value, lookAhead)
+    if (heading !== null) return heading
+  }
   const userId = chatStore.currentUser?.id
   const route = userId ? routes.value.get(userId) : undefined
   if (route) {
-    const speed = typeof point.speed === 'number' && Number.isFinite(point.speed) ? point.speed : null
-    const lookAhead = speed === null
-      ? NAV_LOOK_AHEAD_MIN_METERS + 10
-      : Math.min(NAV_LOOK_AHEAD_MAX_METERS, Math.max(NAV_LOOK_AHEAD_MIN_METERS, NAV_LOOK_AHEAD_MIN_METERS + speed * 2))
     const heading = getRouteHeading(point, route.coordinates, lookAhead)
     if (heading !== null) return heading
   }
@@ -321,6 +415,7 @@ const leaveDriveChannel = () => {
 
 const syncMap = (forceFit = false) => {
   if (!map || !leaflet) return
+  syncTrackLayer()
   const points = visibleLocations.value
   const userIds = new Set(points.map((point) => point.user_id))
   for (const [userId, marker] of markers) {
@@ -439,7 +534,7 @@ const syncMap = (forceFit = false) => {
   }
   // Refit only when the driver/destination set changes or someone leaves the current view.
   // GPS ticks that keep everyone visible just move the markers, avoiding per-second zoom/tile flashes.
-  const fitSignature = `${destination.value?.label ?? ''}|${points.map((point) => point.user_id).sort().join(',')}`
+  const fitSignature = `${destination.value?.label ?? ''}|${activeTrack.value?.id ?? ''}|${points.map((point) => point.user_id).sort().join(',')}`
   const shouldRefit = forceFit || !lastFittedBounds || fitSignature !== lastFitSignature || !lastFittedBounds.contains(bounds)
   if (!shouldRefit) return
   map.fitBounds(bounds, {
@@ -457,7 +552,7 @@ watch([cameraView, cameraPhoneLayout, isJoined], async ([view, isPhone, joined])
   syncMap(true)
 }, { flush: 'post', immediate: true })
 
-watch([visibleLocations, destination, routes, participants, () => [...webrtcStore.speakingUserIds], navMode, () => chatStore.getLocalDriverAvatar(), () => chatStore.currentUser?.driver_avatar_url], () => syncMap(), { deep: true })
+watch([visibleLocations, destination, routes, participants, () => [...webrtcStore.speakingUserIds], navMode, activeTrack, trackGates, () => chatStore.getLocalDriverAvatar(), () => chatStore.currentUser?.driver_avatar_url], () => syncMap(), { deep: true })
 onMounted(async () => {
   try {
     const [module] = await Promise.all([import('leaflet'), import('leaflet/dist/leaflet.css')])
@@ -497,6 +592,8 @@ onBeforeUnmount(() => {
   cancelDestinationChange()
   resizeObserver?.disconnect()
   clearDirectionArrow()
+  clearTrackLayer()
+  if (trackClockTimer) { clearInterval(trackClockTimer); trackClockTimer = null }
   map?.remove()
   map = null
   markers.clear()
@@ -509,7 +606,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="flex min-h-0 min-w-0 flex-1 flex-col bg-zinc-950" :class="{ 'phone-drive-panel': phoneLayout }">
+  <section class="relative flex min-h-0 min-w-0 flex-1 flex-col bg-zinc-950" :class="{ 'phone-drive-panel': phoneLayout }">
     <header class="flex shrink-0 items-center gap-3 border-b border-white/5 px-4 py-3 md:px-6" :class="phoneLayout ? 'pl-12' : ''">
       <Car class="h-6 w-6 shrink-0 text-indigo-400" />
       <div class="min-w-0 flex-1">
@@ -585,7 +682,22 @@ onBeforeUnmount(() => {
           <p v-if="destination && isJoined" class="mt-2 text-[11px] text-zinc-400" role="status">{{ routes.size }}/{{ visibleLocations.length }} street routes<span v-if="isRouting">, updating...</span></p>
           <div v-if="routingErrors.length" class="mt-2 max-h-24 space-y-1 overflow-y-auto" role="alert"><p v-for="entry in routingErrors" :key="entry.userId" class="text-xs text-amber-300">{{ entry.username }}: {{ entry.error }}</p></div>
         </div>
-        <div v-if="(!visibleLocations.length && !destination) || mapError" class="pointer-events-none absolute inset-x-4 bottom-4 z-10 mx-auto max-w-md rounded-xl border border-white/10 bg-zinc-950/90 p-4 text-center shadow-xl backdrop-blur">
+        <div v-show="tracksPanelOpen && !isPhoneLayout" :id="isPhoneLayout ? undefined : 'drive-tracks-panel'" class="drive-tracks absolute left-14 right-3 top-3 z-20 max-h-[calc(100%-1.5rem)] overflow-y-auto rounded-xl border border-white/10 bg-zinc-950/95 p-3 shadow-xl backdrop-blur md:left-auto md:right-3 md:w-96" @pointerdown.stop @dblclick.stop @wheel.stop>
+          <div class="mb-2 flex items-center gap-2">
+            <Route class="h-4 w-4 shrink-0 text-indigo-400" />
+            <h3 class="min-w-0 flex-1 text-xs font-bold uppercase tracking-wider text-zinc-300">Server tracks</h3>
+            <button type="button" class="shrink-0 rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50" :disabled="!isJoined" @click="openTrackEditor(null)">New</button>
+          </div>
+          <DriveTracksContent :channel-id="channelId" :joined="isJoined" :active-track="activeTrack" :active-run="activeRun" @edit="openTrackEditor" />
+        </div>
+        <div v-if="trackMode && activeTrack" class="drive-track-hud pointer-events-none absolute inset-x-3 bottom-3 z-10 mx-auto max-w-md rounded-xl border border-indigo-500/30 bg-zinc-950/90 px-3 py-2 text-center shadow-xl backdrop-blur">
+          <p class="truncate text-xs font-bold text-white">{{ activeTrack.name }}</p>
+          <p class="mt-0.5 text-[11px] text-zinc-300">
+            <template v-if="trackNextGate">Next: {{ trackNextGate.name }}<span v-if="trackNextGateDistance !== null"> · {{ formatDistance(trackNextGateDistance) }}</span> · </template>
+            {{ formatDuration(trackElapsedMs) }}<span v-if="activeRun?.avg_speed_mps"> · avg {{ (activeRun.avg_speed_mps * 3.6).toFixed(1) }} km/h</span>
+          </p>
+        </div>
+        <div v-if="((!visibleLocations.length && !destination && !activeTrack) || mapError)" class="pointer-events-none absolute inset-x-4 bottom-4 z-10 mx-auto max-w-md rounded-xl border border-white/10 bg-zinc-950/90 p-4 text-center shadow-xl backdrop-blur">
           <MapPin class="mx-auto mb-2 h-6 w-6 text-indigo-400" />
           <p class="text-sm font-medium text-white">{{ mapError || (isJoined ? 'Waiting for shared GPS locations' : 'Join to see and share live locations') }}</p>
           <p class="mt-1 text-xs text-zinc-400">Voice works even if you do not share your location. The map always fits all known positions.</p>
@@ -624,7 +736,8 @@ onBeforeUnmount(() => {
           </button>
           <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors disabled:cursor-not-allowed disabled:opacity-40" :class="[navMode ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :disabled="!canUseNav" :aria-pressed="navMode" :aria-label="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Start navigation close-up of your position') : 'Navigation close-up needs active GPS sharing'" :title="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Navigation close-up of your position') : 'Share your GPS to use navigation close-up'" @click="navMode = !navMode"><Navigation class="h-5 w-5" /></button>
         </template>
-        <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors" :class="[navPanelOpen ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-expanded="navPanelOpen" aria-controls="drive-navigation-panel" :aria-label="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" :title="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" @click="navPanelOpen = !navPanelOpen"><Flag class="h-5 w-5" /></button>
+        <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors" :class="[navPanelOpen ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-expanded="navPanelOpen" aria-controls="drive-navigation-panel" :aria-label="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" :title="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" @click="toggleNavPanel"><Flag class="h-5 w-5" /></button>
+        <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors" :class="[tracksPanelOpen ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-expanded="tracksPanelOpen" :aria-controls="isPhoneLayout ? 'drive-tracks-panel-phone' : 'drive-tracks-panel'" :aria-label="tracksPanelOpen ? 'Hide shared tracks' : 'Show shared tracks'" :title="tracksPanelOpen ? 'Hide shared tracks' : 'Show shared tracks'" @click="toggleTracksPanel"><Route class="h-5 w-5" /></button>
         <template v-if="isJoined">
           <button class="inline-flex items-center justify-center rounded-lg p-2 hover:bg-zinc-800" :class="[webrtcStore.isMuted || webrtcStore.isDeafened ? 'text-red-400' : 'text-zinc-300', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-label="webrtcStore.isMuted || webrtcStore.isDeafened ? 'Unmute microphone' : 'Mute microphone'" @click="webrtcStore.toggleMute()">
             <MicOff v-if="webrtcStore.isMuted || webrtcStore.isDeafened" class="h-5 w-5" /><Mic v-else class="h-5 w-5" />
@@ -634,6 +747,17 @@ onBeforeUnmount(() => {
         </template>
       </div>
     </footer>
+    <div v-if="isPhoneLayout && tracksPanelOpen" id="drive-tracks-panel-phone" class="absolute inset-0 z-40 flex flex-col bg-zinc-950" role="dialog" aria-modal="true" aria-label="Shared tracks">
+      <header class="flex shrink-0 items-center gap-1 border-b border-white/5 px-2 py-3">
+        <button type="button" class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-zinc-300 hover:bg-zinc-800 hover:text-white" aria-label="Back to the drive map" @click="closeTracksPanel"><ArrowLeft class="h-5 w-5" /></button>
+        <h3 class="min-w-0 flex-1 truncate text-lg font-bold text-white">Tracks</h3>
+        <button type="button" class="mr-1 shrink-0 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50" :disabled="!isJoined" @click="openTrackEditor(null)">New</button>
+      </header>
+      <div class="min-h-0 flex-1 overflow-y-auto px-3 pb-10 pt-3">
+        <DriveTracksContent :channel-id="channelId" :joined="isJoined" :active-track="activeTrack" :active-run="activeRun" @edit="openTrackEditor" />
+      </div>
+    </div>
+    <TrackEditor v-if="trackEditorOpen" :track="editingTrack" @close="trackEditorOpen = false" @saved="handleTrackSaved" />
   </section>
 </template>
 

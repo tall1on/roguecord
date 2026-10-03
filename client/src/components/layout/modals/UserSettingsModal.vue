@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Car } from 'lucide-vue-next'
 import { EmojiPicker } from 'vue3-twemoji-picker-final'
 import { useChatStore } from '../../../stores/chat'
 import { useWebRtcStore } from '../../../stores/webrtc'
+import { useDriveTracksStore } from '../../../stores/driveTracks'
+import type { DriveTrack, DriveTrackVote } from '../../../utils/driveTracks'
 
 type TwemojiPickerSelection = {
   i?: string
@@ -11,7 +13,7 @@ type TwemojiPickerSelection = {
 
 type SettingsSection = 'general' | 'audio' | 'connections' | 'drive' | 'identity' | 'server'
 
-defineProps<{
+const props = defineProps<{
   visible: boolean
   activeSection?: SettingsSection
   autoConnectLastServer: boolean
@@ -25,6 +27,27 @@ const emit = defineEmits<{
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
+const driveTracksStore = useDriveTracksStore()
+const TrackEditor = defineAsyncComponent(() => import('../../drive/TrackEditor.vue'))
+const TrackList = defineAsyncComponent(() => import('../../drive/TrackList.vue'))
+const trackEditorOpen = ref(false)
+const editingTrack = ref<DriveTrack | null>(null)
+const openTrackEditor = (track: DriveTrack | null) => {
+  editingTrack.value = track
+  trackEditorOpen.value = true
+}
+const handleTrackSaved = () => {
+  trackEditorOpen.value = false
+  editingTrack.value = null
+}
+const handleTrackVote = (track: DriveTrack, value: DriveTrackVote | 0) => { void driveTracksStore.vote(track.id, value) }
+const handleTrackDelete = async (track: DriveTrack) => {
+  if (!window.confirm(`Delete “${track.name}” from the server? This cannot be undone.`)) return
+  await driveTracksStore.remove(track.id)
+}
+watch(() => props.activeSection, (section) => {
+  if (section === 'drive') void driveTracksStore.load()
+})
 
 const editedUsername = ref(chatStore.localUsername || '')
 const editedStatusEmoji = ref(chatStore.localStatusEmoji || '')
@@ -787,6 +810,38 @@ onBeforeUnmount(() => {
 
             <p class="text-xs text-zinc-500">Other drivers always see your car image. On your own screen it is hidden while the navigation close-up is active so the direction arrow stays clear.</p>
           </div>
+
+          <div class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm space-y-4">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-1">Track editor</label>
+                <p class="text-sm text-zinc-500">Plan a route with a start, checkpoints and a finish, then share it as a server track that any driving room can activate.</p>
+              </div>
+              <button type="button" class="shrink-0 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500" @click="openTrackEditor(null)">New track</button>
+            </div>
+          </div>
+
+          <div class="bg-zinc-900 border border-white/5 rounded-xl p-5 shadow-sm space-y-4">
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-1">Shared tracks</label>
+                <p class="text-sm text-zinc-500">Community tracks saved on this server. Upvote or downvote the ones you like; editing always creates a new version.</p>
+              </div>
+              <button type="button" class="shrink-0 rounded-lg border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-50" :disabled="driveTracksStore.isLoading" @click="driveTracksStore.load()">{{ driveTracksStore.isLoading ? 'Loading…' : 'Refresh' }}</button>
+            </div>
+            <p v-if="driveTracksStore.lastError" class="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-300" role="alert">{{ driveTracksStore.lastError }}</p>
+            <TrackList
+              :tracks="driveTracksStore.trackList"
+              :can-delete="chatStore.currentUserIsAdmin"
+              :busy="driveTracksStore.isSaving"
+              empty-text="No tracks have been shared yet. Create the first one above."
+              @vote="handleTrackVote"
+              @edit="openTrackEditor"
+              @delete="handleTrackDelete"
+            />
+          </div>
+
+          <TrackEditor v-if="trackEditorOpen" :track="editingTrack" @close="trackEditorOpen = false" @saved="handleTrackSaved" />
         </div>
 
         <div v-else-if="activeSection === 'connections'" class="space-y-4 max-w-2xl">

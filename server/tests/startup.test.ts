@@ -81,6 +81,7 @@ test('database readiness includes the geocode migration and rejects migration fa
         if (fail) throw new Error('mock cache migration failure');
         await migrateDriveGeocodeCache(db);
       } };
+      if (id === './driveTracksMigration') return require('../src/driveTracksMigration');
       // The dedicated channel connection has its own :memory: DB; channel migration is tested separately.
       if (id === './channelMigration') return { migrateChannelsSchema: async () => {} };
       if (id === './permissions') return require('../src/permissions');
