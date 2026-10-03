@@ -164,3 +164,45 @@ test('the generic navigation request helper still gates responses by channel', a
   state.reply('drive_route', { request_id: request.payload.request_id, channel_id: 'ch1', coordinates: [[0, 0], [1, 1]] })
   assert.equal((await pending).channel_id, 'ch1')
 })
+
+test('leaderboard entries validate and expose best times', async () => {
+  const state = makeTransport()
+  const pending = driveTracks.getDriveTrackLeaderboard(state.transport, 't1', signal())
+  const request = await answer(state, 'drive_track_leaderboard', () => ({
+    track_id: 't1',
+    entries: [{ user_id: 'u1', run_id: 'r1', duration_ms: 4000, avg_speed_mps: 12.5, distance_m: 222, finished_at: 1000 }],
+  }))
+  assert.equal(request.type, 'drive_track_leaderboard')
+  assert.equal(request.payload.track_id, 't1')
+  assert.equal(request.payload.channel_id, undefined)
+  assert.equal((await pending)[0].duration_ms, 4000)
+
+  const bad = makeTransport()
+  const rejected = driveTracks.getDriveTrackLeaderboard(bad.transport, 't1', signal())
+  await answer(bad, 'drive_track_leaderboard', () => ({ entries: [{ user_id: 'u1' }] }))
+  await assert.rejects(rejected, /invalid leaderboard/)
+})
+
+test('personal route requests carry the personal flag while shared routes do not', async () => {
+  const target = { latitude: 1, longitude: 2 }
+  const personalState = makeTransport()
+  const personal = driveNavigation.getDriveRoute(personalState.transport, 'ch1', 'me', target, signal(), true)
+  await flush()
+  const personalRequest = personalState.sent.at(-1)
+  assert.equal(personalRequest.type, 'drive_get_route')
+  assert.equal(personalRequest.payload.personal, true)
+  assert.deepEqual(personalRequest.payload.destination, target)
+  personalState.reply('drive_route', {
+    request_id: personalRequest.payload.request_id, channel_id: 'ch1', user_id: 'me',
+    route: { coordinates: [[2, 1], [3, 1]], distance_m: 10, duration_s: 5, origin: target, destination: target, provider: 'osrm', updated_at: 1 },
+  })
+  assert.equal((await personal).distance_m, 10)
+
+  const sharedState = makeTransport()
+  const shared = driveNavigation.getDriveRoute(sharedState.transport, 'ch1', 'me', target, signal())
+  await flush()
+  const sharedRequest = sharedState.sent.at(-1)
+  assert.equal(sharedRequest.payload.personal, undefined)
+  sharedState.reply('drive_route', { request_id: sharedRequest.payload.request_id, channel_id: 'ch1', error: 'nope' })
+  await assert.rejects(shared, /nope/)
+})

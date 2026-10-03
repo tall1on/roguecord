@@ -22,6 +22,9 @@ export function createDriveNavigationHandler(dependencies: Dependencies) {
     const channelId = payload.channel_id;
     const targetId = payload.user_id;
     const userId = client.userId;
+    // Personal routes (e.g. heading to a track start) may target an arbitrary point instead of the
+    // shared room goal, but still require a live shared origin and the same provider rate limits.
+    const personal = payload.personal === true;
     const identityVersion = client.identityVersion;
     const active = () => client.ws.readyState === WebSocket.OPEN && client.userId === userId && client.identityVersion === identityVersion;
     const identifiers = {
@@ -65,17 +68,19 @@ export function createDriveNavigationHandler(dependencies: Dependencies) {
       } else {
         const source = dependencies.participants.readSharedLocation(channelId, client, targetId as string);
         if (!source) throw new DriveServiceError('Join the drive channel and select a participant sharing location.');
-        const destination = dependencies.participants.destinationFor(channelId, client);
-        if (!destination || destination.latitude !== requestedDestination!.latitude || destination.longitude !== requestedDestination!.longitude) {
+        const sharedDestination = personal ? null : dependencies.participants.destinationFor(channelId, client);
+        if (!personal && (!sharedDestination || sharedDestination.latitude !== requestedDestination!.latitude || sharedDestination.longitude !== requestedDestination!.longitude)) {
           throw new DriveServiceError('Select the shared room destination before requesting a matching route.');
         }
+        const destination = requestedDestination!;
         const currentSource = () => {
-          if (!active() || dependencies.participants.destinationFor(channelId, client) !== destination) return null;
+          if (!active()) return null;
+          if (sharedDestination && dependencies.participants.destinationFor(channelId, client) !== sharedDestination) return null;
           const latest = dependencies.participants.readSharedLocation(channelId, client, targetId as string);
           return latest && latest.membership === source.membership && latest.source === source.source
             && latest.sharingSession === source.sharingSession ? latest.location : null;
         };
-        const route = await dependencies.services().route(source.location, { latitude: destination.latitude, longitude: destination.longitude }, {
+        const route = await dependencies.services().route(source.location, destination, {
           channelId, userId: targetId as string,
           resolveOrigin: async () => {
             const current = await dependencies.channel(channelId);

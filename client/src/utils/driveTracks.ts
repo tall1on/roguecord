@@ -47,9 +47,36 @@ export type DriveTrackInput = {
   end: MapPosition;
 };
 
+export type DriveTrackLeaderboardEntry = {
+  user_id: string;
+  run_id: string;
+  duration_ms: number;
+  avg_speed_mps: number | null;
+  distance_m: number;
+  finished_at: number;
+};
+
 export const TRACK_NAME_MAX = 80;
 export const TRACK_CHECKPOINT_MAX = 50;
 export const CHECKPOINT_NAME_MAX = 64;
+
+export function formatDriveDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+    : `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+export function formatDriveSpeed(metersPerSecond: number | null): string {
+  return metersPerSecond === null ? '—' : `${(metersPerSecond * 3.6).toFixed(1)} km/h`;
+}
+
+export function formatDriveDistance(meters: number): string {
+  return meters < 1000 ? `${Math.round(meters)} m` : `${(meters / 1000).toFixed(1)} km`;
+}
 
 export const validTrackCoordinates = (value: unknown): value is MapPosition => {
   if (!value || typeof value !== 'object') return false;
@@ -104,6 +131,17 @@ export function displayTrackBaseName(name: string): string {
   return name.replace(/\s+V\d+$/, '');
 }
 
+export const isDriveTrackLeaderboardEntry = (value: unknown): value is DriveTrackLeaderboardEntry => {
+  if (!value || typeof value !== 'object') return false;
+  const entry = value as Partial<DriveTrackLeaderboardEntry>;
+  return typeof entry.user_id === 'string' && entry.user_id.length > 0
+    && typeof entry.run_id === 'string' && entry.run_id.length > 0
+    && typeof entry.duration_ms === 'number' && Number.isFinite(entry.duration_ms) && entry.duration_ms > 0
+    && (entry.avg_speed_mps === null || (typeof entry.avg_speed_mps === 'number' && Number.isFinite(entry.avg_speed_mps) && entry.avg_speed_mps >= 0))
+    && typeof entry.distance_m === 'number' && Number.isFinite(entry.distance_m) && entry.distance_m >= 0
+    && typeof entry.finished_at === 'number' && Number.isFinite(entry.finished_at);
+};
+
 export function trackGates(payload: DriveTrackPayload): DriveTrackGate[] {
   const gates: DriveTrackGate[] = [{ ...payload.start, kind: 'start', index: 0, name: 'Start' }];
   payload.checkpoints.forEach((checkpoint, index) => {
@@ -142,6 +180,17 @@ export const listDriveTracks = async (transport: DriveNavigationTransport, signa
     throw new Error('The server returned an invalid track list.');
   }
   return response.tracks;
+};
+
+export const getDriveTrackLeaderboard = async (
+  transport: DriveNavigationTransport, trackId: string, signal: AbortSignal
+): Promise<DriveTrackLeaderboardEntry[]> => {
+  const response = await requestDriveMessage(transport, 'drive_track_leaderboard', 'drive_track_leaderboard', null, { track_id: trackId }, signal, 15000);
+  if (!Array.isArray(response.entries) || response.entries.length > 200
+    || response.entries.some((entry: unknown) => !isDriveTrackLeaderboardEntry(entry))) {
+    throw new Error('The server returned an invalid leaderboard.');
+  }
+  return response.entries;
 };
 
 export const saveDriveTrack = async (

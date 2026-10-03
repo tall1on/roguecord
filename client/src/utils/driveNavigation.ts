@@ -263,11 +263,11 @@ export const searchDriveDestinations = async (
 };
 
 export const getDriveRoute = async (
-  transport: DriveNavigationTransport, channelId: string, userId: string, destination: MapPosition, signal: AbortSignal
+  transport: DriveNavigationTransport, channelId: string, userId: string, destination: MapPosition, signal: AbortSignal, personal = false
 ): Promise<DriveRoute> => {
   if (!validPosition(destination)) throw new Error('Choose a valid destination.');
   const response = await requestDriveMessage(transport, 'drive_get_route', 'drive_route', channelId, {
-    user_id: userId, destination: { latitude: destination.latitude, longitude: destination.longitude }
+    user_id: userId, destination: { latitude: destination.latitude, longitude: destination.longitude }, ...(personal ? { personal: true } : {})
   }, signal, 60000);
   const route = response.route;
   if (response.user_id !== userId || !route || route.provider !== 'osrm'

@@ -20,6 +20,7 @@ export function useDriveRoutes(
   getDestination: () => DriveDestination | null,
   isJoined: () => boolean,
   requestRoute: typeof getDriveRoute = getDriveRoute,
+  getPersonal: () => boolean = () => false,
 ) {
   const dispatch = dispatchStates.get(transport) ?? { at: -Infinity, pending: 0 };
   dispatchStates.set(transport, dispatch);
@@ -70,7 +71,7 @@ export function useDriveRoutes(
     pendingCount.value = pending.size;
     routeErrors.value.delete(userId);
     try {
-      const route = await requestRoute(transport, getChannelId(), userId, destination, controller.signal);
+      const route = await requestRoute(transport, getChannelId(), userId, destination, controller.signal, getPersonal());
       // Controller identity also rejects late replies after removal, rejoin or target changes.
       if (pending.get(userId) !== controller) return;
       attempt.anchor = route.origin ?? attempt.anchor;
@@ -135,7 +136,7 @@ export function useDriveRoutes(
   const stopContext = watch(() => [
     transport.isConnected, transport.activeConnectionId, transport.currentUser?.id,
     getChannelId(), isJoined(), getDestination()?.latitude,
-    getDestination()?.longitude, getDestination()?.label,
+    getDestination()?.longitude, getDestination()?.label, getPersonal(),
   ], () => {
     reset();
     if (active()) {
