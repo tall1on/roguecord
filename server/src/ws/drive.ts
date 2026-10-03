@@ -86,7 +86,7 @@ export class DriveParticipants {
     }));
   }
 
-  update(channelId: string, client: ClientConnection, value: unknown, now = Date.now()): void {
+  update(channelId: string, client: ClientConnection, value: unknown, now = Date.now()): Readonly<Location> | null {
     if (!this.owns(channelId, client) || client.ws.readyState !== WebSocket.OPEN) throw new Error('Join the drive channel before sharing location');
     const participant = this.channels.get(channelId)!.get(client.userId!)!;
     if (value === null) {
@@ -96,7 +96,7 @@ export class DriveParticipants {
         participant.sharingSession = null;
         this.relay(channelId, client.userId!, null);
       }
-      return;
+      return null;
     }
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid drive location');
     const { latitude, longitude, accuracy, speed } = value as Record<string, unknown>;
@@ -112,6 +112,15 @@ export class DriveParticipants {
     participant.sharingSession ||= {};
     participant.location = { latitude, longitude, accuracy, speed: (speed as number | null | undefined) ?? null, updated_at: now };
     this.relay(channelId, client.userId!, participant.location);
+    return participant.location;
+  }
+
+  /** Sends a room-scoped message to every currently owned member with a stable identity. */
+  broadcast(channelId: string, type: string, payload: object): void {
+    const data = JSON.stringify({ type, payload });
+    for (const [userId, { client }] of this.channels.get(channelId)?.entries() || []) {
+      if (client.userId === userId && client.ws.readyState === WebSocket.OPEN) client.ws.send(data);
+    }
   }
 
   leave(channelId: string, client: ClientConnection): void {

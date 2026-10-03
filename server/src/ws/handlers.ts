@@ -1,6 +1,7 @@
 import { ClientConnection, connectionManager } from './connectionManager';
 import { driveParticipants, validDriveId } from './drive';
 import { handleDriveNavigation } from './driveNavigation';
+import { abandonDriveRunsForChannel, endDriveTrackRun, handleDriveTracks, observeDriveLocation } from './driveTracks';
 import {
   createUser,
   getUserByPublicKey,
@@ -1849,6 +1850,15 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'drive_get_route':
         await handleDriveNavigation(client, type, payload);
         break;
+      case 'drive_tracks_list':
+      case 'drive_track_create':
+      case 'drive_track_update':
+      case 'drive_track_delete':
+      case 'drive_track_vote':
+      case 'drive_track_activate':
+      case 'drive_track_deactivate':
+        await handleDriveTracks(client, type, payload);
+        break;
       case 'drive_set_destination': {
         const identifiers = {
           request_id: validDriveId(payload?.request_id) ? payload.request_id : null,
@@ -1947,7 +1957,15 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
           client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Join the drive channel before sharing location' } }));
           break;
         }
-        driveParticipants.update(payload?.channel_id, client, payload?.location);
+        {
+          const location = driveParticipants.update(payload?.channel_id, client, payload?.location);
+          if (location) {
+            // Track timing is best-effort; a timing failure must never drop a GPS update.
+            await observeDriveLocation(payload.channel_id, client.userId, {
+              latitude: location.latitude, longitude: location.longitude, accuracy: location.accuracy, speed: location.speed
+            }).catch(() => {});
+          }
+        }
         break;
       case 'create_webrtc_transport':
         await handleCreateWebRtcTransport(client, payload);
@@ -2744,6 +2762,7 @@ const handleDeleteChannel = async (client: ClientConnection, payload: { channel_
 
     if (channel.type === 'voice' || channel.type === 'drive') {
       driveParticipants.removeChannel(channel_id);
+      if (channel.type === 'drive') void abandonDriveRunsForChannel(channel_id).catch(console.error);
       const room = rooms.get(channel_id);
       if (room) {
         for (const peer of room.peers.values()) {
@@ -4011,11 +4030,13 @@ const handleLeaveVoiceChannel = async (client: ClientConnection, payload: { chan
   const room = rooms.get(channel_id);
   if (!room) {
     driveParticipants.leave(channel_id, client);
+    void endDriveTrackRun(channel_id, client.userId).catch(console.error);
     return;
   }
   if (room.type === 'drive') {
     if (!driveParticipants.owns(channel_id, client)) return;
     driveParticipants.leave(channel_id, client);
+    void endDriveTrackRun(channel_id, client.userId).catch(console.error);
   }
   
   const peer = room.peers.get(client.userId);
