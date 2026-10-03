@@ -51,6 +51,7 @@ const readInput = (payload: Record<string, unknown>): DriveTrackInput => ({
 
 const responseTypes: Record<string, string> = {
   drive_tracks_list: 'drive_tracks',
+  drive_track_leaderboard: 'drive_track_leaderboard',
   drive_track_create: 'drive_track_saved',
   drive_track_update: 'drive_track_saved',
   drive_track_delete: 'drive_track_deleted',
@@ -95,6 +96,12 @@ export const handleDriveTracks = async (client: ClientConnection, type: string, 
 
     if (type === 'drive_tracks_list') {
       reply({ tracks: await driveTracksStore.list(userId!) });
+      return;
+    }
+
+    if (type === 'drive_track_leaderboard') {
+      if (!trackId) throw new DriveTrackError('Track identifier is required.');
+      reply({ track_id: trackId, entries: await driveTracksStore.leaderboard(trackId) });
       return;
     }
 

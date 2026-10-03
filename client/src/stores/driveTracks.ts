@@ -6,6 +6,7 @@ import {
   activateDriveTrack,
   deactivateDriveTrack,
   deleteDriveTrack,
+  getDriveTrackLeaderboard,
   isDriveTrack,
   isDriveTrackRun,
   listDriveTracks,
@@ -15,6 +16,7 @@ import {
   type DriveTrack,
   type DriveTrackGate,
   type DriveTrackInput,
+  type DriveTrackLeaderboardEntry,
   type DriveTrackRun,
   type DriveTrackVote
 } from '../utils/driveTracks';
@@ -27,6 +29,8 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
   const tracks = ref<Map<string, DriveTrack>>(new Map());
   const runs = ref<Map<string, DriveTrackRun>>(new Map());
   const activeTrackIds = ref<Map<string, string>>(new Map());
+  const leaderboards = ref<Map<string, DriveTrackLeaderboardEntry[]>>(new Map());
+  const leaderboardLoading = ref(false);
   const isLoading = ref(false);
   const isSaving = ref(false);
   const lastError = ref<string | null>(null);
@@ -89,6 +93,19 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
     } catch (error) {
       lastError.value = error instanceof Error ? error.message : 'Could not delete the track.';
       return false;
+    }
+  };
+
+  const loadLeaderboard = async (trackId: string): Promise<void> => {
+    leaderboardLoading.value = true;
+    lastError.value = null;
+    try {
+      const entries = await getDriveTrackLeaderboard(chatStore, trackId, new AbortController().signal);
+      leaderboards.value = new Map(leaderboards.value).set(trackId, entries);
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : 'Could not load the leaderboard.';
+    } finally {
+      leaderboardLoading.value = false;
     }
   };
 
@@ -176,11 +193,17 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
       const next = new Map(tracks.value);
       next.delete(payload.track_id);
       tracks.value = next;
+      const boards = new Map(leaderboards.value);
+      boards.delete(payload.track_id);
+      leaderboards.value = boards;
     } else if (type === 'drive_track_vote_updated' && typeof payload?.track_id === 'string') {
       applyVotes(payload.track_id, { up: Number(payload.up) || 0, down: Number(payload.down) || 0 });
     } else if (type === 'drive_track_run_updated' && payload?.channel_id === driveStore.joinedChannelId) {
       if (isDriveTrackRun(payload.run)) {
         setRun(payload.run);
+        if (payload.run.status === 'finished' && leaderboards.value.has(payload.run.track_id)) {
+          void loadLeaderboard(payload.run.track_id);
+        }
         if (payload.run.user_id === chatStore.currentUser?.id && payload.run.status !== 'active') {
           const keys = new Map(activeTrackIds.value);
           for (const [key, trackId] of keys) if (trackId === payload.run.track_id) keys.delete(key);
@@ -193,11 +216,12 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
       tracks.value = new Map();
       runs.value = new Map();
       activeTrackIds.value = new Map();
+      leaderboards.value = new Map();
     }
   };
 
   chatStore.addMessageListener(handleMessage);
   onScopeDispose(() => chatStore.removeMessageListener(handleMessage));
 
-  return { tracks, trackList, runs, isLoading, isSaving, lastError, load, save, remove, vote, activate, deactivate, activeTrack, activeRun, gatesFor };
+  return { tracks, trackList, runs, isLoading, isSaving, lastError, load, save, remove, vote, activate, deactivate, activeTrack, activeRun, gatesFor, leaderboards, leaderboardLoading, loadLeaderboard };
 });

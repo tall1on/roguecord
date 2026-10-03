@@ -25,6 +25,15 @@ export type DriveTrackInput = {
   end: unknown;
 };
 
+export type DriveTrackLeaderboardEntry = {
+  user_id: string;
+  run_id: string;
+  duration_ms: number;
+  avg_speed_mps: number | null;
+  distance_m: number;
+  finished_at: number;
+};
+
 type TrackRow = {
   id: string;
   family_id: string;
@@ -270,7 +279,9 @@ export class DriveTracksStore {
     if (!result) return null;
     const finished = result.progress.status === 'finished';
     const finishedAt = result.progress.finishedAt;
-    const stats = finished ? computeRunStats(run.distance_m, run.started_at, finishedAt) : { duration_ms: null, avg_speed_mps: null };
+    // Timing starts at the start gate, not at activation, so pre-start navigation is not counted.
+    const startedAt = result.progress.gateTimes[0] ?? run.started_at;
+    const stats = finished ? computeRunStats(run.distance_m, startedAt, finishedAt) : { duration_ms: null, avg_speed_mps: null };
     await this.execute(
       'UPDATE drive_track_runs SET next_gate = ?, gate_times_json = ?, status = ?, finished_at = ?, duration_ms = ?, avg_speed_mps = ?, updated_at = ? WHERE id = ?',
       [result.progress.nextGate, JSON.stringify(result.progress.gateTimes), result.progress.status, finishedAt, stats.duration_ms, stats.avg_speed_mps, this.now(), run.id]
@@ -283,15 +294,37 @@ export class DriveTracksStore {
     const run = await this.getActiveRun(channelId, userId);
     if (!run) return null;
     const finishedAt = this.now();
-    const stats = status === 'finished'
-      ? computeRunStats(run.distance_m, run.started_at, finishedAt)
-      : { duration_ms: Math.max(0, finishedAt - run.started_at), avg_speed_mps: null };
+    const startedAt = run.gate_times[0] ?? null;
+    const stats = status === 'finished' && startedAt !== null
+      ? computeRunStats(run.distance_m, startedAt, finishedAt)
+      : { duration_ms: startedAt === null ? null : Math.max(0, finishedAt - startedAt), avg_speed_mps: null };
     await this.execute(
       'UPDATE drive_track_runs SET status = ?, finished_at = ?, duration_ms = ?, avg_speed_mps = ?, updated_at = ? WHERE id = ?',
       [status, finishedAt, stats.duration_ms, stats.avg_speed_mps, finishedAt, run.id]
     );
     const updated = await this.queryOne<RunRow>('SELECT * FROM drive_track_runs WHERE id = ?', [run.id]);
     return updated ? this.toRun(updated) : null;
+  }
+
+  /** Best completed run per driver, ordered by fastest time. */
+  async leaderboard(trackId: string, limit = 50): Promise<DriveTrackLeaderboardEntry[]> {
+    const rows = await this.queryAll<RunRow>(
+      "SELECT * FROM drive_track_runs WHERE track_id = ? AND status = 'finished' AND duration_ms IS NOT NULL AND duration_ms > 0 ORDER BY duration_ms ASC, finished_at ASC LIMIT 500",
+      [trackId]
+    );
+    const best = new Map<string, DriveTrackLeaderboardEntry>();
+    for (const row of rows) {
+      if (best.has(row.user_id) || row.duration_ms === null || row.finished_at === null) continue;
+      best.set(row.user_id, {
+        user_id: row.user_id,
+        run_id: row.id,
+        duration_ms: Number(row.duration_ms),
+        avg_speed_mps: row.avg_speed_mps === null || row.avg_speed_mps === undefined ? null : Number(row.avg_speed_mps),
+        distance_m: Number(row.distance_m),
+        finished_at: Number(row.finished_at)
+      });
+    }
+    return [...best.values()].slice(0, Math.max(1, Math.min(200, limit)));
   }
 
   /** Closes every active run in a room, e.g. when the channel itself is deleted. */

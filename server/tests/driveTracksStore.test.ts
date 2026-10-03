@@ -102,6 +102,9 @@ test('runs credit gates in order and record finish time and average speed', asyn
   assert.equal(started.next_gate, 0);
   assert.equal(started.gates_total, 3);
   assert.equal(started.started_at, 1000);
+  // Activation alone does not start the clock; the start gate must be passed first.
+  assert.deepEqual(started.gate_times, []);
+  assert.equal(started.duration_ms, null);
 
   // The fix is exactly on the start gate.
   setClock(2000);
@@ -121,10 +124,55 @@ test('runs credit gates in order and record finish time and average speed', asyn
   const finished = await store.observeRun('room', 'driver', { latitude: 0, longitude: 0.002, accuracy: 10 });
   assert.equal(finished?.status, 'finished');
   assert.equal(finished?.finished_at, 6000);
-  assert.equal(finished?.duration_ms, 5000);
+  // Duration is measured from the start gate pass (2000), not from activation (1000).
+  assert.equal(finished?.duration_ms, 4000);
   assert.ok(finished?.avg_speed_mps && finished.avg_speed_mps > 0);
   assert.equal(await store.getActiveRun('room', 'driver'), null);
   assert.equal(await store.observeRun('room', 'driver', { latitude: 0, longitude: 0.002, accuracy: 10 }), null);
+});
+
+test('abandoning after the start gate records time from the start gate', async (t) => {
+  const { db, store, setClock } = await setup();
+  t.after(() => db.close());
+  const track = await store.createTrack('owner', input());
+  setClock(1000);
+  await store.startRun('room', track.id, 'driver');
+  setClock(5000);
+  await store.observeRun('room', 'driver', { latitude: 0, longitude: 0, accuracy: 10 });
+  setClock(9000);
+  const ended = await store.endRun('room', 'driver');
+  assert.equal(ended?.status, 'abandoned');
+  assert.equal(ended?.duration_ms, 4000);
+});
+
+test('leaderboard keeps the best finished run per driver ordered by time', async (t) => {
+  const { db, store, setClock } = await setup();
+  t.after(() => db.close());
+  const track = await store.createTrack('owner', input());
+  const finish = async (userId: string, times: [number, number, number, number]) => {
+    setClock(times[0]);
+    await store.startRun('room', track.id, userId);
+    setClock(times[1]);
+    await store.observeRun('room', userId, { latitude: 0, longitude: 0, accuracy: 10 });
+    setClock(times[2]);
+    await store.observeRun('room', userId, { latitude: 0, longitude: 0.001, accuracy: 10 });
+    setClock(times[3]);
+    const result = await store.observeRun('room', userId, { latitude: 0, longitude: 0.002, accuracy: 10 });
+    assert.equal(result?.status, 'finished');
+  };
+  await finish('alice', [1000, 2000, 4000, 8000]);
+  await finish('bob', [10000, 11000, 13000, 17000]);
+  await finish('alice', [20000, 21000, 23000, 25000]);
+  setClock(30000);
+  await store.startRun('room', track.id, 'carol');
+
+  const board = await store.leaderboard(track.id);
+  assert.deepEqual(board.map((entry) => entry.user_id), ['alice', 'bob']);
+  // Alice's 4s run beats her earlier 6s run; carol never finished and is excluded.
+  assert.equal(board[0]!.duration_ms, 4000);
+  assert.equal(board[1]!.duration_ms, 6000);
+  assert.ok(board.every((entry) => entry.avg_speed_mps !== null && entry.avg_speed_mps > 0));
+  assert.equal(await store.leaderboard('missing').then((entries) => entries.length), 0);
 });
 
 test('starting a new run abandons the previous one and leaving closes active runs', async (t) => {
@@ -142,7 +190,8 @@ test('starting a new run abandons the previous one and leaving closes active run
   setClock(8000);
   const ended = await store.endRun('room', 'driver');
   assert.equal(ended?.status, 'abandoned');
-  assert.equal(ended?.duration_ms, 3000);
+  // The run never reached the start gate, so no time is recorded.
+  assert.equal(ended?.duration_ms, null);
   assert.equal(ended?.avg_speed_mps, null);
 
   setClock(9000);
