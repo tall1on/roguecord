@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowLeft, Camera, CameraOff, Car, Flag, Headphones, LocateFixed, MapPin, Mic, MicOff, Navigation, PhoneOff, Route, Search, Trophy, X } from 'lucide-vue-next'
+import { ArrowLeft, Camera, CameraOff, Car, Crosshair, Flag, Headphones, LocateFixed, MapPin, Mic, MicOff, Navigation, PhoneOff, Route, Search, Trophy, X } from 'lucide-vue-next'
 import type { CircleMarker, LatLngBounds, Map as LeafletMap, Marker as LeafletMarker, Polyline } from 'leaflet'
 import { useChatStore } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
@@ -124,6 +124,17 @@ const navMode = ref(false)
 const navPanelOpen = ref(false)
 const canUseNav = computed(() => isJoined.value && driveStore.isSharing && !!selfLocation.value)
 watch(canUseNav, (value) => { if (!value) navMode.value = false })
+const followUserId = ref<string | null>(null)
+const isFollowingUser = (userId: string): boolean => followUserId.value === userId
+const toggleFollowUser = (userId: string) => {
+  const next = followUserId.value === userId ? null : userId
+  followUserId.value = next
+  if (next) navMode.value = false
+}
+watch([isJoined, () => props.channelId], () => { if (!isJoined.value) followUserId.value = null })
+watch(participants, (list) => {
+  if (followUserId.value && !list.some((participant) => participant.id === followUserId.value)) followUserId.value = null
+})
 const driverColors = new Map<string, string>()
 const driverColor = (userId: string): string => {
   const existing = driverColors.get(userId)
@@ -263,6 +274,7 @@ const buildDriverIcon = (color: string, avatarUrl: string | null, speaking: bool
   })
 }
 const NAV_ZOOM = 17
+const FOLLOW_ZOOM = 16
 const BEARING_EASING = 0.18
 const NAV_LOOK_AHEAD_MIN_METERS = 25
 const NAV_LOOK_AHEAD_MAX_METERS = 80
@@ -523,6 +535,23 @@ const syncMap = (forceFit = false) => {
     if (marker.getTooltip()) marker.setTooltipContent(label)
     else marker.bindTooltip(label, { permanent: true, direction: 'top', offset: [0, -10] })
   }
+  // Following a driver overrides both the navigation close-up and the fit-all overview.
+  if (followUserId.value) {
+    const followedIndex = points.findIndex((point) => point.user_id === followUserId.value)
+    if (followedIndex !== -1) {
+      lastSelfPoint = null
+      clearDirectionArrow()
+      if (displayedHeading !== 0) {
+        targetHeading = 0
+        bearingExitRefit = true
+        startBearingAnimation()
+      }
+      map.setView(coordinates[followedIndex]!, FOLLOW_ZOOM, { animate: false })
+      lastFittedBounds = map.getBounds()
+      lastFitSignature = ''
+      return
+    }
+  }
   if (navMode.value) {
     const selfPoint = points.find((point) => point.user_id === chatStore.currentUser?.id)
     if (selfPoint) {
@@ -574,7 +603,7 @@ watch([cameraView, cameraPhoneLayout, isJoined], async ([view, isPhone, joined])
   syncMap(true)
 }, { flush: 'post', immediate: true })
 
-watch([visibleLocations, destination, routes, participants, () => [...webrtcStore.speakingUserIds], navMode, activeTrack, trackGates, () => chatStore.getLocalDriverAvatar(), () => chatStore.currentUser?.driver_avatar_url], () => syncMap(), { deep: true })
+watch([visibleLocations, destination, routes, participants, () => [...webrtcStore.speakingUserIds], navMode, followUserId, activeTrack, trackGates, () => chatStore.getLocalDriverAvatar(), () => chatStore.currentUser?.driver_avatar_url], () => syncMap(), { deep: true })
 onMounted(async () => {
   try {
     const [module] = await Promise.all([import('leaflet'), import('leaflet/dist/leaflet.css')])
@@ -672,6 +701,7 @@ onBeforeUnmount(() => {
           <MapPin v-if="isJoined && driveStore.locations.has(entry.participant.id)" class="h-3 w-3 shrink-0 text-indigo-400" />
           <span v-if="driveStore.getSpeedLabel(entry.participant.id, channelId)" class="shrink-0 tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(entry.participant.id, channelId) }}</span>
           <span v-if="entry.distance_m !== null" class="shrink-0 tabular-nums text-zinc-400">{{ formatDistance(entry.distance_m) }}</span>
+          <button type="button" class="ml-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors disabled:cursor-not-allowed disabled:opacity-30" :class="isFollowingUser(entry.participant.id) ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-400 hover:bg-white/10 hover:text-white'" :disabled="!isJoined || !driveStore.locations.has(entry.participant.id)" :aria-pressed="isFollowingUser(entry.participant.id)" :aria-label="isFollowingUser(entry.participant.id) ? `Stop tracking ${entry.participant.username} on the map` : `Track ${entry.participant.username} on the map`" :title="isFollowingUser(entry.participant.id) ? 'Stop tracking on the map' : 'Track this driver on the map'" @click="toggleFollowUser(entry.participant.id)"><Crosshair class="h-3 w-3" /></button>
         </span>
         <p v-if="!rankedParticipants.length" class="px-1 py-2 text-xs text-zinc-500">No drivers in this room yet.</p>
       </div>
