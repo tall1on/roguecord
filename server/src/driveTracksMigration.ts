@@ -4,6 +4,10 @@ const run = (db: sqlite3.Database, sql: string): Promise<void> => new Promise((r
   db.run(sql, (error) => (error ? reject(error) : resolve()));
 });
 
+const columns = (db: sqlite3.Database, table: string): Promise<{ name: string }[]> => new Promise((resolve, reject) => {
+  db.all(`PRAGMA table_info(${table})`, (error, rows) => (error ? reject(error) : resolve(rows as { name: string }[])));
+});
+
 export async function migrateDriveTracks(db: sqlite3.Database): Promise<void> {
   await run(db, `CREATE TABLE IF NOT EXISTS drive_tracks (
       id TEXT PRIMARY KEY,
@@ -39,6 +43,7 @@ export async function migrateDriveTracks(db: sqlite3.Database): Promise<void> {
       distance_m INTEGER NOT NULL DEFAULT 0,
       duration_ms INTEGER,
       avg_speed_mps REAL,
+      max_speed_mps REAL,
       status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'finished', 'abandoned')),
       updated_at INTEGER NOT NULL,
       FOREIGN KEY (track_id) REFERENCES drive_tracks(id) ON DELETE CASCADE
@@ -48,4 +53,9 @@ export async function migrateDriveTracks(db: sqlite3.Database): Promise<void> {
   await run(db, 'CREATE INDEX IF NOT EXISTS idx_drive_track_votes_track ON drive_track_votes(track_id)');
   await run(db, 'CREATE INDEX IF NOT EXISTS idx_drive_track_runs_track ON drive_track_runs(track_id)');
   await run(db, 'CREATE INDEX IF NOT EXISTS idx_drive_track_runs_active ON drive_track_runs(channel_id, status)');
+  // Additive upgrade for databases created before peak speed tracking existed.
+  const runColumns = await columns(db, 'drive_track_runs');
+  if (!runColumns.some((column) => column.name === 'max_speed_mps')) {
+    await run(db, 'ALTER TABLE drive_track_runs ADD COLUMN max_speed_mps REAL');
+  }
 }

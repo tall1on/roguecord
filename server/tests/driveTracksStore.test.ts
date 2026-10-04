@@ -92,6 +92,28 @@ test('deleting a track removes its votes and cached gates', async (t) => {
   assert.equal(await store.gatesFor(track.id), null);
 });
 
+test('migration adds peak speed to databases created before it existed', async (t) => {
+  const db = await openDb();
+  t.after(() => db.close());
+  await run(db, 'CREATE TABLE users (id TEXT PRIMARY KEY)');
+  await run(db, 'CREATE TABLE channels (id TEXT PRIMARY KEY)');
+  await run(db, `CREATE TABLE drive_track_runs (
+      id TEXT PRIMARY KEY, track_id TEXT NOT NULL, user_id TEXT NOT NULL, channel_id TEXT NOT NULL,
+      started_at INTEGER NOT NULL, finished_at INTEGER, next_gate INTEGER NOT NULL DEFAULT 0,
+      gates_total INTEGER NOT NULL DEFAULT 0, gate_times_json TEXT NOT NULL DEFAULT '[]',
+      distance_m INTEGER NOT NULL DEFAULT 0, duration_ms INTEGER, avg_speed_mps REAL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'finished', 'abandoned')),
+      updated_at INTEGER NOT NULL)`);
+  await run(db, "INSERT INTO drive_track_runs (id, track_id, user_id, channel_id, started_at, finished_at, next_gate, gates_total, gate_times_json, distance_m, duration_ms, avg_speed_mps, status, updated_at) VALUES ('legacy','t','u','room',1000,5000,3,3,'[1000,2000,5000]',222,4000,55.5,'finished',5000)");
+  await migrateDriveTracks(db);
+  await migrateDriveTracks(db);
+  const store = new DriveTracksStore(db, () => 9000);
+  const board = await store.leaderboard('t', { allTimes: true });
+  assert.equal(board.entries.length, 1);
+  assert.equal(board.entries[0]!.avg_speed_mps, 55.5);
+  assert.equal(board.entries[0]!.max_speed_mps, null);
+});
+
 test('runs credit gates in order and record finish time and average speed', async (t) => {
   const { db, store, setClock } = await setup();
   t.after(() => db.close());
@@ -108,25 +130,29 @@ test('runs credit gates in order and record finish time and average speed', asyn
 
   // The fix is exactly on the start gate.
   setClock(2000);
-  const afterStart = await store.observeRun('room', 'driver', { latitude: 0, longitude: 0, accuracy: 10 });
+  const afterStart = await store.observeRun('room', 'driver', { latitude: 0, longitude: 0, accuracy: 10, speed: 12.5 });
   assert.equal(afterStart?.next_gate, 1);
   assert.deepEqual(afterStart?.gate_times, [2000]);
+  assert.equal(afterStart?.max_speed_mps, 12.5);
 
   // A poor-accuracy fix and an out-of-order fix never advance.
   setClock(2500);
-  assert.equal(await store.observeRun('room', 'driver', { latitude: 0, longitude: 0.001, accuracy: 150 }), null);
-  assert.equal(await store.observeRun('room', 'driver', { latitude: 0, longitude: 0.002, accuracy: 5 }), null);
+  assert.equal(await store.observeRun('room', 'driver', { latitude: 0, longitude: 0.001, accuracy: 150, speed: 90 }), null);
+  assert.equal(await store.observeRun('room', 'driver', { latitude: 0, longitude: 0.002, accuracy: 5, speed: 8 }), null);
 
   setClock(4000);
-  const afterCheckpoint = await store.observeRun('room', 'driver', { latitude: 0, longitude: 0.001, accuracy: 20 });
+  const afterCheckpoint = await store.observeRun('room', 'driver', { latitude: 0, longitude: 0.001, accuracy: 20, speed: 30 });
   assert.equal(afterCheckpoint?.next_gate, 2);
+  assert.equal(afterCheckpoint?.max_speed_mps, 30);
   setClock(6000);
-  const finished = await store.observeRun('room', 'driver', { latitude: 0, longitude: 0.002, accuracy: 10 });
+  const finished = await store.observeRun('room', 'driver', { latitude: 0, longitude: 0.002, accuracy: 10, speed: 47.25 });
   assert.equal(finished?.status, 'finished');
   assert.equal(finished?.finished_at, 6000);
   // Duration is measured from the start gate pass (2000), not from activation (1000).
   assert.equal(finished?.duration_ms, 4000);
   assert.ok(finished?.avg_speed_mps && finished.avg_speed_mps > 0);
+  // Peak speed keeps the fastest valid fix even when it is not a gate pass.
+  assert.equal(finished?.max_speed_mps, 47.25);
   assert.equal(await store.getActiveRun('room', 'driver'), null);
   assert.equal(await store.observeRun('room', 'driver', { latitude: 0, longitude: 0.002, accuracy: 10 }), null);
 });

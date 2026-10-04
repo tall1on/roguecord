@@ -22,7 +22,7 @@ const track = (overrides = {}) => ({
 })
 const run = (overrides = {}) => ({
   id: 'r1', track_id: 't1', user_id: 'me', channel_id: 'ch1', started_at: 1000, finished_at: null,
-  next_gate: 0, gates_total: 3, gate_times: [], distance_m: 222, duration_ms: null, avg_speed_mps: null,
+  next_gate: 0, gates_total: 3, gate_times: [], distance_m: 222, duration_ms: null, avg_speed_mps: null, max_speed_mps: null,
   status: 'active', updated_at: 1000,
   ...overrides,
 })
@@ -154,7 +154,7 @@ test('the generic navigation request helper still gates responses by channel', a
 
 test('leaderboard pages validate, paginate and allow unbounded all-times', async () => {
   const entry = (index) => ({
-    user_id: 'u1', run_id: `r${index}`, duration_ms: 4000 + index, avg_speed_mps: 12.5, distance_m: 222, finished_at: 1000 + index,
+    user_id: 'u1', run_id: `r${index}`, duration_ms: 4000 + index, avg_speed_mps: 12.5, max_speed_mps: 18.2, distance_m: 222, finished_at: 1000 + index,
   })
 
   const state = makeTransport()

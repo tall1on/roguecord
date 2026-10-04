@@ -201,12 +201,12 @@ test('drive signaling rejects unrelated sockets and screen media while allowing 
     {
       id: 'run-1', track_id: 'track-1', user_id: 'driver', channel_id: 'drive', started_at: 1000,
       finished_at: 5000, next_gate: 3, gates_total: 3, gate_times_json: '[1000,3000,5000]',
-      distance_m: 222, duration_ms: 4000, avg_speed_mps: 55.5, status: 'finished', updated_at: 5000
+      distance_m: 222, duration_ms: 4000, avg_speed_mps: 55.5, max_speed_mps: 71.2, status: 'finished', updated_at: 5000
     },
     {
       id: 'run-2', track_id: 'track-1', user_id: 'driver', channel_id: 'drive', started_at: 2000,
       finished_at: 7000, next_gate: 3, gates_total: 3, gate_times_json: '[2000,4000,7000]',
-      distance_m: 222, duration_ms: 5000, avg_speed_mps: 44.4, status: 'finished', updated_at: 7000
+      distance_m: 222, duration_ms: 5000, avg_speed_mps: 44.4, max_speed_mps: 60, status: 'finished', updated_at: 7000
     }
   ];
   require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: {
@@ -258,7 +258,7 @@ test('drive signaling rejects unrelated sockets and screen media while allowing 
     type: 'drive_track_leaderboard',
     payload: {
       request_id: 'leaderboard-request', track_id: 'track-1', offset: 0, total: 1, has_more: false,
-      entries: [{ user_id: 'driver', run_id: 'run-1', duration_ms: 4000, avg_speed_mps: 55.5, distance_m: 222, finished_at: 5000 }]
+      entries: [{ user_id: 'driver', run_id: 'run-1', duration_ms: 4000, avg_speed_mps: 55.5, max_speed_mps: 71.2, distance_m: 222, finished_at: 5000 }]
     }
   });
   await send(owner.client, 'drive_track_leaderboard', {
@@ -267,8 +267,8 @@ test('drive signaling rejects unrelated sockets and screen media while allowing 
   assert.deepEqual(owner.messages.at(-1).payload, {
     request_id: 'leaderboard-all-request', track_id: 'track-1', offset: 0, total: 2, has_more: false,
     entries: [
-      { user_id: 'driver', run_id: 'run-1', duration_ms: 4000, avg_speed_mps: 55.5, distance_m: 222, finished_at: 5000 },
-      { user_id: 'driver', run_id: 'run-2', duration_ms: 5000, avg_speed_mps: 44.4, distance_m: 222, finished_at: 7000 }
+      { user_id: 'driver', run_id: 'run-1', duration_ms: 4000, avg_speed_mps: 55.5, max_speed_mps: 71.2, distance_m: 222, finished_at: 5000 },
+      { user_id: 'driver', run_id: 'run-2', duration_ms: 5000, avg_speed_mps: 44.4, max_speed_mps: 60, distance_m: 222, finished_at: 7000 }
     ]
   });
   await send(owner.client, 'drive_track_leaderboard', {
