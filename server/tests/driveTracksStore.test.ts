@@ -145,7 +145,7 @@ test('abandoning after the start gate records time from the start gate', async (
   assert.equal(ended?.duration_ms, 4000);
 });
 
-test('leaderboard keeps the best finished run per driver ordered by time', async (t) => {
+test('leaderboard defaults to each driver\'s best time and can return every finished run', async (t) => {
   const { db, store, setClock } = await setup();
   t.after(() => db.close());
   const track = await store.createTrack('owner', input());
@@ -173,6 +173,18 @@ test('leaderboard keeps the best finished run per driver ordered by time', async
   assert.equal(board[1]!.duration_ms, 6000);
   assert.ok(board.every((entry) => entry.avg_speed_mps !== null && entry.avg_speed_mps > 0));
   assert.equal(await store.leaderboard('missing').then((entries) => entries.length), 0);
+
+  const allTimes = await store.leaderboard(track.id, true);
+  assert.deepEqual(allTimes.slice(0, 3).map((entry) => entry.user_id), ['alice', 'alice', 'bob']);
+  assert.deepEqual(allTimes.slice(0, 3).map((entry) => entry.duration_ms), [4000, 6000, 6000]);
+
+  const extraRuns = Array.from({ length: 501 }, (_, index) =>
+    `('bulk-${index}', '${track.id}', 'bulk-driver', 'room', 1000, ${20000 + index}, 3, 3, '[]', 222, ${10000 + index}, 22.2, 'finished', ${20000 + index})`
+  ).join(',');
+  await run(db, `INSERT INTO drive_track_runs (id, track_id, user_id, channel_id, started_at, finished_at, next_gate, gates_total, gate_times_json, distance_m, duration_ms, avg_speed_mps, status, updated_at) VALUES ${extraRuns}`);
+  const unlimitedTimes = await store.leaderboard(track.id, true);
+  assert.equal(unlimitedTimes.length, 504);
+  assert.equal(unlimitedTimes.filter((entry) => entry.user_id === 'bulk-driver').length, 501);
 });
 
 test('starting a new run abandons the previous one and leaving closes active runs', async (t) => {

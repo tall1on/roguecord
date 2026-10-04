@@ -174,6 +174,7 @@ test('leaderboard entries validate and expose best times', async () => {
   }))
   assert.equal(request.type, 'drive_track_leaderboard')
   assert.equal(request.payload.track_id, 't1')
+  assert.equal(request.payload.all_times, false)
   assert.equal(request.payload.channel_id, undefined)
   assert.equal((await pending)[0].duration_ms, 4000)
 
@@ -181,6 +182,20 @@ test('leaderboard entries validate and expose best times', async () => {
   const rejected = driveTracks.getDriveTrackLeaderboard(bad.transport, 't1', signal())
   await answer(bad, 'drive_track_leaderboard', () => ({ entries: [{ user_id: 'u1' }] }))
   await assert.rejects(rejected, /invalid leaderboard/)
+
+  const entries = Array.from({ length: 201 }, (_, index) => ({
+    user_id: 'u1', run_id: `r${index}`, duration_ms: 4000 + index, avg_speed_mps: 12.5, distance_m: 222, finished_at: 1000 + index,
+  }))
+  const tooManyState = makeTransport()
+  const tooMany = driveTracks.getDriveTrackLeaderboard(tooManyState.transport, 't1', signal())
+  await answer(tooManyState, 'drive_track_leaderboard', () => ({ entries }))
+  await assert.rejects(tooMany, /invalid leaderboard/)
+
+  const allState = makeTransport()
+  const allTimes = driveTracks.getDriveTrackLeaderboard(allState.transport, 't1', signal(), true)
+  const allRequest = await answer(allState, 'drive_track_leaderboard', () => ({ entries }))
+  assert.equal(allRequest.payload.all_times, true)
+  assert.equal((await allTimes).length, 201)
 })
 
 test('personal route requests carry the personal flag while shared routes do not', async () => {

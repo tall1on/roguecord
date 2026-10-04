@@ -22,6 +22,7 @@ import {
 } from '../utils/driveTracks';
 
 const channelKey = (connectionId: string | null, channelId: string): string => `${connectionId ?? ''}:${channelId}`;
+type DriveTrackLeaderboardViews = Partial<Record<'best' | 'all', DriveTrackLeaderboardEntry[]>>;
 
 export const useDriveTracksStore = defineStore('driveTracks', () => {
   const chatStore = useChatStore();
@@ -29,12 +30,13 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
   const tracks = ref<Map<string, DriveTrack>>(new Map());
   const runs = ref<Map<string, DriveTrackRun>>(new Map());
   const activeTrackIds = ref<Map<string, string>>(new Map());
-  const leaderboards = ref<Map<string, DriveTrackLeaderboardEntry[]>>(new Map());
+  const leaderboards = ref<Map<string, DriveTrackLeaderboardViews>>(new Map());
   const leaderboardLoading = ref(false);
   const isLoading = ref(false);
   const isSaving = ref(false);
   const lastError = ref<string | null>(null);
   const pending = new Map<string, AbortController>();
+  const pendingLeaderboards = new Map<string, AbortController>();
 
   const trackList = computed(() => [...tracks.value.values()].sort((a, b) => (b.up - b.down) - (a.up - a.down) || b.updated_at - a.updated_at));
 
@@ -96,16 +98,27 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
     }
   };
 
-  const loadLeaderboard = async (trackId: string): Promise<void> => {
+  const loadLeaderboard = async (trackId: string, allTimes = false): Promise<void> => {
+    const requestKey = JSON.stringify([trackId, allTimes]);
+    pendingLeaderboards.get(requestKey)?.abort();
+    const controller = new AbortController();
+    pendingLeaderboards.set(requestKey, controller);
     leaderboardLoading.value = true;
     lastError.value = null;
     try {
-      const entries = await getDriveTrackLeaderboard(chatStore, trackId, new AbortController().signal);
-      leaderboards.value = new Map(leaderboards.value).set(trackId, entries);
+      const entries = await getDriveTrackLeaderboard(chatStore, trackId, controller.signal, allTimes);
+      if (pendingLeaderboards.get(requestKey) !== controller) return;
+      const next = new Map(leaderboards.value);
+      next.set(trackId, { ...next.get(trackId), [allTimes ? 'all' : 'best']: entries });
+      leaderboards.value = next;
     } catch (error) {
+      if (pendingLeaderboards.get(requestKey) !== controller || (error as Error)?.name === 'AbortError') return;
       lastError.value = error instanceof Error ? error.message : 'Could not load the leaderboard.';
     } finally {
-      leaderboardLoading.value = false;
+      if (pendingLeaderboards.get(requestKey) === controller) {
+        pendingLeaderboards.delete(requestKey);
+        leaderboardLoading.value = pendingLeaderboards.size > 0;
+      }
     }
   };
 
@@ -201,8 +214,10 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
     } else if (type === 'drive_track_run_updated' && payload?.channel_id === driveStore.joinedChannelId) {
       if (isDriveTrackRun(payload.run)) {
         setRun(payload.run);
-        if (payload.run.status === 'finished' && leaderboards.value.has(payload.run.track_id)) {
-          void loadLeaderboard(payload.run.track_id);
+        if (payload.run.status === 'finished') {
+          const board = leaderboards.value.get(payload.run.track_id);
+          if (board?.best) void loadLeaderboard(payload.run.track_id);
+          if (board?.all) void loadLeaderboard(payload.run.track_id, true);
         }
         if (payload.run.user_id === chatStore.currentUser?.id && payload.run.status !== 'active') {
           const keys = new Map(activeTrackIds.value);

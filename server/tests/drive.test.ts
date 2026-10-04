@@ -197,11 +197,18 @@ test('drive signaling rejects unrelated sockets and screen media while allowing 
     deleteChannel: async () => {}
   } } as NodeModule;
   const dbPath = require.resolve('../src/db');
-  const leaderboardRows = [{
-    id: 'run-1', track_id: 'track-1', user_id: 'driver', channel_id: 'drive', started_at: 1000,
-    finished_at: 5000, next_gate: 3, gates_total: 3, gate_times_json: '[1000,3000,5000]',
-    distance_m: 222, duration_ms: 4000, avg_speed_mps: 55.5, status: 'finished', updated_at: 5000
-  }];
+  const leaderboardRows = [
+    {
+      id: 'run-1', track_id: 'track-1', user_id: 'driver', channel_id: 'drive', started_at: 1000,
+      finished_at: 5000, next_gate: 3, gates_total: 3, gate_times_json: '[1000,3000,5000]',
+      distance_m: 222, duration_ms: 4000, avg_speed_mps: 55.5, status: 'finished', updated_at: 5000
+    },
+    {
+      id: 'run-2', track_id: 'track-1', user_id: 'driver', channel_id: 'drive', started_at: 2000,
+      finished_at: 7000, next_gate: 3, gates_total: 3, gate_times_json: '[2000,4000,7000]',
+      distance_m: 222, duration_ms: 5000, avg_speed_mps: 44.4, status: 'finished', updated_at: 7000
+    }
+  ];
   require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: {
     dataDir: process.cwd(), channelsSchemaReady: Promise.resolve(),
     db: {
@@ -233,6 +240,11 @@ test('drive signaling rejects unrelated sockets and screen media while allowing 
       entries: [{ user_id: 'driver', run_id: 'run-1', duration_ms: 4000, avg_speed_mps: 55.5, distance_m: 222, finished_at: 5000 }]
     }
   });
+  await send(owner.client, 'drive_track_leaderboard', {
+    request_id: 'leaderboard-all-request', track_id: 'track-1', all_times: true
+  });
+  assert.equal(owner.messages.at(-1).payload.request_id, 'leaderboard-all-request');
+  assert.deepEqual(owner.messages.at(-1).payload.entries.map((entry: any) => entry.run_id), ['run-1', 'run-2']);
   await send(owner.client, 'drive_search_destinations', { request_id: 'invalid-search', channel_id: 'drive', query: '' });
   assert.equal(owner.messages.at(-1).type, 'drive_destinations');
   assert.equal(owner.messages.at(-1).payload.request_id, 'invalid-search');
