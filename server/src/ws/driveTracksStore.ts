@@ -306,24 +306,28 @@ export class DriveTracksStore {
     return updated ? this.toRun(updated) : null;
   }
 
-  /** Best completed run per driver, ordered by fastest time. */
-  async leaderboard(trackId: string, limit = 50): Promise<DriveTrackLeaderboardEntry[]> {
+  /** Returns each finished run when requested, or the best run per driver by default. */
+  async leaderboard(trackId: string, allTimes = false, limit = 50): Promise<DriveTrackLeaderboardEntry[]> {
     const rows = await this.queryAll<RunRow>(
-      "SELECT * FROM drive_track_runs WHERE track_id = ? AND status = 'finished' AND duration_ms IS NOT NULL AND duration_ms > 0 ORDER BY duration_ms ASC, finished_at ASC LIMIT 500",
+      `SELECT * FROM drive_track_runs WHERE track_id = ? AND status = 'finished' AND duration_ms IS NOT NULL AND duration_ms > 0 ORDER BY duration_ms ASC, finished_at ASC${allTimes ? '' : ' LIMIT 500'}`,
       [trackId]
     );
     const best = new Map<string, DriveTrackLeaderboardEntry>();
+    const entries: DriveTrackLeaderboardEntry[] = [];
     for (const row of rows) {
-      if (best.has(row.user_id) || row.duration_ms === null || row.finished_at === null) continue;
-      best.set(row.user_id, {
+      if (row.duration_ms === null || row.finished_at === null) continue;
+      const entry = {
         user_id: row.user_id,
         run_id: row.id,
         duration_ms: Number(row.duration_ms),
         avg_speed_mps: row.avg_speed_mps === null || row.avg_speed_mps === undefined ? null : Number(row.avg_speed_mps),
         distance_m: Number(row.distance_m),
         finished_at: Number(row.finished_at)
-      });
+      };
+      if (allTimes) entries.push(entry);
+      else if (!best.has(row.user_id)) best.set(row.user_id, entry);
     }
+    if (allTimes) return entries;
     return [...best.values()].slice(0, Math.max(1, Math.min(200, limit)));
   }
 

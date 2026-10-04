@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Loader2, RefreshCw, Trophy } from 'lucide-vue-next'
+import { ListOrdered, Loader2, RefreshCw, Trophy } from 'lucide-vue-next'
 import { useChatStore } from '../../stores/chat'
 import { useDriveTracksStore } from '../../stores/driveTracks'
 import { formatDriveDistance, formatDriveDuration, formatDriveSpeed } from '../../utils/driveTracks'
@@ -9,8 +9,11 @@ const props = withDefaults(defineProps<{ activeTrackId?: string | null }>(), { a
 const chatStore = useChatStore()
 const driveTracksStore = useDriveTracksStore()
 const selectedTrackId = ref<string | null>(null)
+const allTimes = ref(false)
 
-const entries = computed(() => selectedTrackId.value ? driveTracksStore.leaderboards.get(selectedTrackId.value) ?? [] : [])
+const entries = computed(() => selectedTrackId.value
+  ? driveTracksStore.leaderboards.get(selectedTrackId.value)?.[allTimes.value ? 'all' : 'best'] ?? []
+  : [])
 const username = (userId: string) => chatStore.users.find((user) => user.id === userId)?.username ?? 'Driver'
 const finishedLabel = (at: number) => new Date(at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 const rankClass = (index: number) => index === 0
@@ -28,7 +31,9 @@ watch([() => props.activeTrackId, () => driveTracksStore.trackList], () => {
   selectedTrackId.value = inList(props.activeTrackId) ? props.activeTrackId : inList(selectedTrackId.value) ? selectedTrackId.value : available[0]?.id ?? null
 }, { immediate: true })
 
-watch(selectedTrackId, (trackId) => { if (trackId) void driveTracksStore.loadLeaderboard(trackId) }, { immediate: true })
+watch([selectedTrackId, allTimes], () => {
+  if (selectedTrackId.value) void driveTracksStore.loadLeaderboard(selectedTrackId.value, allTimes.value)
+}, { immediate: true })
 </script>
 
 <template>
@@ -36,7 +41,10 @@ watch(selectedTrackId, (trackId) => { if (trackId) void driveTracksStore.loadLea
     <header class="flex shrink-0 items-center gap-2 border-b border-white/5 px-3 py-2">
       <Trophy class="h-4 w-4 shrink-0 text-amber-400" />
       <h3 class="min-w-0 flex-1 text-xs font-bold uppercase tracking-wider text-zinc-300">Track leaderboard</h3>
-      <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-white disabled:opacity-40" :disabled="!selectedTrackId || driveTracksStore.leaderboardLoading" aria-label="Refresh leaderboard" @click="selectedTrackId && driveTracksStore.loadLeaderboard(selectedTrackId)">
+      <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors disabled:opacity-40" :class="allTimes ? 'bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25' : 'text-zinc-400 hover:bg-zinc-800 hover:text-white'" :disabled="!selectedTrackId" :aria-pressed="allTimes" :aria-label="allTimes ? 'Show best time per driver' : 'Show all times'" :title="allTimes ? 'Show best time per driver' : 'Show all times'" @click="allTimes = !allTimes">
+        <ListOrdered class="h-4 w-4" />
+      </button>
+      <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-white disabled:opacity-40" :disabled="!selectedTrackId || driveTracksStore.leaderboardLoading" aria-label="Refresh leaderboard" @click="selectedTrackId && driveTracksStore.loadLeaderboard(selectedTrackId, allTimes)">
         <Loader2 v-if="driveTracksStore.leaderboardLoading" class="h-4 w-4 animate-spin" /><RefreshCw v-else class="h-4 w-4" />
       </button>
     </header>
@@ -51,7 +59,7 @@ watch(selectedTrackId, (trackId) => { if (trackId) void driveTracksStore.loadLea
       <p v-if="!driveTracksStore.trackList.length" class="rounded-xl border border-dashed border-white/10 px-3 py-6 text-center text-xs text-zinc-500">No tracks have been shared yet.</p>
       <p v-else-if="driveTracksStore.leaderboardLoading && !entries.length" class="px-3 py-6 text-center text-xs text-zinc-500">Loading times…</p>
       <p v-else-if="!entries.length" class="rounded-xl border border-dashed border-white/10 px-3 py-6 text-center text-xs text-zinc-500">No finished runs recorded for this track yet. Be the first to set a time.</p>
-      <ol v-else class="space-y-1.5" aria-label="Leaderboard entries">
+      <ol v-else class="space-y-1.5" :aria-label="allTimes ? 'All finished times' : 'Best times per driver'">
         <li v-for="(entry, index) in entries" :key="entry.run_id" class="flex items-center gap-3 rounded-lg border px-3 py-2" :class="entry.user_id === chatStore.currentUser?.id ? 'border-indigo-500/40 bg-indigo-500/10' : 'border-white/10 bg-zinc-900/70'">
           <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold tabular-nums" :class="rankClass(index)">{{ index + 1 }}</span>
           <div class="min-w-0 flex-1">

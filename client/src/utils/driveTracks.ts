@@ -183,10 +183,13 @@ export const listDriveTracks = async (transport: DriveNavigationTransport, signa
 };
 
 export const getDriveTrackLeaderboard = async (
-  transport: DriveNavigationTransport, trackId: string, signal: AbortSignal
+  transport: DriveNavigationTransport, trackId: string, signal: AbortSignal, allTimes = false
 ): Promise<DriveTrackLeaderboardEntry[]> => {
-  const response = await requestDriveMessage(transport, 'drive_track_leaderboard', 'drive_track_leaderboard', null, { track_id: trackId }, signal, 15000);
-  if (!Array.isArray(response.entries) || response.entries.length > 200
+  const response = await requestDriveMessage(
+    transport, 'drive_track_leaderboard', 'drive_track_leaderboard', null,
+    { track_id: trackId, all_times: allTimes }, signal, allTimes ? 60000 : 15000
+  );
+  if (!Array.isArray(response.entries) || (!allTimes && response.entries.length > 200)
     || response.entries.some((entry: unknown) => !isDriveTrackLeaderboardEntry(entry))) {
     throw new Error('The server returned an invalid leaderboard.');
   }
