@@ -214,8 +214,17 @@ test('drive signaling rejects unrelated sockets and screen media while allowing 
     db: {
       all: (sql: string, params: unknown[], callback: (error: Error | null, rows: unknown[]) => void) => {
         assert.match(sql, /FROM drive_track_runs/);
+        const best: unknown[] = [];
+        const seen = new Set<string>();
+        for (const row of leaderboardRows) {
+          if (/ROW_NUMBER/i.test(sql)) {
+            if (seen.has(row.user_id)) continue;
+            seen.add(row.user_id);
+          }
+          best.push(row);
+        }
         const offset = typeof params[2] === 'number' ? params[2] : 0;
-        callback(null, leaderboardRows.slice(offset, offset + 50));
+        callback(null, best.slice(offset, offset + 50));
       },
       get: (sql: string, _params: unknown[], callback: (error: Error | null, row?: unknown) => void) => {
         if (/COUNT/i.test(sql)) {
