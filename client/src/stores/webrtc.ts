@@ -1171,10 +1171,58 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     }
   };
 
+  const isMicSuppressed = () => isMuted.value || isDeafened.value;
+
+  // While muted/deafened the browser microphone is fully released: an open capture stream makes the
+  // OS/browser treat this as an active call and duck or silence other media playback.
+  const releaseLocalMic = async () => {
+    removeSpeakingDetector('local');
+    if (producer.value) {
+      try {
+        producer.value.pause();
+      } catch (error) {
+        console.error('Failed to pause producer:', error);
+      }
+    }
+    await stopLocalInput();
+  };
+
+  const acquireLocalMic = async () => {
+    const transport = sendTransport.value;
+    if (!activeVoiceChannelId.value || !transport || isMicSuppressed()) return;
+    try {
+      const track = await createLocalAudioTrack();
+      if (!track) return;
+      if (chatStore.currentUser?.id && localStream.value) {
+        addSpeakingDetector('local', chatStore.currentUser.id, localStream.value, true);
+      }
+      if (producer.value) {
+        try {
+          await producer.value.replaceTrack({ track });
+        } catch (error) {
+          console.error('Failed to replace producer track:', error);
+          try {
+            producer.value.close();
+          } catch (_e) {
+            // no-op
+          }
+          producer.value = await transport.produce({ track });
+        }
+        producer.value.resume();
+        return;
+      }
+      producer.value = await transport.produce({ track });
+      producer.value.resume();
+    } catch (error) {
+      console.error('Failed to open microphone:', error);
+    }
+  };
+
   const setInputDevice = async (deviceId: string) => {
     selectedInputDeviceId.value = deviceId;
 
-    if (activeVoiceChannelId.value && sendTransport.value) {
+    // Do not reopen the microphone while it is intentionally released.
+    if (activeVoiceChannelId.value && sendTransport.value && !isMicSuppressed()) {
       await replaceProducerTrack();
     }
   };
@@ -1433,37 +1481,20 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     connectionQuality.value = 'good';
   };
 
-  const toggleMute = () => {
+  const toggleMute = async () => {
     if (isDeafened.value) {
       // If deafened, clicking mute will undeafen but keep muted
       isDeafened.value = false;
       isMuted.value = true;
       applyAllRemoteAudioState();
-      
-      // Mic stays disabled because isMuted is true
-      if (localStream.value) {
-        localStream.value.getAudioTracks().forEach(track => {
-          track.enabled = false;
-        });
-      }
-      if (producer.value) {
-        producer.value.pause();
-      }
     } else {
       isMuted.value = !isMuted.value;
-      
-      if (localStream.value) {
-        localStream.value.getAudioTracks().forEach(track => {
-          track.enabled = !isMuted.value;
-        });
-      }
-      if (producer.value) {
-        if (isMuted.value) {
-          producer.value.pause();
-        } else {
-          producer.value.resume();
-        }
-      }
+    }
+
+    if (isMicSuppressed()) {
+      await releaseLocalMic();
+    } else {
+      await acquireLocalMic();
     }
 
     if (activeVoiceChannelId.value) {
@@ -1475,35 +1506,14 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     }
   };
 
-  const toggleDeafen = () => {
+  const toggleDeafen = async () => {
     isDeafened.value = !isDeafened.value;
-    
-    if (isDeafened.value) {
-      // When deafened, also mute the mic
-      if (localStream.value) {
-        localStream.value.getAudioTracks().forEach(track => {
-          track.enabled = false;
-        });
-      }
-      if (producer.value) {
-        producer.value.pause();
-      }
-      applyAllRemoteAudioState();
+    applyAllRemoteAudioState();
+
+    if (isMicSuppressed()) {
+      await releaseLocalMic();
     } else {
-      // Restore mic state
-      if (localStream.value) {
-        localStream.value.getAudioTracks().forEach(track => {
-          track.enabled = !isMuted.value;
-        });
-      }
-      if (producer.value) {
-        if (isMuted.value) {
-          producer.value.pause();
-        } else {
-          producer.value.resume();
-        }
-      }
-      applyAllRemoteAudioState();
+      await acquireLocalMic();
     }
 
     if (activeVoiceChannelId.value) {
@@ -1884,26 +1894,16 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           });
           
           // Start producing audio with the configured device/gain/noise-gate chain.
+          // While muted/deafened the microphone stays closed and is opened on first unmute.
           try {
-            const audioTrack = await createLocalAudioTrack();
+            const audioTrack = isMicSuppressed() ? null : await createLocalAudioTrack();
 
             if (audioTrack) {
-              // Apply current mute/deafen state
-              if (isMuted.value || isDeafened.value) {
-                localStream.value?.getAudioTracks().forEach(track => {
-                  track.enabled = false;
-                });
-              }
-
               if (chatStore.currentUser?.id && localStream.value) {
                 addSpeakingDetector('local', chatStore.currentUser.id, localStream.value, true);
               }
 
               producer.value = await sendTransport.value.produce({ track: audioTrack });
-              
-              if (isMuted.value || isDeafened.value) {
-                producer.value.pause();
-              }
             }
           } catch (error) {
             console.error('Failed to get user media or produce:', error);

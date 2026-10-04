@@ -99,6 +99,7 @@ export class DriveTracksStore {
   private gateCache = new Map<string, { gates: DriveTrackGate[]; distance_m: number }>();
   private trackGateList: Array<{ trackId: string; gates: DriveTrackGate[]; distance_m: number }> | null = null;
   private autoStartAt = new Map<string, number>();
+  private departedRuns = new Set<string>();
   private lastSweepAt = new Map<string, number>();
 
   constructor(private db: sqlite3.Database, private now: () => number = Date.now) {}
@@ -359,6 +360,9 @@ export class DriveTracksStore {
     for (const record of records) {
       const start = record.gates[0];
       if (!start) continue;
+      const startDistance = haversineMeters(fix, start);
+      const radius = canStart ? gateRadiusMeters(accuracy) : 0;
+      const startKey = `${channelId}\u0000${userId}\u0000${record.trackId}`;
       const existing = activeByTrack.get(record.trackId);
       if (existing) {
         if (this.isRunTimedOut(existing, record.distance_m, now)) {
@@ -366,13 +370,28 @@ export class DriveTracksStore {
           if (expired) changed.push(expired);
           activeByTrack.delete(record.trackId);
         } else {
+          // Only a return to the start after actually leaving it restarts timing; lingering on the
+          // start line right after starting must not. This handles loops and reversed layouts.
+          if (canStart && startDistance > radius * 1.5) this.departedRuns.add(existing.id);
+          const crossedStart = canStart && startDistance <= radius;
+          const cooldownElapsed = now - (this.autoStartAt.get(startKey) ?? -Infinity) >= AUTO_START_COOLDOWN_MS;
+          if (crossedStart && this.departedRuns.has(existing.id) && cooldownElapsed) {
+            const abandoned = await this.endRunById(existing.id, 'abandoned', now);
+            if (abandoned) changed.push(abandoned);
+            this.departedRuns.delete(existing.id);
+            this.autoStartAt.set(startKey, now);
+            const restarted = await this.startRun(channelId, record.trackId, userId, now);
+            const credited = await this.advanceRunRecord(restarted, record.gates, fix, now) ?? restarted;
+            changed.push(credited);
+            activeByTrack.set(record.trackId, credited);
+            continue;
+          }
           const updated = await this.advanceRunRecord(existing, record.gates, fix, now);
           if (updated) changed.push(updated);
           continue;
         }
       }
-      if (!canStart || haversineMeters(fix, start) > gateRadiusMeters(accuracy)) continue;
-      const startKey = `${channelId}\u0000${userId}\u0000${record.trackId}`;
+      if (!canStart || startDistance > radius) continue;
       if (now - (this.autoStartAt.get(startKey) ?? -Infinity) < AUTO_START_COOLDOWN_MS) continue;
       this.autoStartAt.set(startKey, now);
       const started = await this.startRun(channelId, record.trackId, userId, now);
@@ -383,6 +402,7 @@ export class DriveTracksStore {
     if (this.autoStartAt.size > 512) {
       for (const [key, at] of this.autoStartAt) if (now - at > AUTO_START_COOLDOWN_MS * 4) this.autoStartAt.delete(key);
     }
+    if (this.departedRuns.size > 1024) this.departedRuns.clear();
     return changed;
   }
 
@@ -428,6 +448,7 @@ export class DriveTracksStore {
     if (!row) return null;
     const run = this.toRun(row);
     if (run.status !== 'active') return null;
+    this.departedRuns.delete(runId);
     const startedAt = run.gate_times[0] ?? null;
     const stats = status === 'finished' && startedAt !== null
       ? computeRunStats(run.distance_m, startedAt, finishedAt)

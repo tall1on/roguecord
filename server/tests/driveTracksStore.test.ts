@@ -283,6 +283,35 @@ test('auto tracking starts at start gates, runs multiple tracks and expires slow
   assert.equal(await store.getActiveRun('idle', 'slow'), null);
 });
 
+test('re-crossing a start gate restarts timing and discards the previous run', async (t) => {
+  const { db, store, setClock } = await setup();
+  t.after(() => db.close());
+  const track = await store.createTrack('owner', input());
+
+  setClock(1000);
+  const started = await store.autoTrack('room', 'driver', { latitude: 0, longitude: 0, accuracy: 10 });
+  const firstId = started[0]!.id;
+  assert.deepEqual(started[0]!.gate_times, [1000]);
+
+  // Lingering on the start line does not restart the timer.
+  setClock(3000);
+  assert.deepEqual(await store.autoTrack('room', 'driver', { latitude: 0, longitude: 0, accuracy: 10 }), []);
+
+  // Leaving the start area arms a restart.
+  setClock(5000);
+  assert.deepEqual(await store.autoTrack('room', 'driver', { latitude: 0, longitude: 0.05, accuracy: 10 }), []);
+
+  // Returning to the start (e.g. a loop or reversed layout) discards the old run and starts fresh.
+  setClock(20000);
+  const restarted = await store.autoTrack('room', 'driver', { latitude: 0, longitude: 0, accuracy: 10 });
+  assert.equal(restarted.length, 2);
+  assert.equal(restarted[0]!.id, firstId);
+  assert.equal(restarted[0]!.status, 'abandoned');
+  assert.notEqual(restarted[1]!.id, firstId);
+  assert.equal(restarted[1]!.next_gate, 1);
+  assert.deepEqual(restarted[1]!.gate_times, [20000]);
+});
+
 test('starting a run replaces only the same track and channel cleanup ends the rest', async (t) => {
   const { db, store, setClock } = await setup();
   t.after(() => db.close());
