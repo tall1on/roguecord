@@ -693,7 +693,7 @@ onBeforeUnmount(() => {
     </header>
     <div class="drive-leaderboard shrink-0 border-b border-white/5 px-4 py-2 md:px-6">
       <div class="drive-leaderboard-list flex flex-col gap-1 overflow-y-auto" aria-label="Driver leaderboard">
-        <span v-for="entry in rankedParticipants" :key="entry.participant.id" class="driver-row flex w-full min-w-0 items-center gap-2 rounded-lg border px-3 py-1.5 text-xs" :data-rank="entry.rank ?? undefined" :class="[entry.rank !== null && entry.rank <= 3 ? podiumClasses[entry.rank - 1] : webrtcStore.isUserSpeaking(entry.participant.id) ? 'border-green-500/50 text-green-300' : 'border-white/10 text-zinc-300', webrtcStore.isUserSpeaking(entry.participant.id) && entry.rank !== null && entry.rank <= 3 ? 'ring-1 ring-green-500/60' : '']" :title="entry.distance_m !== null ? `${Math.round(entry.distance_m)} m GPS distance to the shared destination` : undefined">
+        <span v-for="entry in rankedParticipants" :key="entry.participant.id" class="driver-row flex w-full min-w-0 items-center gap-2 rounded-lg border px-3 py-2 text-xs" :data-rank="entry.rank ?? undefined" :class="[entry.rank !== null && entry.rank <= 3 ? podiumClasses[entry.rank - 1] : webrtcStore.isUserSpeaking(entry.participant.id) ? 'border-green-500/50 text-green-300' : 'border-white/10 text-zinc-300', webrtcStore.isUserSpeaking(entry.participant.id) && entry.rank !== null && entry.rank <= 3 ? 'ring-1 ring-green-500/60' : '']" :title="entry.distance_m !== null ? `${Math.round(entry.distance_m)} m GPS distance to the shared destination` : undefined">
           <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-black/20 text-[10px] font-bold tabular-nums" :class="entry.rank !== null ? '' : 'text-zinc-500'">{{ entry.rank ?? '-' }}</span>
           <span class="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-white/30" :style="{ backgroundColor: driverColor(entry.participant.id) }" aria-hidden="true" />
           <MicOff v-if="entry.participant.isMuted || entry.participant.isDeafened" class="h-3 w-3 shrink-0 text-red-400" />
@@ -701,7 +701,7 @@ onBeforeUnmount(() => {
           <MapPin v-if="isJoined && driveStore.locations.has(entry.participant.id)" class="h-3 w-3 shrink-0 text-indigo-400" />
           <span v-if="driveStore.getSpeedLabel(entry.participant.id, channelId)" class="shrink-0 tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(entry.participant.id, channelId) }}</span>
           <span v-if="entry.distance_m !== null" class="shrink-0 tabular-nums text-zinc-400">{{ formatDistance(entry.distance_m) }}</span>
-          <button type="button" class="ml-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors disabled:cursor-not-allowed disabled:opacity-30" :class="isFollowingUser(entry.participant.id) ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-400 hover:bg-white/10 hover:text-white'" :disabled="!isJoined || !driveStore.locations.has(entry.participant.id)" :aria-pressed="isFollowingUser(entry.participant.id)" :aria-label="isFollowingUser(entry.participant.id) ? `Stop tracking ${entry.participant.username} on the map` : `Track ${entry.participant.username} on the map`" :title="isFollowingUser(entry.participant.id) ? 'Stop tracking on the map' : 'Track this driver on the map'" @click="toggleFollowUser(entry.participant.id)"><Crosshair class="h-3 w-3" /></button>
+          <button type="button" class="ml-1 inline-flex shrink-0 items-center justify-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-30" :class="[isFollowingUser(entry.participant.id) ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-400 hover:bg-white/10 hover:text-white', phoneLayout ? 'h-11 w-11' : 'h-8 w-8']" :disabled="!isJoined || !driveStore.locations.has(entry.participant.id)" :aria-pressed="isFollowingUser(entry.participant.id)" :aria-label="isFollowingUser(entry.participant.id) ? `Stop tracking ${entry.participant.username} on the map` : `Track ${entry.participant.username} on the map`" :title="isFollowingUser(entry.participant.id) ? 'Stop tracking on the map' : 'Track this driver on the map'" @click="toggleFollowUser(entry.participant.id)"><Crosshair :class="phoneLayout ? 'h-5 w-5' : 'h-4 w-4'" /></button>
         </span>
         <p v-if="!rankedParticipants.length" class="px-1 py-2 text-xs text-zinc-500">No drivers in this room yet.</p>
       </div>
@@ -874,19 +874,19 @@ onBeforeUnmount(() => {
   overflow-y: auto;
 }
 .drive-leaderboard-list {
-  max-height: 10rem;
+  max-height: 12rem;
 }
 .phone-drive-panel .drive-leaderboard-list {
-  max-height: 26vh;
-  max-height: 26dvh;
+  max-height: 30vh;
+  max-height: 30dvh;
 }
 .phone-drive-panel .drive-navigation {
   max-height: max(0px, calc(60% - 30px));
 }
 @media (max-height: 500px) {
   .phone-drive-panel .drive-leaderboard-list {
-    max-height: 20vh;
-    max-height: 20dvh;
+    max-height: 24vh;
+    max-height: 24dvh;
   }
 }
 .drive-map {
