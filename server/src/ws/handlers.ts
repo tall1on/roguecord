@@ -1850,6 +1850,7 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'drive_get_route':
         await handleDriveNavigation(client, type, payload);
         break;
+      case 'drive_track_leaderboard':
       case 'drive_tracks_list':
       case 'drive_track_create':
       case 'drive_track_update':

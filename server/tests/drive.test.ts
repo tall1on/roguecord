@@ -197,7 +197,23 @@ test('drive signaling rejects unrelated sockets and screen media while allowing 
     deleteChannel: async () => {}
   } } as NodeModule;
   const dbPath = require.resolve('../src/db');
-  require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: { dataDir: process.cwd() } } as NodeModule;
+  const leaderboardRows = [{
+    id: 'run-1', track_id: 'track-1', user_id: 'driver', channel_id: 'drive', started_at: 1000,
+    finished_at: 5000, next_gate: 3, gates_total: 3, gate_times_json: '[1000,3000,5000]',
+    distance_m: 222, duration_ms: 4000, avg_speed_mps: 55.5, status: 'finished', updated_at: 5000
+  }];
+  require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: {
+    dataDir: process.cwd(), channelsSchemaReady: Promise.resolve(),
+    db: {
+      all: (sql: string, params: unknown[], callback: (error: Error | null, rows: unknown[]) => void) => {
+        assert.match(sql, /FROM drive_track_runs/);
+        assert.deepEqual(params, ['track-1']);
+        callback(null, leaderboardRows);
+      },
+      get: (_sql: string, _params: unknown[], callback: (error: Error | null, row?: unknown) => void) => callback(null),
+      run: (_sql: string, _params: unknown[], callback: (error: Error | null) => void) => callback(null)
+    }
+  } } as NodeModule;
   const { handleMessage, handleClientDisconnect } = require('../src/ws/handlers') as typeof import('../src/ws/handlers');
   const owner = makeClient('owner');
   const tab = makeClient('owner');
@@ -207,6 +223,16 @@ test('drive signaling rejects unrelated sockets and screen media while allowing 
   const room = { id: 'drive', router: { rtpCapabilities: {}, close: () => closes++ }, peers: new Map() } as unknown as Room;
   rooms.set('drive', room);
   const send = (client: ClientConnection, type: string, payload: any) => handleMessage(client, JSON.stringify({ type, payload }));
+  const previousMessageCount = owner.messages.length;
+  await send(owner.client, 'drive_track_leaderboard', { request_id: 'leaderboard-request', track_id: 'track-1' });
+  assert.equal(owner.messages.length, previousMessageCount + 1);
+  assert.deepEqual(owner.messages.at(-1), {
+    type: 'drive_track_leaderboard',
+    payload: {
+      request_id: 'leaderboard-request', track_id: 'track-1',
+      entries: [{ user_id: 'driver', run_id: 'run-1', duration_ms: 4000, avg_speed_mps: 55.5, distance_m: 222, finished_at: 5000 }]
+    }
+  });
   await send(owner.client, 'drive_search_destinations', { request_id: 'invalid-search', channel_id: 'drive', query: '' });
   assert.equal(owner.messages.at(-1).type, 'drive_destinations');
   assert.equal(owner.messages.at(-1).payload.request_id, 'invalid-search');
