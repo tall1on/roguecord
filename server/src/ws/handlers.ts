@@ -1,7 +1,7 @@
 import { ClientConnection, connectionManager } from './connectionManager';
 import { driveParticipants, validDriveId } from './drive';
 import { handleDriveNavigation } from './driveNavigation';
-import { abandonDriveRunsForChannel, endDriveTrackRun, handleDriveTracks, observeDriveLocation } from './driveTracks';
+import { abandonDriveRunsForChannel, broadcastActiveRuns, endDriveTrackRun, handleDriveTracks, observeDriveLocation } from './driveTracks';
 import {
   createUser,
   getUserByPublicKey,
@@ -1856,8 +1856,6 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'drive_track_update':
       case 'drive_track_delete':
       case 'drive_track_vote':
-      case 'drive_track_activate':
-      case 'drive_track_deactivate':
         await handleDriveTracks(client, type, payload);
         break;
       case 'drive_set_destination': {
@@ -3678,7 +3676,7 @@ export const handleClientDisconnect = (client: ClientConnection) => {
   if (!client.userId) return;
 
   for (const channel_id of driveParticipants.channelsFor(client)) {
-    handleLeaveVoiceChannel(client, { channel_id }).catch(console.error);
+    handleLeaveVoiceChannel(client, { channel_id }, { keepTrackRuns: true }).catch(console.error);
     driveParticipants.leave(channel_id, client);
   }
 
@@ -3791,6 +3789,7 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
     }
   }));
   if (channel.type === 'drive') driveParticipants.snapshot(channel_id, client);
+  if (channel.type === 'drive') void broadcastActiveRuns(channel_id).catch(console.error);
 };
 
 const handleCreateWebRtcTransport = async (client: ClientConnection, payload: { channel_id: string, direction: 'send' | 'recv' }) => {
@@ -4024,20 +4023,21 @@ const handlePauseConsumer = async (client: ClientConnection, payload: { channel_
   await consumer.pause();
 };
 
-const handleLeaveVoiceChannel = async (client: ClientConnection, payload: { channel_id: string }) => {
+const handleLeaveVoiceChannel = async (client: ClientConnection, payload: { channel_id: string }, options: { keepTrackRuns?: boolean } = {}) => {
   if (!client.userId) return;
   const { channel_id } = payload;
   
   const room = rooms.get(channel_id);
   if (!room) {
     driveParticipants.leave(channel_id, client);
-    void endDriveTrackRun(channel_id, client.userId).catch(console.error);
+    if (!options.keepTrackRuns) void endDriveTrackRun(channel_id, client.userId).catch(console.error);
     return;
   }
   if (room.type === 'drive') {
     if (!driveParticipants.owns(channel_id, client)) return;
     driveParticipants.leave(channel_id, client);
-    void endDriveTrackRun(channel_id, client.userId).catch(console.error);
+    // A dropped connection keeps runs alive so short outages do not lose an in-progress time.
+    if (!options.keepTrackRuns) void endDriveTrackRun(channel_id, client.userId).catch(console.error);
   }
   
   const peer = room.peers.get(client.userId);

@@ -241,7 +241,7 @@ onBeforeUnmount(() => {
       </div>
       <footer class="flex shrink-0 items-center gap-2 border-t border-white/5 px-4 py-3">
         <p v-if="error" class="min-w-0 flex-1 truncate text-xs text-red-400" role="alert">{{ error }}</p>
-        <span v-else class="min-w-0 flex-1 text-xs text-zinc-500"><MapPin class="mr-1 inline h-3.5 w-3.5" />{{ props.track ? 'Editing creates a clone with the next version number.' : 'Shared tracks can be voted on and activated by everyone.' }}</span>
+        <span v-else class="min-w-0 flex-1 text-xs text-zinc-500"><MapPin class="mr-1 inline h-3.5 w-3.5" />{{ props.track ? 'Editing creates a clone with the next version number.' : 'Shared tracks can be voted on and navigated by everyone; times start at the start gate.' }}</span>
         <button type="button" class="rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-zinc-800" @click="emit('close')">Cancel</button>
         <button type="button" class="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50" :disabled="!canSave" @click="submit">
           <Loader2 v-if="store.isSaving" class="h-4 w-4 animate-spin" /><Save v-else class="h-4 w-4" /> {{ props.track ? `Save as V${props.track.version + 1}` : 'Save track' }}

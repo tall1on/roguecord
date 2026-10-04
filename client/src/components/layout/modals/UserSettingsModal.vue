@@ -815,7 +815,7 @@ onBeforeUnmount(() => {
             <div class="flex items-start justify-between gap-4">
               <div>
                 <label class="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-1">Track editor</label>
-                <p class="text-sm text-zinc-500">Plan a route with a start, checkpoints and a finish, then share it as a server track that any driving room can activate.</p>
+                <p class="text-sm text-zinc-500">Plan a route with a start, checkpoints and a finish, then share it as a server track that any driving room can navigate. Times start automatically at the start gate.</p>
               </div>
               <button type="button" class="shrink-0 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500" @click="openTrackEditor(null)">New track</button>
             </div>

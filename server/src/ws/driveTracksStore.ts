@@ -5,10 +5,14 @@ import {
   computeRunStats,
   displayTrackName,
   DriveTrackError,
+  GATE_MAX_ACCURACY_M,
+  gateRadiusMeters,
+  haversineMeters,
   normalizeTrackName,
   parseTrackPayload,
   trackDistanceMeters,
   trackGates,
+  trackMaxDurationMs,
   type DriveTrack,
   type DriveTrackFix,
   type DriveTrackGate,
@@ -35,6 +39,11 @@ export type DriveTrackLeaderboardEntry = {
 };
 
 export const LEADERBOARD_PAGE_SIZE = 50;
+
+// Automatic tracking: a driver crossing a start gate begins timing; lingering at a start
+// is cooled down so a parked car does not generate endless runs.
+export const AUTO_START_COOLDOWN_MS = 15000;
+const STALE_RUN_SWEEP_INTERVAL_MS = 15000;
 
 export type DriveTrackLeaderboardPage = {
   entries: DriveTrackLeaderboardEntry[];
@@ -85,6 +94,9 @@ const parseGateTimes = (value: string): number[] => {
 
 export class DriveTracksStore {
   private gateCache = new Map<string, { gates: DriveTrackGate[]; distance_m: number }>();
+  private trackGateList: Array<{ trackId: string; gates: DriveTrackGate[]; distance_m: number }> | null = null;
+  private autoStartAt = new Map<string, number>();
+  private lastSweepAt = new Map<string, number>();
 
   constructor(private db: sqlite3.Database, private now: () => number = Date.now) {}
 
@@ -209,6 +221,7 @@ export class DriveTracksStore {
       [id, id, name, ownerId, JSON.stringify(payload), distance, timestamp, timestamp]
     );
     this.gateCache.set(id, { gates, distance_m: distance });
+    this.trackGateList = null;
     return (await this.get(id, ownerId))!;
   }
 
@@ -231,6 +244,7 @@ export class DriveTracksStore {
       [id, source.family_id, source.name, version, editorId, JSON.stringify(payload), distance, timestamp, timestamp]
     );
     this.gateCache.set(id, { gates, distance_m: distance });
+    this.trackGateList = null;
     return (await this.get(id, editorId))!;
   }
 
@@ -240,6 +254,7 @@ export class DriveTracksStore {
     await this.execute('DELETE FROM drive_track_runs WHERE track_id = ?', [trackId]);
     await this.execute('DELETE FROM drive_tracks WHERE id = ?', [trackId]);
     this.gateCache.delete(trackId);
+    this.trackGateList = null;
     return true;
   }
 
@@ -258,61 +273,156 @@ export class DriveTracksStore {
     return { up: Number(row?.up ?? 0), down: Number(row?.down ?? 0), mine: mine === 1 ? 1 : mine === -1 ? -1 : 0 };
   }
 
-  async startRun(channelId: string, trackId: string, userId: string): Promise<DriveTrackRun> {
+  async startRun(channelId: string, trackId: string, userId: string, now = this.now()): Promise<DriveTrackRun> {
     const record = await this.gatesFor(trackId);
     if (!record) throw new DriveTrackError('Track not found.');
-    await this.execute("UPDATE drive_track_runs SET status = 'abandoned', finished_at = ?, updated_at = ? WHERE channel_id = ? AND user_id = ? AND status = 'active'",
-      [this.now(), this.now(), channelId, userId]);
+    // Only the same track's stale active run is closed; other auto-tracked tracks keep running.
+    await this.execute("UPDATE drive_track_runs SET status = 'abandoned', finished_at = ?, updated_at = ? WHERE channel_id = ? AND user_id = ? AND track_id = ? AND status = 'active'",
+      [now, now, channelId, userId, trackId]);
     const id = crypto.randomUUID();
-    const timestamp = this.now();
+    const timestamp = now;
     await this.execute(
       `INSERT INTO drive_track_runs (id, track_id, user_id, channel_id, started_at, finished_at, next_gate, gates_total, gate_times_json, distance_m, duration_ms, avg_speed_mps, status, updated_at)
        VALUES (?, ?, ?, ?, ?, NULL, 0, ?, '[]', ?, NULL, NULL, 'active', ?)`,
       [id, trackId, userId, channelId, timestamp, record.gates.length, record.distance_m, timestamp]
     );
-    return (await this.getActiveRun(channelId, userId))!;
+    return (await this.getActiveRun(channelId, userId, trackId))!;
   }
 
-  async getActiveRun(channelId: string, userId: string): Promise<DriveTrackRun | null> {
-    const row = await this.queryOne<RunRow>(
-      "SELECT * FROM drive_track_runs WHERE channel_id = ? AND user_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
-      [channelId, userId]
-    );
+  async getActiveRun(channelId: string, userId: string, trackId?: string): Promise<DriveTrackRun | null> {
+    const row = trackId
+      ? await this.queryOne<RunRow>(
+          "SELECT * FROM drive_track_runs WHERE channel_id = ? AND user_id = ? AND track_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+          [channelId, userId, trackId]
+        )
+      : await this.queryOne<RunRow>(
+          "SELECT * FROM drive_track_runs WHERE channel_id = ? AND user_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+          [channelId, userId]
+        );
     return row ? this.toRun(row) : null;
   }
 
+  async getActiveRuns(channelId: string, userId: string): Promise<DriveTrackRun[]> {
+    const rows = await this.queryAll<RunRow>(
+      "SELECT * FROM drive_track_runs WHERE channel_id = ? AND user_id = ? AND status = 'active' ORDER BY started_at ASC",
+      [channelId, userId]
+    );
+    return rows.map((row) => this.toRun(row));
+  }
+
+  async activeRunsForChannel(channelId: string): Promise<DriveTrackRun[]> {
+    const rows = await this.queryAll<RunRow>(
+      "SELECT * FROM drive_track_runs WHERE channel_id = ? AND status = 'active' ORDER BY started_at ASC",
+      [channelId]
+    );
+    return rows.map((row) => this.toRun(row));
+  }
+
+  /** Advances every active run of a driver by at most one gate. Retained for direct unit tests. */
   async observeRun(channelId: string, userId: string, fix: DriveTrackFix): Promise<DriveTrackRun | null> {
-    const run = await this.getActiveRun(channelId, userId);
-    if (!run) return null;
-    const record = await this.gatesFor(run.track_id);
-    if (!record) {
-      await this.endRun(channelId, userId, 'abandoned');
-      return null;
+    const changed: DriveTrackRun[] = [];
+    for (const run of await this.getActiveRuns(channelId, userId)) {
+      const record = await this.gatesFor(run.track_id);
+      if (!record) {
+        const ended = await this.endRunById(run.id, 'abandoned', this.now());
+        if (ended) changed.push(ended);
+        continue;
+      }
+      const updated = await this.advanceRunRecord(run, record.gates, fix, this.now());
+      if (updated) changed.push(updated);
     }
-    const result = advanceRun(
-      { nextGate: run.next_gate, gateTimes: run.gate_times, status: 'active', finishedAt: null },
-      record.gates,
-      fix,
-      this.now()
+    return changed[0] ?? null;
+  }
+
+  /**
+   * Automatic tracking entry point for an accepted GPS fix: expires implausibly slow runs,
+   * starts a new run when the driver is on any track's start gate, and advances every active run.
+   */
+  async autoTrack(channelId: string, userId: string, fix: DriveTrackFix, now = this.now()): Promise<DriveTrackRun[]> {
+    const changed: DriveTrackRun[] = [];
+    const lastSweep = this.lastSweepAt.get(channelId) ?? -Infinity;
+    if (now - lastSweep >= STALE_RUN_SWEEP_INTERVAL_MS) {
+      this.lastSweepAt.set(channelId, now);
+      changed.push(...await this.expireStaleRuns(channelId, now));
+    }
+    const records = await this.trackGateRecords();
+    if (!records.length) return changed;
+    const activeByTrack = new Map<string, DriveTrackRun>();
+    for (const run of await this.getActiveRuns(channelId, userId)) activeByTrack.set(run.track_id, run);
+    const accuracy = typeof fix.accuracy === 'number' && Number.isFinite(fix.accuracy) ? fix.accuracy : Number.POSITIVE_INFINITY;
+    const canStart = accuracy <= GATE_MAX_ACCURACY_M;
+    for (const record of records) {
+      const start = record.gates[0];
+      if (!start) continue;
+      const existing = activeByTrack.get(record.trackId);
+      if (existing) {
+        if (this.isRunTimedOut(existing, record.distance_m, now)) {
+          const expired = await this.endRunById(existing.id, 'abandoned', now);
+          if (expired) changed.push(expired);
+          activeByTrack.delete(record.trackId);
+        } else {
+          const updated = await this.advanceRunRecord(existing, record.gates, fix, now);
+          if (updated) changed.push(updated);
+          continue;
+        }
+      }
+      if (!canStart || haversineMeters(fix, start) > gateRadiusMeters(accuracy)) continue;
+      const startKey = `${channelId}\u0000${userId}\u0000${record.trackId}`;
+      if (now - (this.autoStartAt.get(startKey) ?? -Infinity) < AUTO_START_COOLDOWN_MS) continue;
+      this.autoStartAt.set(startKey, now);
+      const started = await this.startRun(channelId, record.trackId, userId, now);
+      const credited = await this.advanceRunRecord(started, record.gates, fix, now) ?? started;
+      changed.push(credited);
+      activeByTrack.set(record.trackId, credited);
+    }
+    if (this.autoStartAt.size > 512) {
+      for (const [key, at] of this.autoStartAt) if (now - at > AUTO_START_COOLDOWN_MS * 4) this.autoStartAt.delete(key);
+    }
+    return changed;
+  }
+
+  /** Abandons active runs whose elapsed time exceeds the slowest plausible pace for their track. */
+  async expireStaleRuns(channelId: string, now = this.now()): Promise<DriveTrackRun[]> {
+    const rows = await this.queryAll<RunRow & { track_distance_m: number | null }>(
+      `SELECT r.*, t.distance_m AS track_distance_m FROM drive_track_runs r
+       LEFT JOIN drive_tracks t ON t.id = r.track_id
+       WHERE r.channel_id = ? AND r.status = 'active'`,
+      [channelId]
     );
-    if (!result) return null;
-    const finished = result.progress.status === 'finished';
-    const finishedAt = result.progress.finishedAt;
-    // Timing starts at the start gate, not at activation, so pre-start navigation is not counted.
-    const startedAt = result.progress.gateTimes[0] ?? run.started_at;
-    const stats = finished ? computeRunStats(run.distance_m, startedAt, finishedAt) : { duration_ms: null, avg_speed_mps: null };
-    await this.execute(
-      'UPDATE drive_track_runs SET next_gate = ?, gate_times_json = ?, status = ?, finished_at = ?, duration_ms = ?, avg_speed_mps = ?, updated_at = ? WHERE id = ?',
-      [result.progress.nextGate, JSON.stringify(result.progress.gateTimes), result.progress.status, finishedAt, stats.duration_ms, stats.avg_speed_mps, this.now(), run.id]
-    );
-    const updated = await this.queryOne<RunRow>('SELECT * FROM drive_track_runs WHERE id = ?', [run.id]);
-    return updated ? this.toRun(updated) : null;
+    const changed: DriveTrackRun[] = [];
+    for (const row of rows) {
+      const run = this.toRun(row);
+      const distance = row.track_distance_m === null || row.track_distance_m === undefined ? run.distance_m : Number(row.track_distance_m);
+      if (!this.isRunTimedOut(run, distance, now)) continue;
+      const updated = await this.endRunById(run.id, 'abandoned', now);
+      if (updated) changed.push(updated);
+    }
+    return changed;
   }
 
   async endRun(channelId: string, userId: string, status: Exclude<DriveTrackRunStatus, 'active'> = 'abandoned'): Promise<DriveTrackRun | null> {
-    const run = await this.getActiveRun(channelId, userId);
-    if (!run) return null;
-    const finishedAt = this.now();
+    return (await this.endRuns(channelId, userId, status))[0] ?? null;
+  }
+
+  async endRuns(channelId: string, userId: string, status: Exclude<DriveTrackRunStatus, 'active'> = 'abandoned'): Promise<DriveTrackRun[]> {
+    const ended: DriveTrackRun[] = [];
+    for (const run of await this.getActiveRuns(channelId, userId)) {
+      const updated = await this.endRunById(run.id, status, this.now());
+      if (updated) ended.push(updated);
+    }
+    return ended;
+  }
+
+  private isRunTimedOut(run: DriveTrackRun, distanceMeters: number, now: number): boolean {
+    const startedAt = run.gate_times[0] ?? run.started_at;
+    return now - startedAt > trackMaxDurationMs(distanceMeters);
+  }
+
+  private async endRunById(runId: string, status: Exclude<DriveTrackRunStatus, 'active'>, finishedAt: number): Promise<DriveTrackRun | null> {
+    const row = await this.queryOne<RunRow>('SELECT * FROM drive_track_runs WHERE id = ?', [runId]);
+    if (!row) return null;
+    const run = this.toRun(row);
+    if (run.status !== 'active') return null;
     const startedAt = run.gate_times[0] ?? null;
     const stats = status === 'finished' && startedAt !== null
       ? computeRunStats(run.distance_m, startedAt, finishedAt)
@@ -323,6 +433,40 @@ export class DriveTracksStore {
     );
     const updated = await this.queryOne<RunRow>('SELECT * FROM drive_track_runs WHERE id = ?', [run.id]);
     return updated ? this.toRun(updated) : null;
+  }
+
+  private async advanceRunRecord(run: DriveTrackRun, gates: readonly DriveTrackGate[], fix: DriveTrackFix, now: number): Promise<DriveTrackRun | null> {
+    const result = advanceRun(
+      { nextGate: run.next_gate, gateTimes: run.gate_times, status: 'active', finishedAt: null },
+      gates,
+      fix,
+      now
+    );
+    if (!result) return null;
+    const finished = result.progress.status === 'finished';
+    const finishedAt = result.progress.finishedAt;
+    // Timing starts at the start gate, not when the run was created, so approach is not counted.
+    const startedAt = result.progress.gateTimes[0] ?? run.started_at;
+    const stats = finished ? computeRunStats(run.distance_m, startedAt, finishedAt) : { duration_ms: null, avg_speed_mps: null };
+    await this.execute(
+      'UPDATE drive_track_runs SET next_gate = ?, gate_times_json = ?, status = ?, finished_at = ?, duration_ms = ?, avg_speed_mps = ?, updated_at = ? WHERE id = ?',
+      [result.progress.nextGate, JSON.stringify(result.progress.gateTimes), result.progress.status, finishedAt, stats.duration_ms, stats.avg_speed_mps, now, run.id]
+    );
+    const updated = await this.queryOne<RunRow>('SELECT * FROM drive_track_runs WHERE id = ?', [run.id]);
+    return updated ? this.toRun(updated) : null;
+  }
+
+  private async trackGateRecords(): Promise<Array<{ trackId: string; gates: DriveTrackGate[]; distance_m: number }>> {
+    if (this.trackGateList) return this.trackGateList;
+    const rows = await this.queryAll<{ id: string; payload_json: string; distance_m: number }>('SELECT id, payload_json, distance_m FROM drive_tracks');
+    const records: Array<{ trackId: string; gates: DriveTrackGate[]; distance_m: number }> = [];
+    for (const row of rows) {
+      this.cacheGates(row.id, row.payload_json, Number(row.distance_m));
+      const cached = this.gateCache.get(row.id);
+      if (cached) records.push({ trackId: row.id, gates: cached.gates, distance_m: cached.distance_m });
+    }
+    this.trackGateList = records;
+    return records;
   }
 
   /** Paginated leaderboard: every finished run when `allTimes`, otherwise each driver's best. */

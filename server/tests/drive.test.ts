@@ -213,7 +213,9 @@ test('drive signaling rejects unrelated sockets and screen media while allowing 
     dataDir: process.cwd(), channelsSchemaReady: Promise.resolve(),
     db: {
       all: (sql: string, params: unknown[], callback: (error: Error | null, rows: unknown[]) => void) => {
+        if (/FROM drive_tracks\b/.test(sql)) { callback(null, []); return; }
         assert.match(sql, /FROM drive_track_runs/);
+        if (!/ROW_NUMBER|ORDER BY duration_ms/.test(sql)) { callback(null, []); return; }
         const best: unknown[] = [];
         const seen = new Set<string>();
         for (const row of leaderboardRows) {

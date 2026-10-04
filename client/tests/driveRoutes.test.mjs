@@ -17,7 +17,7 @@ after(async () => server?.close())
 const driver = (user_id, longitude = 0) => ({ user_id, latitude: 0, longitude })
 const flush = async () => { for (let i = 0; i < 6; i++) await Promise.resolve() }
 
-function setup(context, { drivers = [driver('a')], joined = true, destination = true } = {}) {
+function setup(context, { drivers = [driver('a')], joined = true, destination = true, personal = false } = {}) {
   context.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'], now: 100000 })
   const transport = reactive({
     isConnected: true, activeConnectionId: 'server-a', currentUser: { id: 'me' },
@@ -27,15 +27,16 @@ function setup(context, { drivers = [driver('a')], joined = true, destination = 
   const locations = ref(drivers)
   const target = ref(destination ? { latitude: 1, longitude: 1, label: 'Target' } : null)
   const admitted = ref(joined)
+  const personalMode = ref(personal)
   const calls = []
-  const requestRoute = (connection, channelId, userId, destination, signal) => new Promise((resolve, reject) => {
-    calls.push({ connection, channelId, userId, destination, signal, resolve, reject, at: Date.now(),
+  const requestRoute = (connection, channelId, userId, destination, signal, requestPersonal) => new Promise((resolve, reject) => {
+    calls.push({ connection, channelId, userId, destination, signal, requestPersonal, resolve, reject, at: Date.now(),
       origin: { ...locations.value.find((entry) => entry.user_id === userId) } })
   })
   const mount = () => {
     const scope = effectScope()
     const result = scope.run(() => useDriveRoutes(transport, () => channel.value,
-      () => locations.value, () => target.value, () => admitted.value, requestRoute))
+      () => locations.value, () => target.value, () => admitted.value, requestRoute, () => personalMode.value))
     context.after(() => scope.stop())
     return { ...result, scope }
   }
@@ -50,7 +51,7 @@ function setup(context, { drivers = [driver('a')], joined = true, destination = 
   }
   const tick = async (ms) => { context.mock.timers.tick(ms); await flush() }
   const advanceTo = (at) => tick(at - Date.now())
-  return { ...result, transport, channel, locations, target, admitted, calls, succeed, tick, advanceTo, mount }
+  return { ...result, transport, channel, locations, target, admitted, personalMode, calls, succeed, tick, advanceTo, mount }
 }
 
 test('starts immediately, limits concurrency to two and prioritizes unattempted drivers', async (context) => {
@@ -79,6 +80,26 @@ test('starts immediately, limits concurrency to two and prioritizes unattempted 
   await state.succeed(4)
   assert.equal(state.routes.value.size, 4)
   assert.equal(state.isRouting.value, false)
+})
+
+test('personal track-start mode plots only the local driver, shared mode plots everyone', async (context) => {
+  const state = setup(context, { drivers: [driver('me'), driver('other')], personal: true })
+  assert.equal(state.calls.length, 1)
+  assert.equal(state.calls[0].userId, 'me')
+  assert.equal(state.calls[0].requestPersonal, true)
+  await state.succeed(0)
+  assert.equal(state.routes.value.size, 1)
+  assert.equal(state.routes.value.has('me'), true)
+  assert.equal(state.routes.value.has('other'), false)
+
+  // Normal shared navigation requests routes for every participant again.
+  state.personalMode.value = false
+  await flush()
+  await state.tick(1100)
+  await state.tick(1100)
+  const shared = state.calls.slice(1)
+  assert.ok(shared.some((call) => call.userId === 'other'))
+  assert.ok(shared.every((call) => call.requestPersonal === false))
 })
 
 test('requires 30m movement and 15s throttle, ignores metadata and refreshes stationary routes at 30s', async (context) => {

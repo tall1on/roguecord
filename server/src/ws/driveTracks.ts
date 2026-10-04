@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
 import { channelsSchemaReady, db } from '../db';
-import { getChannelById, getServer, getUserById, getUserServerRoles } from '../models';
+import { getServer, getUserById, getUserServerRoles } from '../models';
 import { rolesIncludeAdmin } from '../permissions';
 import { DriveTrackError, type DriveTrack, type DriveTrackFix, type DriveTrackRun, type DriveTrackVote } from '../driveTracks';
 import { connectionManager, type ClientConnection } from './connectionManager';
@@ -26,17 +26,24 @@ export const broadcastDriveRun = (channelId: string, run: DriveTrackRun | null):
   driveParticipants.broadcast(channelId, 'drive_track_run_updated', { channel_id: channelId, run });
 };
 
-/** Called after an accepted GPS update: advances checkpoint timing and relays any change to the room. */
-export const observeDriveLocation = async (channelId: string, userId: string, fix: DriveTrackFix): Promise<DriveTrackRun | null> => {
-  const run = await driveTracksStore.observeRun(channelId, userId, fix);
-  if (run) broadcastDriveRun(channelId, run);
-  return run;
+/** Called after an accepted GPS update: auto-starts/advances timing and relays every change to the room. */
+export const observeDriveLocation = async (channelId: string, userId: string, fix: DriveTrackFix): Promise<DriveTrackRun[]> => {
+  const runs = await driveTracksStore.autoTrack(channelId, userId, fix);
+  for (const run of runs) broadcastDriveRun(channelId, run);
+  return runs;
 };
 
-/** Ends an active run when a driver leaves the room or disconnects. */
+/** Ends all of a driver's active runs, e.g. when they explicitly leave the drive channel. */
 export const endDriveTrackRun = async (channelId: string, userId: string): Promise<void> => {
-  const run = await driveTracksStore.endRun(channelId, userId, 'abandoned');
-  if (run) broadcastDriveRun(channelId, run);
+  const runs = await driveTracksStore.endRuns(channelId, userId, 'abandoned');
+  for (const run of runs) broadcastDriveRun(channelId, run);
+};
+
+/** Re-sends every active run in a room, so a reconnecting client restores its in-progress timing. */
+export const broadcastActiveRuns = async (channelId: string): Promise<void> => {
+  await driveTracksStore.expireStaleRuns(channelId);
+  const runs = await driveTracksStore.activeRunsForChannel(channelId);
+  for (const run of runs) broadcastDriveRun(channelId, run);
 };
 
 /** Closes all active runs in a room, e.g. when the drive channel is deleted. */
@@ -55,12 +62,10 @@ const responseTypes: Record<string, string> = {
   drive_track_create: 'drive_track_saved',
   drive_track_update: 'drive_track_saved',
   drive_track_delete: 'drive_track_deleted',
-  drive_track_vote: 'drive_track_vote',
-  drive_track_activate: 'drive_track_run',
-  drive_track_deactivate: 'drive_track_run'
+  drive_track_vote: 'drive_track_vote'
 };
 
-const writeTypes = new Set(['drive_track_create', 'drive_track_update', 'drive_track_delete', 'drive_track_vote', 'drive_track_activate', 'drive_track_deactivate']);
+const writeTypes = new Set(['drive_track_create', 'drive_track_update', 'drive_track_delete', 'drive_track_vote']);
 const limits = new WeakMap<ClientConnection, { at: number; pending: number }>();
 let outstanding = 0;
 
@@ -138,27 +143,6 @@ export const handleDriveTracks = async (client: ClientConnection, type: string, 
       if (!votes) throw new DriveTrackError('Track not found.');
       connectionManager.broadcastToAuthenticated({ type: 'drive_track_vote_updated', payload: { track_id: trackId, ...votes } });
       reply({ track_id: trackId, ...votes });
-      return;
-    }
-
-    if (type === 'drive_track_activate') {
-      if (!channelId || !trackId) throw new DriveTrackError('Track and drive channel are required.');
-      if (!driveParticipants.owns(channelId, client)) throw new DriveTrackError('Join the drive channel before activating a track.');
-      const channel = await getChannelById(channelId);
-      if (!active()) return;
-      if (channel?.type !== 'drive') throw new DriveTrackError('Drive channel not found.');
-      const run = await driveTracksStore.startRun(channelId, trackId, userId!);
-      reply({ run });
-      broadcastDriveRun(channelId, run);
-      return;
-    }
-
-    if (type === 'drive_track_deactivate') {
-      if (!channelId) throw new DriveTrackError('Drive channel is required.');
-      if (!driveParticipants.owns(channelId, client)) throw new DriveTrackError('Join the drive channel before changing the active track.');
-      const run = await driveTracksStore.endRun(channelId, userId!, 'abandoned');
-      reply({ run });
-      broadcastDriveRun(channelId, run);
       return;
     }
 

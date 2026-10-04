@@ -3,8 +3,6 @@ import { computed, onScopeDispose, ref } from 'vue';
 import { useChatStore } from './chat';
 import { useDriveStore } from './drive';
 import {
-  activateDriveTrack,
-  deactivateDriveTrack,
   deleteDriveTrack,
   getDriveTrackLeaderboard,
   isDriveTrack,
@@ -180,33 +178,17 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
     tracks.value = next;
   };
 
-  const activate = async (channelId: string, trackId: string): Promise<boolean> => {
-    lastError.value = null;
-    try {
-      const run = await activateDriveTrack(chatStore, channelId, trackId, new AbortController().signal);
-      const keys = new Map(activeTrackIds.value);
-      keys.set(channelKey(chatStore.activeConnectionId, channelId), trackId);
-      activeTrackIds.value = keys;
-      setRun(run);
-      return true;
-    } catch (error) {
-      lastError.value = error instanceof Error ? error.message : 'Could not activate the track.';
-      return false;
-    }
+  const navigate = (channelId: string, trackId: string): boolean => {
+    const keys = new Map(activeTrackIds.value);
+    keys.set(channelKey(chatStore.activeConnectionId, channelId), trackId);
+    activeTrackIds.value = keys;
+    return true;
   };
 
-  const deactivate = async (channelId: string): Promise<void> => {
-    lastError.value = null;
-    try {
-      await deactivateDriveTrack(chatStore, channelId, new AbortController().signal);
-      const keys = new Map(activeTrackIds.value);
-      keys.delete(channelKey(chatStore.activeConnectionId, channelId));
-      activeTrackIds.value = keys;
-      const currentUserId = chatStore.currentUser?.id;
-      if (currentUserId) clearRun(currentUserId);
-    } catch (error) {
-      lastError.value = error instanceof Error ? error.message : 'Could not deactivate the track.';
-    }
+  const clearNavigation = (channelId: string): void => {
+    const keys = new Map(activeTrackIds.value);
+    keys.delete(channelKey(chatStore.activeConnectionId, channelId));
+    activeTrackIds.value = keys;
   };
 
   const activeTrack = (channelId: string): DriveTrack | null => {
@@ -217,21 +199,25 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
   const activeRun = (channelId: string): DriveTrackRun | null => {
     const currentUserId = chatStore.currentUser?.id;
     if (!currentUserId) return null;
-    const run = runs.value.get(currentUserId);
-    return run && run.channel_id === channelId ? run : null;
+    const own = [...runs.value.values()].filter((run) => run.user_id === currentUserId && run.channel_id === channelId);
+    if (!own.length) return null;
+    const trackId = activeTrackIds.value.get(channelKey(chatStore.activeConnectionId, channelId));
+    const navigated = trackId ? own.find((run) => run.track_id === trackId) : undefined;
+    if (navigated) return navigated;
+    return own.find((run) => run.status === 'active') ?? own.sort((a, b) => b.started_at - a.started_at)[0]!;
   };
 
   const gatesFor = (track: DriveTrack): DriveTrackGate[] => trackGates(track.payload);
 
   const setRun = (run: DriveTrackRun): void => {
     const next = new Map(runs.value);
-    next.set(run.user_id, run);
+    next.set(run.id, run);
     runs.value = next;
   };
 
   const clearRun = (userId: string): void => {
     const next = new Map(runs.value);
-    next.delete(userId);
+    for (const [id, run] of next) if (run.user_id === userId) next.delete(id);
     runs.value = next;
   };
 
@@ -259,11 +245,6 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
           if (board?.best) void loadLeaderboard(payload.run.track_id);
           if (board?.all) void loadLeaderboard(payload.run.track_id, true);
         }
-        if (payload.run.user_id === chatStore.currentUser?.id && payload.run.status !== 'active') {
-          const keys = new Map(activeTrackIds.value);
-          for (const [key, trackId] of keys) if (trackId === payload.run.track_id) keys.delete(key);
-          activeTrackIds.value = keys;
-        }
       }
     } else if (type === 'user_left_voice' && typeof payload?.user_id === 'string') {
       clearRun(payload.user_id);
@@ -278,5 +259,5 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
   chatStore.addMessageListener(handleMessage);
   onScopeDispose(() => chatStore.removeMessageListener(handleMessage));
 
-  return { tracks, trackList, runs, isLoading, isSaving, lastError, load, save, remove, vote, activate, deactivate, activeTrack, activeRun, gatesFor, leaderboards, leaderboardView, loadLeaderboard, loadMoreLeaderboard };
+  return { tracks, trackList, runs, isLoading, isSaving, lastError, load, save, remove, vote, navigate, clearNavigation, activeTrack, activeRun, gatesFor, leaderboards, leaderboardView, loadLeaderboard, loadMoreLeaderboard };
 });

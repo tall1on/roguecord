@@ -126,7 +126,7 @@ test('saving rejects incomplete geometry before contacting the server', async ()
   assert.equal(state.sent.length, 0)
 })
 
-test('voting, deleting and activation round-trip through the protocol', async () => {
+test('voting and deleting round-trip through the protocol', async () => {
   const voteState = makeTransport()
   const voting = driveTracks.voteDriveTrack(voteState.transport, 't1', 1, signal())
   const voteRequest = await answer(voteState, 'drive_track_vote', () => ({ up: 1, down: 0, mine: 1 }))
@@ -138,19 +138,6 @@ test('voting, deleting and activation round-trip through the protocol', async ()
   const deleteRequest = await answer(deleteState, 'drive_track_deleted', () => ({ track_id: 't1', deleted: true }))
   assert.equal(deleteRequest.payload.track_id, 't1')
   await deleting
-
-  const activateState = makeTransport()
-  const activating = driveTracks.activateDriveTrack(activateState.transport, 'ch1', 't1', signal())
-  const activateRequest = await answer(activateState, 'drive_track_run', () => ({ channel_id: 'ch1', run: run() }))
-  assert.equal(activateRequest.type, 'drive_track_activate')
-  assert.equal(activateRequest.payload.channel_id, 'ch1')
-  assert.equal((await activating).channel_id, 'ch1')
-
-  const deactivateState = makeTransport()
-  const deactivating = driveTracks.deactivateDriveTrack(deactivateState.transport, 'ch1', signal())
-  const deactivateRequest = await answer(deactivateState, 'drive_track_run', () => ({ channel_id: 'ch1', run: null }))
-  assert.equal(deactivateRequest.type, 'drive_track_deactivate')
-  await deactivating
 })
 
 test('the generic navigation request helper still gates responses by channel', async () => {
