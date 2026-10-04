@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
-import { ListOrdered, Loader2, RefreshCw, Trophy } from 'lucide-vue-next'
+import { computed, defineAsyncComponent, nextTick, ref, watch } from 'vue'
+import { ListOrdered, Loader2, MapPinned, RefreshCw, Trophy } from 'lucide-vue-next'
 import AppAvatar from '../common/AppAvatar.vue'
 import { useChatStore } from '../../stores/chat'
 import { useDriveTracksStore } from '../../stores/driveTracks'
 import { formatDriveDistance, formatDriveDuration, formatDriveSpeed } from '../../utils/driveTracks'
+
+const TrackViewer = defineAsyncComponent(() => import('./TrackEditor.vue'))
 
 const props = withDefaults(defineProps<{ activeTrackId?: string | null }>(), { activeTrackId: null })
 const chatStore = useChatStore()
@@ -12,6 +14,9 @@ const driveTracksStore = useDriveTracksStore()
 const selectedTrackId = ref<string | null>(null)
 const allTimes = ref(false)
 const scrollContainer = ref<HTMLElement | null>(null)
+const viewTrackOpen = ref(false)
+
+const selectedTrack = computed(() => driveTracksStore.trackList.find((track) => track.id === selectedTrackId.value) ?? null)
 
 const view = computed(() => selectedTrackId.value
   ? driveTracksStore.leaderboardView(selectedTrackId.value, allTimes.value)
@@ -85,6 +90,9 @@ watch([selectedTrackId, allTimes], () => {
       <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors disabled:opacity-40" :class="allTimes ? 'bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25' : 'text-zinc-400 hover:bg-zinc-800 hover:text-white'" :disabled="!selectedTrackId" :aria-pressed="allTimes" :aria-label="allTimes ? 'Show best time per driver' : 'Show all times'" :title="allTimes ? 'Show best time per driver' : 'Show all times'" @click="allTimes = !allTimes">
         <ListOrdered class="h-4 w-4" />
       </button>
+      <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-white disabled:opacity-40" :disabled="!selectedTrackId" aria-label="View the selected track" title="View track" @click="viewTrackOpen = true">
+        <MapPinned class="h-4 w-4" />
+      </button>
       <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-white disabled:opacity-40" :disabled="!selectedTrackId || loading" aria-label="Refresh leaderboard" @click="selectedTrackId && driveTracksStore.loadLeaderboard(selectedTrackId, allTimes)">
         <Loader2 v-if="loading" class="h-4 w-4 animate-spin" /><RefreshCw v-else class="h-4 w-4" />
       </button>
@@ -127,5 +135,6 @@ watch([selectedTrackId, allTimes], () => {
       <p v-else-if="entries.length && !hasMore" class="py-2 text-center text-[11px] text-zinc-600">{{ allTimes ? 'All times loaded' : 'All drivers loaded' }}</p>
       <p v-if="driveTracksStore.lastError" class="mt-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-300" role="alert">{{ driveTracksStore.lastError }}</p>
     </div>
+    <TrackViewer v-if="viewTrackOpen && selectedTrack" :track="selectedTrack" view-only @close="viewTrackOpen = false" />
   </div>
 </template>

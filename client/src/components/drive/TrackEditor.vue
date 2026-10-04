@@ -6,7 +6,7 @@ import { useDriveTracksStore } from '../../stores/driveTracks'
 import type { MapPosition } from '../../utils/driveNavigation'
 import { displayTrackBaseName, trackGates, type DriveTrack, type DriveTrackCheckpoint, type DriveTrackGate } from '../../utils/driveTracks'
 
-const props = defineProps<{ track?: DriveTrack | null }>()
+const props = defineProps<{ track?: DriveTrack | null; viewOnly?: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'saved', track: DriveTrack): void }>()
 const store = useDriveTracksStore()
 
@@ -88,8 +88,9 @@ const syncMap = () => {
     const latLng: [number, number] = [entry.position.latitude, entry.position.longitude]
     let marker = markers.get(entry.key)
     if (!marker) {
-      marker = leaflet.marker(latLng, { icon: gateIcon(entry.gate), draggable: true }).addTo(map.value)
+      marker = leaflet.marker(latLng, { icon: gateIcon(entry.gate), draggable: !props.viewOnly }).addTo(map.value)
       marker.on('drag', () => {
+        if (props.viewOnly) return
         const moved = marker!.getLatLng()
         if (entry.key === 'start') start.value = { latitude: moved.lat, longitude: moved.lng }
         else if (entry.key === 'end') end.value = { latitude: moved.lat, longitude: moved.lng }
@@ -125,6 +126,7 @@ const syncRouteLine = () => {
 }
 
 const handleMapClick = (event: { latlng: { lat: number; lng: number } }) => {
+  if (props.viewOnly) return
   const position = { latitude: event.latlng.lat, longitude: event.latlng.lng }
   if (placing.value === 'start') { start.value = position; placing.value = 'checkpoint' }
   else if (placing.value === 'end') { end.value = position }
@@ -191,55 +193,65 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-0 sm:p-4" role="dialog" aria-modal="true" aria-label="Track editor" @click.self="emit('close')">
+  <div class="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-0 sm:p-4" role="dialog" aria-modal="true" :aria-label="viewOnly ? 'Track view' : 'Track editor'" @click.self="emit('close')">
     <div class="flex h-full max-h-none w-full max-w-5xl flex-col overflow-hidden border border-white/10 bg-zinc-950 shadow-2xl sm:max-h-[880px] sm:rounded-2xl">
       <header class="flex shrink-0 items-center gap-3 border-b border-white/5 px-4 py-3">
         <Route class="h-5 w-5 shrink-0 text-indigo-400" />
         <div class="min-w-0 flex-1">
-          <h2 class="text-sm font-bold text-white">Track editor</h2>
-          <p class="text-xs text-zinc-500">Click the map to set the start, checkpoints and finish. Drag markers to fine-tune.</p>
+          <h2 class="text-sm font-bold text-white">{{ viewOnly ? 'Track view' : 'Track editor' }}</h2>
+          <p class="text-xs text-zinc-500">{{ viewOnly ? 'Planned route with its start, checkpoints and finish.' : 'Click the map to set the start, checkpoints and finish. Drag markers to fine-tune.' }}</p>
         </div>
-        <button type="button" class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-white" aria-label="Close track editor" @click="emit('close')"><X class="h-5 w-5" /></button>
+        <button type="button" class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-white" :aria-label="viewOnly ? 'Close track view' : 'Close track editor'" @click="emit('close')"><X class="h-5 w-5" /></button>
       </header>
       <div class="flex min-h-0 flex-1 flex-col md:flex-row">
         <div class="relative min-h-0 flex-1 md:min-h-72">
-          <div ref="mapElement" class="track-editor-map absolute inset-0" aria-label="Track planning map" />
+          <div ref="mapElement" class="track-editor-map absolute inset-0" :aria-label="viewOnly ? 'Track map' : 'Track planning map'" />
           <p v-if="mapError" class="absolute inset-0 flex items-center justify-center bg-zinc-950/90 p-4 text-center text-sm text-amber-300">{{ mapError }}</p>
           <div class="pointer-events-none absolute left-2 top-2 z-10 rounded-lg bg-zinc-950/80 px-2.5 py-1 text-xs font-semibold text-zinc-200 backdrop-blur">Distance: {{ distanceLabel }}</div>
         </div>
         <aside class="drive-track-scroll flex w-full shrink-0 flex-col gap-3 overflow-y-auto border-t border-white/5 p-3 md:w-80 md:border-l md:border-t-0">
           <div>
             <label for="track-editor-name" class="mb-1 block text-xs font-bold uppercase tracking-wider text-zinc-400">Track name</label>
-            <input id="track-editor-name" v-model="name" type="text" :maxlength="80" :disabled="!!props.track" placeholder="Mountain loop" class="w-full rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-500 focus:border-indigo-400 disabled:opacity-60" />
-            <p v-if="props.track" class="mt-1 text-[11px] text-zinc-500">Saving creates a new version of “{{ displayTrackBaseName(props.track.name) }}” (V{{ props.track.version + 1 }}).</p>
+            <p v-if="viewOnly" class="truncate text-sm font-semibold text-white">{{ name || 'Untitled track' }}</p>
+            <template v-else>
+              <input id="track-editor-name" v-model="name" type="text" :maxlength="80" :disabled="!!props.track" placeholder="Mountain loop" class="w-full rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-500 focus:border-indigo-400 disabled:opacity-60" />
+              <p v-if="props.track" class="mt-1 text-[11px] text-zinc-500">Saving creates a new version of “{{ displayTrackBaseName(props.track.name) }}” (V{{ props.track.version + 1 }}).</p>
+            </template>
+            <p v-if="viewOnly && props.track" class="mt-1 text-[11px] text-zinc-500">Version {{ props.track.version }} · {{ props.track.up }} up · {{ props.track.down }} down</p>
           </div>
-          <div class="grid grid-cols-3 gap-1.5" role="group" aria-label="Placement mode">
+          <div v-if="!viewOnly" class="grid grid-cols-3 gap-1.5" role="group" aria-label="Placement mode">
             <button v-for="mode in placementModes" :key="mode.key" type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold transition-colors" :class="placing === mode.key ? 'bg-indigo-600 text-white' : 'bg-zinc-900 text-zinc-300 hover:bg-zinc-800'" :aria-pressed="placing === mode.key" @click="placing = mode.key">{{ mode.label }}</button>
           </div>
           <div class="space-y-1">
             <div class="flex items-center gap-2 rounded-lg border border-white/10 px-2 py-1.5 text-xs text-zinc-300">
               <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-green-500 text-[10px] font-bold text-white">S</span>
               <span class="min-w-0 flex-1 truncate">{{ start ? `${start.latitude.toFixed(5)}, ${start.longitude.toFixed(5)}` : 'Not set' }}</span>
-              <button v-if="start" type="button" class="rounded p-1 text-zinc-500 hover:text-red-400" aria-label="Remove start" @click="start = null"><Trash2 class="h-3.5 w-3.5" /></button>
+              <button v-if="!viewOnly && start" type="button" class="rounded p-1 text-zinc-500 hover:text-red-400" aria-label="Remove start" @click="start = null"><Trash2 class="h-3.5 w-3.5" /></button>
             </div>
             <div v-for="(checkpoint, index) in checkpoints" :key="checkpoint.id" class="flex items-center gap-2 rounded-lg border border-white/10 px-2 py-1.5 text-xs text-zinc-300">
               <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-indigo-400 text-[10px] font-bold text-white">{{ index + 1 }}</span>
-              <span class="min-w-0 flex-1 truncate">{{ checkpoint.latitude.toFixed(5) }}, {{ checkpoint.longitude.toFixed(5) }}</span>
-              <button type="button" class="rounded p-1 text-zinc-500 hover:text-white disabled:opacity-30" :disabled="index === 0" aria-label="Move checkpoint up" @click="moveCheckpoint(index, -1)"><ChevronUp class="h-3.5 w-3.5" /></button>
-              <button type="button" class="rounded p-1 text-zinc-500 hover:text-white disabled:opacity-30" :disabled="index === checkpoints.length - 1" aria-label="Move checkpoint down" @click="moveCheckpoint(index, 1)"><ChevronDown class="h-3.5 w-3.5" /></button>
-              <button type="button" class="rounded p-1 text-zinc-500 hover:text-red-400" aria-label="Remove checkpoint" @click="removeCheckpoint(checkpoint.id)"><Trash2 class="h-3.5 w-3.5" /></button>
+              <span class="min-w-0 flex-1 truncate">{{ viewOnly && checkpoint.name ? checkpoint.name : `${checkpoint.latitude.toFixed(5)}, ${checkpoint.longitude.toFixed(5)}` }}</span>
+              <template v-if="!viewOnly">
+                <button type="button" class="rounded p-1 text-zinc-500 hover:text-white disabled:opacity-30" :disabled="index === 0" aria-label="Move checkpoint up" @click="moveCheckpoint(index, -1)"><ChevronUp class="h-3.5 w-3.5" /></button>
+                <button type="button" class="rounded p-1 text-zinc-500 hover:text-white disabled:opacity-30" :disabled="index === checkpoints.length - 1" aria-label="Move checkpoint down" @click="moveCheckpoint(index, 1)"><ChevronDown class="h-3.5 w-3.5" /></button>
+                <button type="button" class="rounded p-1 text-zinc-500 hover:text-red-400" aria-label="Remove checkpoint" @click="removeCheckpoint(checkpoint.id)"><Trash2 class="h-3.5 w-3.5" /></button>
+              </template>
             </div>
             <div class="flex items-center gap-2 rounded-lg border border-white/10 px-2 py-1.5 text-xs text-zinc-300">
               <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-500 text-[10px] font-bold text-white">F</span>
               <span class="min-w-0 flex-1 truncate">{{ end ? `${end.latitude.toFixed(5)}, ${end.longitude.toFixed(5)}` : 'Not set' }}</span>
-              <button v-if="end" type="button" class="rounded p-1 text-zinc-500 hover:text-red-400" aria-label="Remove finish" @click="end = null"><Trash2 class="h-3.5 w-3.5" /></button>
+              <button v-if="!viewOnly && end" type="button" class="rounded p-1 text-zinc-500 hover:text-red-400" aria-label="Remove finish" @click="end = null"><Trash2 class="h-3.5 w-3.5" /></button>
             </div>
           </div>
-          <button type="button" class="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-800" @click="clearAll"><Trash2 class="h-3.5 w-3.5" /> Clear all points</button>
+          <button v-if="!viewOnly" type="button" class="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-800" @click="clearAll"><Trash2 class="h-3.5 w-3.5" /> Clear all points</button>
           <p v-if="checkpoints.length" class="text-[11px] text-zinc-500">{{ checkpoints.length }} checkpoint{{ checkpoints.length === 1 ? '' : 's' }} between start and finish.</p>
         </aside>
       </div>
-      <footer class="flex shrink-0 items-center gap-2 border-t border-white/5 px-4 py-3">
+      <footer v-if="viewOnly" class="flex shrink-0 items-center gap-2 border-t border-white/5 px-4 py-3">
+        <span class="min-w-0 flex-1 text-xs text-zinc-500"><MapPin class="mr-1 inline h-3.5 w-3.5" />{{ gates.length }} gates · {{ distanceLabel }}</span>
+        <button type="button" class="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500" @click="emit('close')">Close</button>
+      </footer>
+      <footer v-else class="flex shrink-0 items-center gap-2 border-t border-white/5 px-4 py-3">
         <p v-if="error" class="min-w-0 flex-1 truncate text-xs text-red-400" role="alert">{{ error }}</p>
         <span v-else class="min-w-0 flex-1 text-xs text-zinc-500"><MapPin class="mr-1 inline h-3.5 w-3.5" />{{ props.track ? 'Editing creates a clone with the next version number.' : 'Shared tracks can be voted on and navigated by everyone; times start at the start gate.' }}</span>
         <button type="button" class="rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-zinc-800" @click="emit('close')">Cancel</button>
