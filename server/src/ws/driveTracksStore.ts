@@ -6,6 +6,7 @@ import {
   displayTrackName,
   DriveTrackError,
   GATE_MAX_ACCURACY_M,
+  GATE_MAX_SPEED_MPS,
   gateRadiusMeters,
   haversineMeters,
   normalizeTrackName,
@@ -13,6 +14,7 @@ import {
   trackDistanceMeters,
   trackGates,
   trackMaxDurationMs,
+  validTrackCoordinates,
   type DriveTrack,
   type DriveTrackFix,
   type DriveTrackGate,
@@ -79,6 +81,7 @@ type RunRow = {
   distance_m: number;
   duration_ms: number | null;
   avg_speed_mps: number | null;
+  max_speed_mps: number | null;
   status: DriveTrackRunStatus;
   updated_at: number;
 };
@@ -156,6 +159,7 @@ export class DriveTracksStore {
       distance_m: Number(row.distance_m),
       duration_ms: row.duration_ms === null || row.duration_ms === undefined ? null : Number(row.duration_ms),
       avg_speed_mps: row.avg_speed_mps === null || row.avg_speed_mps === undefined ? null : Number(row.avg_speed_mps),
+      max_speed_mps: row.max_speed_mps === null || row.max_speed_mps === undefined ? null : Number(row.max_speed_mps),
       status: row.status,
       updated_at: Number(row.updated_at)
     };
@@ -167,6 +171,7 @@ export class DriveTracksStore {
       run_id: row.id,
       duration_ms: Number(row.duration_ms),
       avg_speed_mps: row.avg_speed_mps === null || row.avg_speed_mps === undefined ? null : Number(row.avg_speed_mps),
+      max_speed_mps: row.max_speed_mps === null || row.max_speed_mps === undefined ? null : Number(row.max_speed_mps),
       distance_m: Number(row.distance_m),
       finished_at: Number(row.finished_at)
     };
@@ -435,22 +440,40 @@ export class DriveTracksStore {
     return updated ? this.toRun(updated) : null;
   }
 
+  private recordableSpeed(run: DriveTrackRun, fix: DriveTrackFix): number | null {
+    if (!validTrackCoordinates(fix)) return null;
+    const accuracy = fix.accuracy;
+    if (typeof accuracy !== 'number' || !Number.isFinite(accuracy) || accuracy < 0 || accuracy > GATE_MAX_ACCURACY_M) return null;
+    const speed = fix.speed;
+    if (typeof speed !== 'number' || !Number.isFinite(speed) || speed < 0 || speed > GATE_MAX_SPEED_MPS) return null;
+    const rounded = Math.round(speed * 100) / 100;
+    return rounded > (run.max_speed_mps ?? 0) ? rounded : null;
+  }
+
   private async advanceRunRecord(run: DriveTrackRun, gates: readonly DriveTrackGate[], fix: DriveTrackFix, now: number): Promise<DriveTrackRun | null> {
+    // Peak speed is sampled from every accepted fix, even between gates.
+    const recordedSpeed = this.recordableSpeed(run, fix);
     const result = advanceRun(
       { nextGate: run.next_gate, gateTimes: run.gate_times, status: 'active', finishedAt: null },
       gates,
       fix,
       now
     );
-    if (!result) return null;
+    if (!result) {
+      if (recordedSpeed !== null) {
+        await this.execute('UPDATE drive_track_runs SET max_speed_mps = ?, updated_at = ? WHERE id = ?', [recordedSpeed, now, run.id]);
+      }
+      return null;
+    }
     const finished = result.progress.status === 'finished';
     const finishedAt = result.progress.finishedAt;
     // Timing starts at the start gate, not when the run was created, so approach is not counted.
     const startedAt = result.progress.gateTimes[0] ?? run.started_at;
     const stats = finished ? computeRunStats(run.distance_m, startedAt, finishedAt) : { duration_ms: null, avg_speed_mps: null };
+    const maxSpeed = recordedSpeed ?? run.max_speed_mps ?? null;
     await this.execute(
-      'UPDATE drive_track_runs SET next_gate = ?, gate_times_json = ?, status = ?, finished_at = ?, duration_ms = ?, avg_speed_mps = ?, updated_at = ? WHERE id = ?',
-      [result.progress.nextGate, JSON.stringify(result.progress.gateTimes), result.progress.status, finishedAt, stats.duration_ms, stats.avg_speed_mps, now, run.id]
+      'UPDATE drive_track_runs SET next_gate = ?, gate_times_json = ?, status = ?, finished_at = ?, duration_ms = ?, avg_speed_mps = ?, max_speed_mps = ?, updated_at = ? WHERE id = ?',
+      [result.progress.nextGate, JSON.stringify(result.progress.gateTimes), result.progress.status, finishedAt, stats.duration_ms, stats.avg_speed_mps, maxSpeed, now, run.id]
     );
     const updated = await this.queryOne<RunRow>('SELECT * FROM drive_track_runs WHERE id = ?', [run.id]);
     return updated ? this.toRun(updated) : null;

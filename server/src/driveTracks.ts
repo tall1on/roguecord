@@ -40,6 +40,7 @@ export type DriveTrackRun = {
   distance_m: number;
   duration_ms: number | null;
   avg_speed_mps: number | null;
+  max_speed_mps: number | null;
   status: DriveTrackRunStatus;
   updated_at: number;
 };

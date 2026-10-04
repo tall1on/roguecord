@@ -37,6 +37,7 @@ export type DriveTrackRun = {
   distance_m: number;
   duration_ms: number | null;
   avg_speed_mps: number | null;
+  max_speed_mps: number | null;
   status: DriveTrackRunStatus;
   updated_at: number;
 };
@@ -52,6 +53,7 @@ export type DriveTrackLeaderboardEntry = {
   run_id: string;
   duration_ms: number;
   avg_speed_mps: number | null;
+  max_speed_mps: number | null;
   distance_m: number;
   finished_at: number;
 };
@@ -123,6 +125,7 @@ export const isDriveTrackRun = (value: unknown): value is DriveTrackRun => {
     && typeof run.distance_m === 'number'
     && (run.duration_ms === null || typeof run.duration_ms === 'number')
     && (run.avg_speed_mps === null || typeof run.avg_speed_mps === 'number')
+    && (run.max_speed_mps === null || typeof run.max_speed_mps === 'number')
     && (run.status === 'active' || run.status === 'finished' || run.status === 'abandoned');
 };
 
@@ -138,6 +141,7 @@ export const isDriveTrackLeaderboardEntry = (value: unknown): value is DriveTrac
     && typeof entry.run_id === 'string' && entry.run_id.length > 0
     && typeof entry.duration_ms === 'number' && Number.isFinite(entry.duration_ms) && entry.duration_ms > 0
     && (entry.avg_speed_mps === null || (typeof entry.avg_speed_mps === 'number' && Number.isFinite(entry.avg_speed_mps) && entry.avg_speed_mps >= 0))
+    && (entry.max_speed_mps === null || (typeof entry.max_speed_mps === 'number' && Number.isFinite(entry.max_speed_mps) && entry.max_speed_mps >= 0))
     && typeof entry.distance_m === 'number' && Number.isFinite(entry.distance_m) && entry.distance_m >= 0
     && typeof entry.finished_at === 'number' && Number.isFinite(entry.finished_at);
 };
