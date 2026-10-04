@@ -99,7 +99,19 @@ export function useDriveRoutes(
     wake = undefined;
     scheduled.value = false;
     if (!active()) return;
+    const personal = getPersonal();
+    const selfId = transport.currentUser?.id ?? null;
     const drivers = new Map(getLocations().map((driver) => [driver.user_id, driver]));
+    // Personal routes (e.g. heading to a track start) are per-user and unsynced, so only the
+    // local driver's route is plotted; never draw them for other participants.
+    if (personal) {
+      for (const userId of [...drivers.keys()]) {
+        if (userId === selfId) continue;
+        if (pending.has(userId)) cancel(userId);
+        routes.value.delete(userId);
+        routeErrors.value.delete(userId);
+      }
+    }
     for (const userId of attempts.keys()) {
       if (!drivers.has(userId)) {
         cancel(userId);
@@ -110,6 +122,7 @@ export function useDriveRoutes(
     }
     const now = Date.now();
     const eligible = [...drivers.values()].filter((driver) => {
+      if (personal && driver.user_id !== selfId) return false;
       if (pending.has(driver.user_id)) return false;
       const attempt = attempts.get(driver.user_id);
       if (!attempt || attempt.rateLimited) return true;

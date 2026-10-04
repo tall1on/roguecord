@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { ListOrdered, Loader2, RefreshCw, Trophy } from 'lucide-vue-next'
+import AppAvatar from '../common/AppAvatar.vue'
 import { useChatStore } from '../../stores/chat'
 import { useDriveTracksStore } from '../../stores/driveTracks'
 import { formatDriveDistance, formatDriveDuration, formatDriveSpeed } from '../../utils/driveTracks'
@@ -20,6 +21,18 @@ const loading = computed(() => view.value?.loading ?? false)
 const loadingMore = computed(() => view.value?.loadingMore ?? false)
 const hasMore = computed(() => view.value?.hasMore ?? false)
 const username = (userId: string) => chatStore.users.find((user) => user.id === userId)?.username ?? 'Driver'
+// Prefer the driver (car) image, then the profile picture, then the local unsynced copy.
+const avatarUrlFor = (userId: string): string | null => {
+  if (userId === chatStore.currentUser?.id) {
+    return chatStore.getLocalDriverAvatar()
+      ?? chatStore.currentUser?.driver_avatar_url
+      ?? chatStore.currentUser?.avatar_url
+      ?? chatStore.getLocalAvatar()
+      ?? null
+  }
+  const user = chatStore.users.find((entry) => entry.id === userId)
+  return user?.driver_avatar_url ?? user?.avatar_url ?? null
+}
 const finishedLabel = (at: number) => new Date(at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 const rankClass = (index: number) => index === 0
   ? 'bg-amber-400 text-black'
@@ -83,6 +96,7 @@ watch([selectedTrackId, allTimes], () => {
       <ol v-else class="space-y-1.5" :aria-label="allTimes ? 'All finished times' : 'Best times per driver'">
         <li v-for="(entry, index) in entries" :key="entry.run_id" class="flex items-center gap-3 rounded-lg border px-3 py-2" :class="entry.user_id === chatStore.currentUser?.id ? 'border-indigo-500/40 bg-indigo-500/10' : 'border-white/10 bg-zinc-900/70'">
           <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold tabular-nums" :class="rankClass(index)">{{ index + 1 }}</span>
+          <AppAvatar :src="avatarUrlFor(entry.user_id)" :fallback="username(entry.user_id)" :alt="username(entry.user_id)" wrapper-class="flex h-8 w-8 shrink-0 items-center justify-center overflow-visible rounded-full bg-indigo-500/20 text-[11px] font-bold text-indigo-200" image-class="h-full w-full rounded-full object-cover" />
           <div class="min-w-0 flex-1">
             <p class="truncate text-sm font-semibold text-white">{{ username(entry.user_id) }}<span v-if="entry.user_id === chatStore.currentUser?.id" class="text-indigo-300"> (you)</span></p>
             <p class="text-[11px] text-zinc-500">{{ formatDriveDistance(entry.distance_m) }} · {{ finishedLabel(entry.finished_at) }}</p>

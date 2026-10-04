@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Pencil, Play, Route, Square, ThumbsDown, ThumbsUp, Trash2 } from 'lucide-vue-next'
+import { Navigation, Pencil, Route, ThumbsDown, ThumbsUp, Trash2, X } from 'lucide-vue-next'
 import { useChatStore } from '../../stores/chat'
 import type { DriveTrack, DriveTrackVote } from '../../utils/driveTracks'
 
@@ -16,8 +16,8 @@ const emit = defineEmits<{
   (e: 'edit', track: DriveTrack): void
   (e: 'delete', track: DriveTrack): void
   (e: 'vote', track: DriveTrack, value: DriveTrackVote | 0): void
-  (e: 'activate', track: DriveTrack): void
-  (e: 'deactivate'): void
+  (e: 'navigate', track: DriveTrack): void
+  (e: 'clear-navigation'): void
 }>()
 
 const chatStore = useChatStore()
@@ -45,8 +45,8 @@ const toggleVote = (track: DriveTrack, value: DriveTrackVote) => emit('vote', tr
       </div>
       <div v-if="showActions || canDelete" class="mt-2 flex flex-wrap items-center gap-1.5">
         <template v-if="showActions">
-          <button v-if="activeTrackId === track.id" type="button" class="inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-500" :disabled="busy" @click="emit('deactivate')"><Square class="h-3.5 w-3.5" /> Deactivate</button>
-          <button v-else type="button" class="inline-flex items-center gap-1 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-200 hover:bg-zinc-800" :disabled="busy" @click="emit('activate', track)"><Play class="h-3.5 w-3.5" /> Activate</button>
+          <button v-if="activeTrackId === track.id" type="button" class="inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-500" :disabled="busy" @click="emit('clear-navigation')"><X class="h-3.5 w-3.5" /> Stop navigation</button>
+          <button v-else type="button" class="inline-flex items-center gap-1 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-200 hover:bg-zinc-800" :disabled="busy" @click="emit('navigate', track)"><Navigation class="h-3.5 w-3.5" /> Navigate</button>
         </template>
         <button type="button" class="inline-flex items-center gap-1 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-200 hover:bg-zinc-800" :disabled="busy" :title="`Edit creates a new version of ${track.name}`" @click="emit('edit', track)"><Pencil class="h-3.5 w-3.5" /> Edit (clone)</button>
         <button v-if="canDelete" type="button" class="inline-flex items-center gap-1 rounded-lg border border-red-500/30 px-3 py-2 text-xs font-semibold text-red-300 hover:bg-red-500/10" :disabled="busy" @click="emit('delete', track)"><Trash2 class="h-3.5 w-3.5" /> Delete</button>

@@ -243,18 +243,3 @@ export const voteDriveTrack = async (
     || (response.mine !== 1 && response.mine !== -1 && response.mine !== 0)) throw new Error('The server returned an invalid vote result.');
   return { up: response.up, down: response.down, mine: response.mine };
 };
-
-export const activateDriveTrack = async (
-  transport: DriveNavigationTransport, channelId: string, trackId: string, signal: AbortSignal
-): Promise<DriveTrackRun> => {
-  const response = await requestDriveMessage(transport, 'drive_track_activate', 'drive_track_run', channelId, { track_id: trackId }, signal, 15000);
-  if (!isDriveTrackRun(response.run)) throw new Error('The server returned an invalid track run.');
-  return response.run;
-};
-
-export const deactivateDriveTrack = async (
-  transport: DriveNavigationTransport, channelId: string, signal: AbortSignal
-): Promise<void> => {
-  const response = await requestDriveMessage(transport, 'drive_track_deactivate', 'drive_track_run', channelId, {}, signal, 15000);
-  if (response.run !== null && !isDriveTrackRun(response.run)) throw new Error('The server returned an invalid track run.');
-};

@@ -160,6 +160,16 @@ export function gateRadiusMeters(accuracy: number): number {
   return Math.min(GATE_MAX_RADIUS_M, Math.max(GATE_MIN_RADIUS_M, scaled));
 }
 
+// Automatic runs time out when they take longer than a slow but plausible pace could cover the track.
+export const TRACK_TIMEOUT_MIN_MS = 60000;
+export const TRACK_MIN_AVG_SPEED_MPS = 1;
+export const TRACK_TIMEOUT_MULTIPLIER = 2;
+
+export function trackMaxDurationMs(distanceMeters: number): number {
+  if (!Number.isFinite(distanceMeters) || distanceMeters <= 0) return TRACK_TIMEOUT_MIN_MS;
+  return Math.max(TRACK_TIMEOUT_MIN_MS, (distanceMeters / TRACK_MIN_AVG_SPEED_MPS) * 1000 * TRACK_TIMEOUT_MULTIPLIER);
+}
+
 /**
  * Advances a run by exactly one gate when the fix is inside the leeway of the *next expected*
  * gate. Ordering, a minimum inter-gate interval and a physical speed ceiling keep GPS glitches

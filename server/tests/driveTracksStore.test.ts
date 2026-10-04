@@ -211,7 +211,53 @@ test('leaderboard paginates each driver\'s best time and every finished run', as
   assert.equal(driversSecondPage.has_more, false);
 });
 
-test('starting a new run abandons the previous one and leaving closes active runs', async (t) => {
+test('auto tracking starts at start gates, runs multiple tracks and expires slow runs', async (t) => {
+  const { db, store, setClock } = await setup();
+  t.after(() => db.close());
+  const track = await store.createTrack('owner', input());
+
+  // A fix far from any start does nothing.
+  setClock(1000);
+  assert.deepEqual(await store.autoTrack('room', 'driver', { latitude: 1, longitude: 1, accuracy: 10 }), []);
+  assert.equal(await store.getActiveRun('room', 'driver'), null);
+
+  // Crossing a start gate auto-starts and immediately credits the start.
+  setClock(2000);
+  const started = await store.autoTrack('room', 'driver', { latitude: 0, longitude: 0, accuracy: 10 });
+  assert.equal(started.length, 1);
+  assert.equal(started[0]!.next_gate, 1);
+  assert.deepEqual(started[0]!.gate_times, [2000]);
+
+  // The cooldown suppresses a duplicate run while lingering on the start.
+  setClock(3000);
+  assert.deepEqual(await store.autoTrack('room', 'driver', { latitude: 0, longitude: 0, accuracy: 10 }), []);
+
+  // Checkpoints and finish advance automatically with no manual activation.
+  setClock(4000);
+  assert.equal((await store.autoTrack('room', 'driver', { latitude: 0, longitude: 0.001, accuracy: 10 }))[0]?.next_gate, 2);
+  setClock(6000);
+  const finished = await store.autoTrack('room', 'driver', { latitude: 0, longitude: 0.002, accuracy: 10 });
+  assert.equal(finished[0]!.status, 'finished');
+  assert.equal(finished[0]!.duration_ms, 4000);
+
+  // Two tracks sharing a start gate run concurrently for the same driver.
+  const twin = await store.createTrack('owner', input('Twin'));
+  setClock(10000);
+  const concurrent = await store.autoTrack('room', 'rider', { latitude: 0, longitude: 0, accuracy: 10 });
+  assert.equal(concurrent.length, 2);
+  assert.deepEqual(concurrent.map((run) => run.track_id).sort(), [track.id, twin.id].sort());
+
+  // A run that exceeds the slowest plausible pace is abandoned on the next sweep.
+  setClock(20000);
+  await store.startRun('idle', track.id, 'slow');
+  setClock(20000 + 600000);
+  const expired = await store.autoTrack('idle', 'slow', { latitude: 1, longitude: 1, accuracy: 10 });
+  assert.equal(expired.length, 1);
+  assert.equal(expired[0]!.status, 'abandoned');
+  assert.equal(await store.getActiveRun('idle', 'slow'), null);
+});
+
+test('starting a run replaces only the same track and channel cleanup ends the rest', async (t) => {
   const { db, store, setClock } = await setup();
   t.after(() => db.close());
   const first = await store.createTrack('owner', input());
@@ -219,18 +265,27 @@ test('starting a new run abandons the previous one and leaving closes active run
   setClock(1000);
   await store.startRun('room', first.id, 'driver');
   setClock(5000);
-  const restarted = await store.startRun('room', second.id, 'driver');
-  assert.equal(restarted.track_id, second.id);
-  assert.equal(restarted.next_gate, 0);
+  const concurrent = await store.startRun('room', second.id, 'driver');
+  assert.equal(concurrent.track_id, second.id);
+  assert.equal(concurrent.next_gate, 0);
+  // Starting a different track keeps the first run alive so multiple tracks can be driven at once.
+  const concurrentRuns = await store.getActiveRuns('room', 'driver');
+  assert.deepEqual(concurrentRuns.map((run) => run.track_id).sort(), [first.id, second.id].sort());
 
   setClock(8000);
+  const restarted = await store.startRun('room', first.id, 'driver');
+  assert.equal(restarted.track_id, first.id);
+  assert.deepEqual((await store.getActiveRuns('room', 'driver')).map((run) => run.track_id).sort(), [first.id, second.id].sort());
+
+  setClock(9000);
   const ended = await store.endRun('room', 'driver');
   assert.equal(ended?.status, 'abandoned');
   // The run never reached the start gate, so no time is recorded.
   assert.equal(ended?.duration_ms, null);
   assert.equal(ended?.avg_speed_mps, null);
+  assert.equal(await store.getActiveRun('room', 'driver'), null);
 
-  setClock(9000);
+  setClock(10000);
   await store.startRun('room', first.id, 'driver');
   await store.abandonRunsForChannel('room');
   assert.equal(await store.getActiveRun('room', 'driver'), null);
