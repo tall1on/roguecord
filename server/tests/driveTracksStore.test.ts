@@ -145,7 +145,7 @@ test('abandoning after the start gate records time from the start gate', async (
   assert.equal(ended?.duration_ms, 4000);
 });
 
-test('leaderboard defaults to each driver\'s best time and can return every finished run', async (t) => {
+test('leaderboard paginates each driver\'s best time and every finished run', async (t) => {
   const { db, store, setClock } = await setup();
   t.after(() => db.close());
   const track = await store.createTrack('owner', input());
@@ -160,6 +160,7 @@ test('leaderboard defaults to each driver\'s best time and can return every fini
     const result = await store.observeRun('room', userId, { latitude: 0, longitude: 0.002, accuracy: 10 });
     assert.equal(result?.status, 'finished');
   };
+  // Two finished runs for alice prove runs are appended, not overwritten.
   await finish('alice', [1000, 2000, 4000, 8000]);
   await finish('bob', [10000, 11000, 13000, 17000]);
   await finish('alice', [20000, 21000, 23000, 25000]);
@@ -167,24 +168,47 @@ test('leaderboard defaults to each driver\'s best time and can return every fini
   await store.startRun('room', track.id, 'carol');
 
   const board = await store.leaderboard(track.id);
-  assert.deepEqual(board.map((entry) => entry.user_id), ['alice', 'bob']);
+  assert.deepEqual(board.entries.map((entry) => entry.user_id), ['alice', 'bob']);
+  assert.equal(board.total, 2);
+  assert.equal(board.has_more, false);
   // Alice's 4s run beats her earlier 6s run; carol never finished and is excluded.
-  assert.equal(board[0]!.duration_ms, 4000);
-  assert.equal(board[1]!.duration_ms, 6000);
-  assert.ok(board.every((entry) => entry.avg_speed_mps !== null && entry.avg_speed_mps > 0));
-  assert.equal(await store.leaderboard('missing').then((entries) => entries.length), 0);
+  assert.equal(board.entries[0]!.duration_ms, 4000);
+  assert.equal(board.entries[1]!.duration_ms, 6000);
+  assert.ok(board.entries.every((entry) => entry.avg_speed_mps !== null && entry.avg_speed_mps > 0));
+  assert.equal((await store.leaderboard('missing')).entries.length, 0);
 
-  const allTimes = await store.leaderboard(track.id, true);
-  assert.deepEqual(allTimes.slice(0, 3).map((entry) => entry.user_id), ['alice', 'alice', 'bob']);
-  assert.deepEqual(allTimes.slice(0, 3).map((entry) => entry.duration_ms), [4000, 6000, 6000]);
+  const allTimes = await store.leaderboard(track.id, { allTimes: true });
+  assert.deepEqual(allTimes.entries.map((entry) => entry.user_id), ['alice', 'alice', 'bob']);
+  assert.equal(new Set(allTimes.entries.map((entry) => entry.run_id)).size, 3);
+  assert.equal(allTimes.total, 3);
+  assert.equal(allTimes.has_more, false);
 
   const extraRuns = Array.from({ length: 501 }, (_, index) =>
     `('bulk-${index}', '${track.id}', 'bulk-driver', 'room', 1000, ${20000 + index}, 3, 3, '[]', 222, ${10000 + index}, 22.2, 'finished', ${20000 + index})`
   ).join(',');
   await run(db, `INSERT INTO drive_track_runs (id, track_id, user_id, channel_id, started_at, finished_at, next_gate, gates_total, gate_times_json, distance_m, duration_ms, avg_speed_mps, status, updated_at) VALUES ${extraRuns}`);
-  const unlimitedTimes = await store.leaderboard(track.id, true);
-  assert.equal(unlimitedTimes.length, 504);
-  assert.equal(unlimitedTimes.filter((entry) => entry.user_id === 'bulk-driver').length, 501);
+  const firstPage = await store.leaderboard(track.id, { allTimes: true });
+  assert.equal(firstPage.entries.length, 50);
+  assert.equal(firstPage.total, 504);
+  assert.equal(firstPage.has_more, true);
+  const lastPage = await store.leaderboard(track.id, { allTimes: true, offset: 500 });
+  assert.equal(lastPage.entries.length, 4);
+  assert.equal(lastPage.has_more, false);
+  assert.equal((await store.leaderboard(track.id, { allTimes: true, offset: 501 })).entries.length, 3);
+
+  // Best-per-driver mode also paginates when there are more drivers than one page.
+  const second = await store.createTrack('owner', input('Paginated'));
+  const pagedRuns = Array.from({ length: 60 }, (_, index) =>
+    `('page-${index}', '${second.id}', 'driver-${index}', 'room', 1000, ${30000 + index}, 3, 3, '[]', 222, ${20000 + index}, 22.2, 'finished', ${30000 + index})`
+  ).join(',');
+  await run(db, `INSERT INTO drive_track_runs (id, track_id, user_id, channel_id, started_at, finished_at, next_gate, gates_total, gate_times_json, distance_m, duration_ms, avg_speed_mps, status, updated_at) VALUES ${pagedRuns}`);
+  const driversFirstPage = await store.leaderboard(second.id);
+  assert.equal(driversFirstPage.entries.length, 50);
+  assert.equal(driversFirstPage.total, 60);
+  assert.equal(driversFirstPage.has_more, true);
+  const driversSecondPage = await store.leaderboard(second.id, { offset: 50 });
+  assert.equal(driversSecondPage.entries.length, 10);
+  assert.equal(driversSecondPage.has_more, false);
 });
 
 test('starting a new run abandons the previous one and leaving closes active runs', async (t) => {

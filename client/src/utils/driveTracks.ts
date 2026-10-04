@@ -182,18 +182,31 @@ export const listDriveTracks = async (transport: DriveNavigationTransport, signa
   return response.tracks;
 };
 
+export const DRIVE_TRACK_LEADERBOARD_PAGE_SIZE = 50;
+
+export type DriveTrackLeaderboardPage = {
+  entries: DriveTrackLeaderboardEntry[];
+  total: number;
+  hasMore: boolean;
+};
+
 export const getDriveTrackLeaderboard = async (
-  transport: DriveNavigationTransport, trackId: string, signal: AbortSignal, allTimes = false
-): Promise<DriveTrackLeaderboardEntry[]> => {
+  transport: DriveNavigationTransport, trackId: string, signal: AbortSignal,
+  options: { allTimes?: boolean; offset?: number } = {}
+): Promise<DriveTrackLeaderboardPage> => {
+  const allTimes = options.allTimes === true;
+  const offset = Number.isFinite(options.offset) ? Math.max(0, Math.trunc(options.offset as number)) : 0;
   const response = await requestDriveMessage(
     transport, 'drive_track_leaderboard', 'drive_track_leaderboard', null,
-    { track_id: trackId, all_times: allTimes }, signal, allTimes ? 60000 : 15000
+    { track_id: trackId, all_times: allTimes, offset }, signal, allTimes ? 60000 : 15000
   );
-  if (!Array.isArray(response.entries) || (!allTimes && response.entries.length > 200)
-    || response.entries.some((entry: unknown) => !isDriveTrackLeaderboardEntry(entry))) {
+  if (!Array.isArray(response.entries) || response.entries.length > DRIVE_TRACK_LEADERBOARD_PAGE_SIZE
+    || response.entries.some((entry: unknown) => !isDriveTrackLeaderboardEntry(entry))
+    || typeof response.total !== 'number' || !Number.isFinite(response.total) || response.total < 0
+    || typeof response.has_more !== 'boolean') {
     throw new Error('The server returned an invalid leaderboard.');
   }
-  return response.entries;
+  return { entries: response.entries, total: Number(response.total), hasMore: response.has_more };
 };
 
 export const saveDriveTrack = async (

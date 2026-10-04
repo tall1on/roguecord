@@ -101,7 +101,9 @@ export const handleDriveTracks = async (client: ClientConnection, type: string, 
 
     if (type === 'drive_track_leaderboard') {
       if (!trackId) throw new DriveTrackError('Track identifier is required.');
-      reply({ track_id: trackId, entries: await driveTracksStore.leaderboard(trackId, payload.all_times === true) });
+      const offset = typeof payload.offset === 'number' && Number.isInteger(payload.offset) && payload.offset >= 0 ? payload.offset : 0;
+      const page = await driveTracksStore.leaderboard(trackId, { allTimes: payload.all_times === true, offset });
+      reply({ track_id: trackId, offset, ...page });
       return;
     }
 
