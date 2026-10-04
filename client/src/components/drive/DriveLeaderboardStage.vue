@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { ListOrdered, Loader2, RefreshCw, Trophy } from 'lucide-vue-next'
 import { useChatStore } from '../../stores/chat'
 import { useDriveTracksStore } from '../../stores/driveTracks'
@@ -10,10 +10,15 @@ const chatStore = useChatStore()
 const driveTracksStore = useDriveTracksStore()
 const selectedTrackId = ref<string | null>(null)
 const allTimes = ref(false)
+const scrollContainer = ref<HTMLElement | null>(null)
 
-const entries = computed(() => selectedTrackId.value
-  ? driveTracksStore.leaderboards.get(selectedTrackId.value)?.[allTimes.value ? 'all' : 'best'] ?? []
-  : [])
+const view = computed(() => selectedTrackId.value
+  ? driveTracksStore.leaderboardView(selectedTrackId.value, allTimes.value)
+  : null)
+const entries = computed(() => view.value?.entries ?? [])
+const loading = computed(() => view.value?.loading ?? false)
+const loadingMore = computed(() => view.value?.loadingMore ?? false)
+const hasMore = computed(() => view.value?.hasMore ?? false)
 const username = (userId: string) => chatStore.users.find((user) => user.id === userId)?.username ?? 'Driver'
 const finishedLabel = (at: number) => new Date(at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 const rankClass = (index: number) => index === 0
@@ -23,6 +28,22 @@ const rankClass = (index: number) => index === 0
     : index === 2
       ? 'bg-orange-500 text-white'
       : 'bg-zinc-800 text-zinc-300'
+
+const requestMore = () => {
+  if (selectedTrackId.value) driveTracksStore.loadMoreLeaderboard(selectedTrackId.value, allTimes.value)
+}
+const onScroll = () => {
+  const element = scrollContainer.value
+  if (!element || !hasMore.value || loading.value || loadingMore.value) return
+  if (element.scrollTop + element.clientHeight >= element.scrollHeight - 120) requestMore()
+}
+watch([entries, hasMore], async () => {
+  await nextTick()
+  const element = scrollContainer.value
+  if (!element || !hasMore.value || loading.value || loadingMore.value) return
+  // Fill the viewport when the first page is shorter than the scroll area.
+  if (element.scrollHeight <= element.clientHeight + 8) requestMore()
+}, { flush: 'post' })
 
 watch([() => props.activeTrackId, () => driveTracksStore.trackList], () => {
   const available = driveTracksStore.trackList
@@ -44,8 +65,8 @@ watch([selectedTrackId, allTimes], () => {
       <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors disabled:opacity-40" :class="allTimes ? 'bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25' : 'text-zinc-400 hover:bg-zinc-800 hover:text-white'" :disabled="!selectedTrackId" :aria-pressed="allTimes" :aria-label="allTimes ? 'Show best time per driver' : 'Show all times'" :title="allTimes ? 'Show best time per driver' : 'Show all times'" @click="allTimes = !allTimes">
         <ListOrdered class="h-4 w-4" />
       </button>
-      <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-white disabled:opacity-40" :disabled="!selectedTrackId || driveTracksStore.leaderboardLoading" aria-label="Refresh leaderboard" @click="selectedTrackId && driveTracksStore.loadLeaderboard(selectedTrackId, allTimes)">
-        <Loader2 v-if="driveTracksStore.leaderboardLoading" class="h-4 w-4 animate-spin" /><RefreshCw v-else class="h-4 w-4" />
+      <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-white disabled:opacity-40" :disabled="!selectedTrackId || loading" aria-label="Refresh leaderboard" @click="selectedTrackId && driveTracksStore.loadLeaderboard(selectedTrackId, allTimes)">
+        <Loader2 v-if="loading" class="h-4 w-4 animate-spin" /><RefreshCw v-else class="h-4 w-4" />
       </button>
     </header>
     <div class="shrink-0 border-b border-white/5 px-3 py-2">
@@ -55,9 +76,9 @@ watch([selectedTrackId, allTimes], () => {
         <option v-for="track in driveTracksStore.trackList" :key="track.id" :value="track.id">{{ track.name }}</option>
       </select>
     </div>
-    <div class="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+    <div ref="scrollContainer" class="min-h-0 flex-1 overflow-y-auto px-3 py-3" @scroll="onScroll">
       <p v-if="!driveTracksStore.trackList.length" class="rounded-xl border border-dashed border-white/10 px-3 py-6 text-center text-xs text-zinc-500">No tracks have been shared yet.</p>
-      <p v-else-if="driveTracksStore.leaderboardLoading && !entries.length" class="px-3 py-6 text-center text-xs text-zinc-500">Loading times…</p>
+      <p v-else-if="loading && !entries.length" class="px-3 py-6 text-center text-xs text-zinc-500">Loading times…</p>
       <p v-else-if="!entries.length" class="rounded-xl border border-dashed border-white/10 px-3 py-6 text-center text-xs text-zinc-500">No finished runs recorded for this track yet. Be the first to set a time.</p>
       <ol v-else class="space-y-1.5" :aria-label="allTimes ? 'All finished times' : 'Best times per driver'">
         <li v-for="(entry, index) in entries" :key="entry.run_id" class="flex items-center gap-3 rounded-lg border px-3 py-2" :class="entry.user_id === chatStore.currentUser?.id ? 'border-indigo-500/40 bg-indigo-500/10' : 'border-white/10 bg-zinc-900/70'">
@@ -72,6 +93,8 @@ watch([selectedTrackId, allTimes], () => {
           </div>
         </li>
       </ol>
+      <div v-if="entries.length && loadingMore" class="flex items-center justify-center py-2"><Loader2 class="h-4 w-4 animate-spin text-zinc-500" /></div>
+      <p v-else-if="entries.length && !hasMore" class="py-2 text-center text-[11px] text-zinc-600">{{ allTimes ? 'All times loaded' : 'All drivers loaded' }}</p>
       <p v-if="driveTracksStore.lastError" class="mt-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-300" role="alert">{{ driveTracksStore.lastError }}</p>
     </div>
   </div>

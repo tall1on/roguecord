@@ -34,6 +34,14 @@ export type DriveTrackLeaderboardEntry = {
   finished_at: number;
 };
 
+export const LEADERBOARD_PAGE_SIZE = 50;
+
+export type DriveTrackLeaderboardPage = {
+  entries: DriveTrackLeaderboardEntry[];
+  total: number;
+  has_more: boolean;
+};
+
 type TrackRow = {
   id: string;
   family_id: string;
@@ -138,6 +146,17 @@ export class DriveTracksStore {
       avg_speed_mps: row.avg_speed_mps === null || row.avg_speed_mps === undefined ? null : Number(row.avg_speed_mps),
       status: row.status,
       updated_at: Number(row.updated_at)
+    };
+  }
+
+  private toLeaderboardEntry(row: RunRow): DriveTrackLeaderboardEntry {
+    return {
+      user_id: row.user_id,
+      run_id: row.id,
+      duration_ms: Number(row.duration_ms),
+      avg_speed_mps: row.avg_speed_mps === null || row.avg_speed_mps === undefined ? null : Number(row.avg_speed_mps),
+      distance_m: Number(row.distance_m),
+      finished_at: Number(row.finished_at)
     };
   }
 
@@ -306,29 +325,29 @@ export class DriveTracksStore {
     return updated ? this.toRun(updated) : null;
   }
 
-  /** Returns each finished run when requested, or the best run per driver by default. */
-  async leaderboard(trackId: string, allTimes = false, limit = 50): Promise<DriveTrackLeaderboardEntry[]> {
+  /** Paginated leaderboard: every finished run when `allTimes`, otherwise each driver's best. */
+  async leaderboard(trackId: string, options: { allTimes?: boolean; offset?: number } = {}): Promise<DriveTrackLeaderboardPage> {
+    const allTimes = options.allTimes === true;
+    const offset = Number.isFinite(options.offset) ? Math.max(0, Math.trunc(options.offset as number)) : 0;
+    const filter = "track_id = ? AND status = 'finished' AND duration_ms IS NOT NULL AND duration_ms > 0";
     const rows = await this.queryAll<RunRow>(
-      `SELECT * FROM drive_track_runs WHERE track_id = ? AND status = 'finished' AND duration_ms IS NOT NULL AND duration_ms > 0 ORDER BY duration_ms ASC, finished_at ASC${allTimes ? '' : ' LIMIT 500'}`,
+      allTimes
+        ? `SELECT * FROM drive_track_runs WHERE ${filter} ORDER BY duration_ms ASC, finished_at ASC LIMIT ? OFFSET ?`
+        : `SELECT * FROM (
+             SELECT *, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY duration_ms ASC, finished_at ASC) AS leaderboard_rank
+             FROM drive_track_runs WHERE ${filter}
+           ) WHERE leaderboard_rank = 1 ORDER BY duration_ms ASC, finished_at ASC LIMIT ? OFFSET ?`,
+      [trackId, LEADERBOARD_PAGE_SIZE, offset]
+    );
+    const count = await this.queryOne<{ total: number | null }>(
+      allTimes
+        ? `SELECT COUNT(*) AS total FROM drive_track_runs WHERE ${filter}`
+        : `SELECT COUNT(DISTINCT user_id) AS total FROM drive_track_runs WHERE ${filter}`,
       [trackId]
     );
-    const best = new Map<string, DriveTrackLeaderboardEntry>();
-    const entries: DriveTrackLeaderboardEntry[] = [];
-    for (const row of rows) {
-      if (row.duration_ms === null || row.finished_at === null) continue;
-      const entry = {
-        user_id: row.user_id,
-        run_id: row.id,
-        duration_ms: Number(row.duration_ms),
-        avg_speed_mps: row.avg_speed_mps === null || row.avg_speed_mps === undefined ? null : Number(row.avg_speed_mps),
-        distance_m: Number(row.distance_m),
-        finished_at: Number(row.finished_at)
-      };
-      if (allTimes) entries.push(entry);
-      else if (!best.has(row.user_id)) best.set(row.user_id, entry);
-    }
-    if (allTimes) return entries;
-    return [...best.values()].slice(0, Math.max(1, Math.min(200, limit)));
+    const total = Number(count?.total ?? 0);
+    const entries = rows.map((row) => this.toLeaderboardEntry(row));
+    return { entries, total, has_more: offset + entries.length < total };
   }
 
   /** Closes every active run in a room, e.g. when the channel itself is deleted. */

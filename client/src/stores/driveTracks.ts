@@ -22,7 +22,23 @@ import {
 } from '../utils/driveTracks';
 
 const channelKey = (connectionId: string | null, channelId: string): string => `${connectionId ?? ''}:${channelId}`;
-type DriveTrackLeaderboardViews = Partial<Record<'best' | 'all', DriveTrackLeaderboardEntry[]>>;
+type DriveTrackLeaderboardView = {
+  entries: DriveTrackLeaderboardEntry[];
+  total: number;
+  hasMore: boolean;
+  loading: boolean;
+  loadingMore: boolean;
+};
+type DriveTrackLeaderboardViews = Partial<Record<'best' | 'all', DriveTrackLeaderboardView>>;
+
+const emptyLeaderboardView = (): DriveTrackLeaderboardView => ({ entries: [], total: 0, hasMore: false, loading: false, loadingMore: false });
+
+const mergeLeaderboardEntries = (
+  existing: readonly DriveTrackLeaderboardEntry[], incoming: readonly DriveTrackLeaderboardEntry[]
+): DriveTrackLeaderboardEntry[] => {
+  const seen = new Set(existing.map((entry) => entry.run_id));
+  return [...existing, ...incoming.filter((entry) => !seen.has(entry.run_id))];
+};
 
 export const useDriveTracksStore = defineStore('driveTracks', () => {
   const chatStore = useChatStore();
@@ -31,7 +47,6 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
   const runs = ref<Map<string, DriveTrackRun>>(new Map());
   const activeTrackIds = ref<Map<string, string>>(new Map());
   const leaderboards = ref<Map<string, DriveTrackLeaderboardViews>>(new Map());
-  const leaderboardLoading = ref(false);
   const isLoading = ref(false);
   const isSaving = ref(false);
   const lastError = ref<string | null>(null);
@@ -98,28 +113,53 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
     }
   };
 
-  const loadLeaderboard = async (trackId: string, allTimes = false): Promise<void> => {
-    const requestKey = JSON.stringify([trackId, allTimes]);
-    pendingLeaderboards.get(requestKey)?.abort();
+  const leaderboardView = (trackId: string | null, allTimes: boolean): DriveTrackLeaderboardView => {
+    if (!trackId) return emptyLeaderboardView();
+    return leaderboards.value.get(trackId)?.[allTimes ? 'all' : 'best'] ?? emptyLeaderboardView();
+  };
+
+  const updateLeaderboardView = (
+    trackId: string, allTimes: boolean, update: (view: DriveTrackLeaderboardView) => DriveTrackLeaderboardView
+  ): void => {
+    const mode = allTimes ? 'all' : 'best';
+    const next = new Map(leaderboards.value);
+    const views = { ...next.get(trackId) };
+    views[mode] = update(views[mode] ?? emptyLeaderboardView());
+    next.set(trackId, views);
+    leaderboards.value = next;
+  };
+
+  const loadLeaderboard = async (trackId: string, allTimes = false, offset = 0): Promise<void> => {
+    const requestKey = `${trackId}:${allTimes ? 'all' : 'best'}`;
+    if (offset > 0) {
+      // A page request is already in flight; ignore duplicate scroll triggers.
+      if (pendingLeaderboards.has(requestKey)) return;
+    } else {
+      pendingLeaderboards.get(requestKey)?.abort();
+    }
     const controller = new AbortController();
     pendingLeaderboards.set(requestKey, controller);
-    leaderboardLoading.value = true;
+    updateLeaderboardView(trackId, allTimes, (view) => ({ ...view, loading: offset === 0, loadingMore: offset > 0 }));
     lastError.value = null;
     try {
-      const entries = await getDriveTrackLeaderboard(chatStore, trackId, controller.signal, allTimes);
+      const page = await getDriveTrackLeaderboard(chatStore, trackId, controller.signal, { allTimes, offset });
       if (pendingLeaderboards.get(requestKey) !== controller) return;
-      const next = new Map(leaderboards.value);
-      next.set(trackId, { ...next.get(trackId), [allTimes ? 'all' : 'best']: entries });
-      leaderboards.value = next;
+      const existing = leaderboardView(trackId, allTimes);
+      const entries = offset === 0 ? page.entries : mergeLeaderboardEntries(existing.entries, page.entries);
+      updateLeaderboardView(trackId, allTimes, () => ({ entries, total: page.total, hasMore: page.hasMore, loading: false, loadingMore: false }));
     } catch (error) {
       if (pendingLeaderboards.get(requestKey) !== controller || (error as Error)?.name === 'AbortError') return;
+      updateLeaderboardView(trackId, allTimes, (view) => ({ ...view, loading: false, loadingMore: false }));
       lastError.value = error instanceof Error ? error.message : 'Could not load the leaderboard.';
     } finally {
-      if (pendingLeaderboards.get(requestKey) === controller) {
-        pendingLeaderboards.delete(requestKey);
-        leaderboardLoading.value = pendingLeaderboards.size > 0;
-      }
+      if (pendingLeaderboards.get(requestKey) === controller) pendingLeaderboards.delete(requestKey);
     }
+  };
+
+  const loadMoreLeaderboard = (trackId: string, allTimes: boolean): void => {
+    const view = leaderboardView(trackId, allTimes);
+    if (!view.hasMore || view.loading || view.loadingMore) return;
+    void loadLeaderboard(trackId, allTimes, view.entries.length);
   };
 
   const vote = async (trackId: string, value: DriveTrackVote | 0): Promise<void> => {
@@ -238,5 +278,5 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
   chatStore.addMessageListener(handleMessage);
   onScopeDispose(() => chatStore.removeMessageListener(handleMessage));
 
-  return { tracks, trackList, runs, isLoading, isSaving, lastError, load, save, remove, vote, activate, deactivate, activeTrack, activeRun, gatesFor, leaderboards, leaderboardLoading, loadLeaderboard };
+  return { tracks, trackList, runs, isLoading, isSaving, lastError, load, save, remove, vote, activate, deactivate, activeTrack, activeRun, gatesFor, leaderboards, leaderboardView, loadLeaderboard, loadMoreLeaderboard };
 });

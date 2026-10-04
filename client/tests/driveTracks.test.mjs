@@ -165,37 +165,54 @@ test('the generic navigation request helper still gates responses by channel', a
   assert.equal((await pending).channel_id, 'ch1')
 })
 
-test('leaderboard entries validate and expose best times', async () => {
+test('leaderboard pages validate, paginate and allow unbounded all-times', async () => {
+  const entry = (index) => ({
+    user_id: 'u1', run_id: `r${index}`, duration_ms: 4000 + index, avg_speed_mps: 12.5, distance_m: 222, finished_at: 1000 + index,
+  })
+
   const state = makeTransport()
   const pending = driveTracks.getDriveTrackLeaderboard(state.transport, 't1', signal())
   const request = await answer(state, 'drive_track_leaderboard', () => ({
-    track_id: 't1',
-    entries: [{ user_id: 'u1', run_id: 'r1', duration_ms: 4000, avg_speed_mps: 12.5, distance_m: 222, finished_at: 1000 }],
+    track_id: 't1', offset: 0, total: 3, has_more: true, entries: [entry(0)],
   }))
   assert.equal(request.type, 'drive_track_leaderboard')
   assert.equal(request.payload.track_id, 't1')
   assert.equal(request.payload.all_times, false)
+  assert.equal(request.payload.offset, 0)
   assert.equal(request.payload.channel_id, undefined)
-  assert.equal((await pending)[0].duration_ms, 4000)
+  const page = await pending
+  assert.equal(page.entries[0].duration_ms, 4000)
+  assert.equal(page.total, 3)
+  assert.equal(page.hasMore, true)
 
   const bad = makeTransport()
   const rejected = driveTracks.getDriveTrackLeaderboard(bad.transport, 't1', signal())
-  await answer(bad, 'drive_track_leaderboard', () => ({ entries: [{ user_id: 'u1' }] }))
+  await answer(bad, 'drive_track_leaderboard', () => ({ total: 1, has_more: false, entries: [{ user_id: 'u1' }] }))
   await assert.rejects(rejected, /invalid leaderboard/)
 
-  const entries = Array.from({ length: 201 }, (_, index) => ({
-    user_id: 'u1', run_id: `r${index}`, duration_ms: 4000 + index, avg_speed_mps: 12.5, distance_m: 222, finished_at: 1000 + index,
+  // A page cannot exceed the protocol page size, and pagination metadata is required.
+  const oversized = makeTransport()
+  const tooMany = driveTracks.getDriveTrackLeaderboard(oversized.transport, 't1', signal())
+  await answer(oversized, 'drive_track_leaderboard', () => ({
+    total: 51, has_more: true, entries: Array.from({ length: driveTracks.DRIVE_TRACK_LEADERBOARD_PAGE_SIZE + 1 }, (_, index) => entry(index)),
   }))
-  const tooManyState = makeTransport()
-  const tooMany = driveTracks.getDriveTrackLeaderboard(tooManyState.transport, 't1', signal())
-  await answer(tooManyState, 'drive_track_leaderboard', () => ({ entries }))
   await assert.rejects(tooMany, /invalid leaderboard/)
 
+  const missingMeta = makeTransport()
+  const noMeta = driveTracks.getDriveTrackLeaderboard(missingMeta.transport, 't1', signal())
+  await answer(missingMeta, 'drive_track_leaderboard', () => ({ entries: [entry(0)] }))
+  await assert.rejects(noMeta, /invalid leaderboard/)
+
   const allState = makeTransport()
-  const allTimes = driveTracks.getDriveTrackLeaderboard(allState.transport, 't1', signal(), true)
-  const allRequest = await answer(allState, 'drive_track_leaderboard', () => ({ entries }))
+  const allTimes = driveTracks.getDriveTrackLeaderboard(allState.transport, 't1', signal(), { allTimes: true, offset: 50 })
+  const allRequest = await answer(allState, 'drive_track_leaderboard', () => ({
+    total: 51, has_more: false, entries: [entry(50)],
+  }))
   assert.equal(allRequest.payload.all_times, true)
-  assert.equal((await allTimes).length, 201)
+  assert.equal(allRequest.payload.offset, 50)
+  const lastPage = await allTimes
+  assert.equal(lastPage.entries.length, 1)
+  assert.equal(lastPage.hasMore, false)
 })
 
 test('personal route requests carry the personal flag while shared routes do not', async () => {
