@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowLeft, Camera, CameraOff, Car, Crosshair, Flag, Headphones, LocateFixed, MapPin, Mic, MicOff, Navigation, PhoneOff, Route, Search, Trophy, X } from 'lucide-vue-next'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from 'vue'
+import { ArrowLeft, Camera, CameraOff, Car, Check, Crosshair, Flag, Headphones, LocateFixed, MapPin, Mic, MicOff, Navigation, PhoneOff, Route, RotateCw, Search, Trophy, X } from 'lucide-vue-next'
 import type { CircleMarker, LatLngBounds, Map as LeafletMap, Marker as LeafletMarker, Polyline } from 'leaflet'
 import { useChatStore } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
@@ -107,6 +107,16 @@ const toggleNavPanel = () => {
 const openTrackEditor = (track: DriveTrack | null) => { editingTrack.value = track; trackEditorOpen.value = true }
 const handleTrackSaved = () => { trackEditorOpen.value = false; editingTrack.value = null }
 const toggleCameraShare = () => webrtcStore.cameraProducer ? webrtcStore.stopCameraShare() : webrtcStore.startCameraShare()
+const rotateCamera = () => { webrtcStore.rotateCamera() }
+const confirmCameraRotation = () => { void webrtcStore.confirmCameraRotation() }
+const cancelCameraRotation = () => { webrtcStore.cancelCameraRotation() }
+// The preview plays the rotated canvas output, which is exactly what gets published and recorded.
+const setCameraPreviewVideo = (element: Element | ComponentPublicInstance | null) => {
+  if (!(element instanceof HTMLVideoElement)) return
+  const stream = webrtcStore.cameraSharePreviewStream
+  if (element.srcObject !== stream) element.srcObject = stream
+  if (stream) void element.play().catch(() => {})
+}
 const trackRecording = useTrackRecording({
   getChannelId: () => props.channelId,
   isJoined: () => isJoined.value,
@@ -706,6 +716,16 @@ onBeforeUnmount(() => {
         <CameraOff v-if="webrtcStore.cameraProducer" class="h-5 w-5" />
         <Camera v-else class="h-5 w-5" :class="webrtcStore.cameraShareStarting ? 'animate-pulse' : ''" />
       </button>
+      <button
+        v-if="cameraPhoneLayout && isJoined && webrtcStore.cameraProducer"
+        type="button"
+        class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-white/10 p-2 text-zinc-300 transition-colors hover:bg-zinc-800"
+        aria-label="Rotate shared camera 90 degrees"
+        title="Rotate camera 90 degrees"
+        @click="rotateCamera"
+      >
+        <RotateCw class="h-5 w-5" />
+      </button>
       <div v-if="!cameraPhoneLayout" class="ml-auto flex shrink-0 items-center gap-1 rounded-xl border border-white/10 bg-zinc-900/80 p-1" role="group" aria-label="Drive Together view">
         <button
           v-for="view in desktopViews"
@@ -819,6 +839,16 @@ onBeforeUnmount(() => {
             <Camera v-else class="h-5 w-5" :class="webrtcStore.cameraShareStarting ? 'animate-pulse' : ''" />
             <span v-if="!cameraPhoneLayout">{{ webrtcStore.cameraShareStarting ? 'Starting camera...' : webrtcStore.cameraProducer ? 'Stop camera' : 'Share camera' }}</span>
           </button>
+          <button
+            v-if="!cameraPhoneLayout && webrtcStore.cameraProducer"
+            type="button"
+            class="inline-flex items-center justify-center rounded-lg border border-white/10 p-2 text-zinc-300 transition-colors hover:bg-zinc-800"
+            aria-label="Rotate shared camera 90 degrees"
+            title="Rotate camera 90 degrees"
+            @click="rotateCamera"
+          >
+            <RotateCw class="h-4 w-4" />
+          </button>
           <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors disabled:cursor-not-allowed disabled:opacity-40" :class="[navMode ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :disabled="!canUseNav" :aria-pressed="navMode" :aria-label="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Start navigation close-up of your position') : 'Navigation close-up needs active GPS sharing'" :title="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Navigation close-up of your position') : 'Share your GPS to use navigation close-up'" @click="navMode = !navMode"><Navigation class="h-5 w-5" /></button>
         </template>
         <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors" :class="[navPanelOpen ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-expanded="navPanelOpen" aria-controls="drive-navigation-panel" :aria-label="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" :title="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" @click="toggleNavPanel"><Flag class="h-5 w-5" /></button>
@@ -853,6 +883,54 @@ onBeforeUnmount(() => {
       </div>
     </div>
     <TrackEditor v-if="trackEditorOpen" :track="editingTrack" @close="trackEditorOpen = false" @saved="handleTrackSaved" />
+    <div
+      v-if="webrtcStore.cameraSharePreviewing"
+      class="absolute inset-0 z-50 flex flex-col bg-black/95"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Confirm camera orientation"
+    >
+      <header class="flex shrink-0 items-center gap-3 border-b border-white/10 px-4 py-3">
+        <Camera class="h-5 w-5 shrink-0 text-indigo-400" />
+        <div class="min-w-0 flex-1">
+          <h3 class="truncate font-bold text-white">Camera orientation</h3>
+          <p class="text-xs text-zinc-400">Rotate until the picture looks upright, then confirm.</p>
+        </div>
+      </header>
+      <div class="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-black p-3">
+        <video
+          :ref="setCameraPreviewVideo"
+          autoplay
+          muted
+          playsinline
+          class="max-h-full max-w-full bg-black object-contain"
+        />
+      </div>
+      <footer class="flex shrink-0 flex-wrap items-center gap-2 border-t border-white/10 px-4 py-3">
+        <button
+          type="button"
+          class="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-white/10 bg-zinc-900 px-4 text-sm font-semibold text-zinc-100 transition-colors hover:bg-zinc-800"
+          :aria-label="`Rotate camera 90 degrees, currently ${webrtcStore.cameraShareRotation} degrees`"
+          @click="rotateCamera"
+        >
+          <RotateCw class="h-4 w-4" /> Rotate 90&deg; ({{ webrtcStore.cameraShareRotation }}&deg;)
+        </button>
+        <button
+          type="button"
+          class="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white transition-colors hover:bg-indigo-500"
+          @click="confirmCameraRotation"
+        >
+          <Check class="h-4 w-4" /> Use this
+        </button>
+        <button
+          type="button"
+          class="inline-flex min-h-11 items-center justify-center rounded-lg border border-white/10 px-4 text-sm font-semibold text-zinc-300 transition-colors hover:bg-zinc-800"
+          @click="cancelCameraRotation"
+        >
+          Cancel
+        </button>
+      </footer>
+    </div>
   </section>
 </template>
 

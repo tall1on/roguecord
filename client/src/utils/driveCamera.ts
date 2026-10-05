@@ -1,19 +1,14 @@
-import { getDeviceOrientation } from './cameraOrientation'
-
-// Ask the camera for the shape that matches how the phone is currently held; the orientation
-// canvas pipeline corrects any device/sensor rotation on top of this.
-export const getDriveCameraCaptureConstraints = (): MediaStreamConstraints => {
-  const portrait = getDeviceOrientation() === 'portrait'
-  return {
-    audio: false,
-    video: {
-      facingMode: { ideal: 'environment' },
-      width: { ideal: portrait ? 360 : 640, max: portrait ? 540 : 960 },
-      height: { ideal: portrait ? 640 : 360, max: portrait ? 960 : 540 },
-      frameRate: { ideal: 20, max: 24 }
-    }
+// The browser already delivers camera frames oriented to the display, so no orientation-specific
+// size is requested. Keeping the request free of width/height lets the camera return a stable
+// format that works in both portrait and landscape; the canvas pipeline applies the user's
+// rotation choice and scales the output down.
+export const getDriveCameraCaptureConstraints = (): MediaStreamConstraints => ({
+  audio: false,
+  video: {
+    facingMode: { ideal: 'environment' },
+    frameRate: { ideal: 20, max: 24 }
   }
-}
+})
 
 export const getDriveCameraProducerOptions = () => ({
   encodings: [{ maxBitrate: 650_000, maxFramerate: 20 }],
