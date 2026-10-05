@@ -1,49 +1,47 @@
-export type CameraOrientation = 'portrait' | 'landscape'
+export type CameraRotation = 0 | 90 | 180 | 270
 
 const MAX_OUTPUT_SIDE = 640
+const ROTATION_STORAGE_KEY = 'roguecord.driveCameraRotation'
+const CONFIGURED_STORAGE_KEY = 'roguecord.driveCameraRotationConfigured'
 
-/** The physical orientation of the device screen (not the browser window shape). */
-export const getDeviceOrientation = (): CameraOrientation => {
-  if (typeof screen !== 'undefined' && screen.orientation && typeof screen.orientation.type === 'string') {
-    return screen.orientation.type.startsWith('portrait') ? 'portrait' : 'landscape'
+const readStorage = (key: string): string | null => {
+  try {
+    if (typeof localStorage === 'undefined') return null
+    return localStorage.getItem(key)
+  } catch (_error) {
+    return null
   }
-  const legacyOrientation = typeof window !== 'undefined' ? (window as any).orientation : undefined
-  if (typeof legacyOrientation === 'number') {
-    return Math.abs(legacyOrientation) === 90 ? 'landscape' : 'portrait'
-  }
-  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
-    return window.matchMedia('(orientation: portrait)').matches ? 'portrait' : 'landscape'
-  }
-  return 'landscape'
 }
 
-export const getScreenOrientationAngle = (): number => {
-  if (typeof screen !== 'undefined' && screen.orientation && typeof screen.orientation.angle === 'number') {
-    return ((screen.orientation.angle % 360) + 360) % 360
+const writeStorage = (key: string, value: string): void => {
+  try {
+    if (typeof localStorage === 'undefined') return
+    localStorage.setItem(key, value)
+  } catch (_error) {
+    // Storage can be unavailable (private browsing or disabled cookies); the orientation then
+    // only lasts for the current session.
   }
-  const legacyOrientation = typeof window !== 'undefined' ? (window as any).orientation : undefined
-  if (typeof legacyOrientation === 'number') {
-    return ((legacyOrientation % 360) + 360) % 360
-  }
-  return 0
 }
 
-/**
- * Degrees (clockwise) needed to make the raw camera frame upright on screen.
- *
- * Some browsers rotate camera frames to match the device orientation and some deliver them in the
- * sensor's natural orientation. Comparing the frame aspect with the device orientation tells us
- * which case we are in, so the correction works either way.
- */
-export const computeCameraRotation = (
-  videoWidth: number, videoHeight: number, orientation: CameraOrientation, screenAngle: number
-): number => {
-  if (!videoWidth || !videoHeight) return 0
-  const videoPortrait = videoHeight > videoWidth
-  const devicePortrait = orientation === 'portrait'
-  if (videoPortrait === devicePortrait) return screenAngle === 180 ? 180 : 0
-  if (devicePortrait) return screenAngle === 180 ? 270 : 90
-  return screenAngle === 180 ? 90 : 270
+/** Snaps arbitrary degrees to the nearest quarter turn used by the camera pipeline. */
+export const normalizeCameraRotation = (degrees: number): CameraRotation => {
+  if (!Number.isFinite(degrees)) return 0
+  return ((((Math.round(degrees / 90) * 90) % 360) + 360) % 360) as CameraRotation
+}
+
+export const loadCameraRotation = (): CameraRotation =>
+  normalizeCameraRotation(Number(readStorage(ROTATION_STORAGE_KEY)) || 0)
+
+export const saveCameraRotation = (rotation: CameraRotation): void => {
+  writeStorage(ROTATION_STORAGE_KEY, String(normalizeCameraRotation(rotation)))
+}
+
+/** Whether the user already confirmed the camera orientation on this device. */
+export const hasConfiguredCameraRotation = (): boolean =>
+  readStorage(CONFIGURED_STORAGE_KEY) === 'true'
+
+export const markCameraRotationConfigured = (): void => {
+  writeStorage(CONFIGURED_STORAGE_KEY, 'true')
 }
 
 export const subscribeOrientationChange = (listener: () => void): (() => void) => {
@@ -61,18 +59,22 @@ export const subscribeOrientationChange = (listener: () => void): (() => void) =
 
 export type OrientationAwareStream = {
   stream: MediaStream
+  setRotation: (rotation: CameraRotation) => void
   refresh: () => void
   dispose: () => void
 }
 
 /**
- * Wraps a raw camera stream in a canvas pipeline that always outputs upright frames.
+ * Wraps a raw camera stream in a canvas pipeline that applies a user-chosen rotation.
  *
- * Both the WebRTC producer (remote web UI display) and the recording composable consume this
- * output, so rotation is baked into the encoded frames instead of relying on CSS per viewer.
+ * The browser already delivers camera frames in the orientation of the display, so no automatic
+ * correction is guessed here. The user picks a rotation once (first-run preview) and the canvas
+ * bakes it into the encoded frames, so the live view, the recording and every remote viewer stay
+ * consistent. When the device rotates, the frame shape changes and the canvas adapts while keeping
+ * the chosen rotation.
  */
 export const createOrientationAwareStream = (
-  source: MediaStream, options: { frameRate?: number } = {}
+  source: MediaStream, options: { frameRate?: number; rotation?: CameraRotation } = {}
 ): OrientationAwareStream | null => {
   // Non-browser environments (SSR/tests) cannot run the canvas pipeline; callers fall back to the raw track.
   if (typeof document === 'undefined' || typeof HTMLCanvasElement === 'undefined' || !document.body) return null
@@ -80,6 +82,7 @@ export const createOrientationAwareStream = (
   if (typeof canvas.captureStream !== 'function') return null
 
   const frameRate = options.frameRate && options.frameRate > 0 ? options.frameRate : 20
+  let rotation: CameraRotation = normalizeCameraRotation(options.rotation ?? loadCameraRotation())
   const video = document.createElement('video')
   video.muted = true
   video.autoplay = true
@@ -96,13 +99,12 @@ export const createOrientationAwareStream = (
   const output = canvas.captureStream(frameRate)
   let disposed = false
   let dirty = true
-  let currentRotation = 0
+  let currentRotation: CameraRotation = rotation
   let timeout: ReturnType<typeof setTimeout> | null = null
 
   const targetDimensions = () => {
     const rawWidth = video.videoWidth
     const rawHeight = video.videoHeight
-    const rotation = computeCameraRotation(rawWidth, rawHeight, getDeviceOrientation(), getScreenOrientationAngle())
     const rotatedWidth = rotation % 180 === 0 ? rawWidth : rawHeight
     const rotatedHeight = rotation % 180 === 0 ? rawHeight : rawWidth
     const scale = rotatedWidth > 0 && rotatedHeight > 0
@@ -149,16 +151,26 @@ export const createOrientationAwareStream = (
     schedule()
   }
 
+  // Chrome swaps the reported frame size when the device rotates; redraw immediately so the canvas
+  // matches the new shape without waiting for the next orientation event.
+  const onFrameResize = () => { dirty = true }
+  video.addEventListener('resize', onFrameResize)
+
   for (const track of output.getVideoTracks()) track.contentHint = 'motion'
   const unsubscribe = subscribeOrientationChange(() => { dirty = true })
   schedule()
 
   return {
     stream: output,
+    setRotation: (next: CameraRotation) => {
+      rotation = normalizeCameraRotation(next)
+      dirty = true
+    },
     refresh: () => { dirty = true },
     dispose: () => {
       disposed = true
       if (timeout !== null) { clearTimeout(timeout); timeout = null }
+      video.removeEventListener('resize', onFrameResize)
       unsubscribe()
       try { video.pause() } catch (_error) { /* no-op */ }
       video.srcObject = null

@@ -20,14 +20,14 @@ let usePhoneLayout
 let getDriveCameraCaptureConstraints
 let getDriveCameraProducerOptions
 let useDriveCameraShare
-let computeCameraRotation
+let normalizeCameraRotation
 let trackRecordingQueue
 before(async () => {
   server = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom' })
   ;({ useDriveStore, getGpsSpeed } = await server.ssrLoadModule('/src/stores/drive.ts'))
   ;({ getDriveMapCoordinates, searchDriveDestinations, getDriveRoute, setDriveDestination, rankDriveParticipants, pickDriveColor, getRouteHeading, DRIVE_SELF_COLOR, DRIVE_DRIVER_COLORS } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
   ;({ getDriveCameraCaptureConstraints, getDriveCameraProducerOptions } = await server.ssrLoadModule('/src/utils/driveCamera.ts'))
-  ;({ computeCameraRotation } = await server.ssrLoadModule('/src/utils/cameraOrientation.ts'))
+  ;({ normalizeCameraRotation } = await server.ssrLoadModule('/src/utils/cameraOrientation.ts'))
   ;({ useDriveCameraShare } = await server.ssrLoadModule('/src/composables/useDriveCameraShare.ts'))
   ;({ usePhoneLayout } = await server.ssrLoadModule('/src/composables/usePhoneLayout.ts'))
   trackRecordingQueue = await server.ssrLoadModule('/src/utils/trackRecordingQueue.ts')
@@ -77,6 +77,27 @@ function setup(context, { secure = true } = {}) {
     else delete globalThis.window
   })
   return { chat, webrtc, drive, emit, sent, watches, cleared }
+}
+
+function installLocalStorage() {
+  const store = new Map()
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (key) => (store.has(key) ? store.get(key) : null),
+      setItem: (key, value) => { store.set(key, String(value)) },
+      removeItem: (key) => { store.delete(key) },
+      clear: () => { store.clear() }
+    }
+  })
+  return {
+    store,
+    restore: () => {
+      if (original) Object.defineProperty(globalThis, 'localStorage', original)
+      else delete globalThis.localStorage
+    }
+  }
 }
 
 test('GPS starts only after drive admission and keeps running when navigating away', (context) => {
@@ -484,13 +505,14 @@ test('each driver gets a distinct color while the local driver keeps neon green'
   assert.ok(extras.every((color) => /^hsl\(/.test(color)))
 })
 
-test('Drive camera capture prefers the rear camera and caps mobile upload quality', () => {
+test('Drive camera capture prefers the rear camera without forcing an orientation size', () => {
   const constraints = getDriveCameraCaptureConstraints()
   assert.equal(constraints.audio, false)
   assert.deepEqual(constraints.video.facingMode, { ideal: 'environment' })
-  assert.deepEqual(constraints.video.width, { ideal: 640, max: 960 })
-  assert.deepEqual(constraints.video.height, { ideal: 360, max: 540 })
   assert.deepEqual(constraints.video.frameRate, { ideal: 20, max: 24 })
+  // No width/height: the browser's own orientation handling decides the frame shape.
+  assert.equal(Object.prototype.hasOwnProperty.call(constraints.video, 'width'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(constraints.video, 'height'), false)
   assert.notEqual(getDriveCameraCaptureConstraints().video, constraints.video)
 
   const producerOptions = getDriveCameraProducerOptions()
@@ -498,17 +520,15 @@ test('Drive camera capture prefers the rear camera and caps mobile upload qualit
   assert.equal(producerOptions.codecOptions.videoGoogleStartBitrate, 350)
 })
 
-test('camera rotation corrects device orientation without double-rotating', () => {
-  // Landscape frames on a landscape device stay upright.
-  assert.equal(computeCameraRotation(640, 480, 'landscape', 0), 0)
-  assert.equal(computeCameraRotation(640, 480, 'landscape', 180), 180)
-  // The browser already rotated frames to portrait: no extra rotation.
-  assert.equal(computeCameraRotation(480, 640, 'portrait', 0), 0)
-  // Sensor-native landscape frames on a portrait device must be rotated upright.
-  assert.equal(computeCameraRotation(640, 480, 'portrait', 0), 90)
-  assert.equal(computeCameraRotation(640, 480, 'portrait', 180), 270)
-  // Unknown dimensions never rotate.
-  assert.equal(computeCameraRotation(0, 0, 'portrait', 0), 0)
+test('camera rotation snaps to quarter turns and stays valid', () => {
+  assert.equal(normalizeCameraRotation(0), 0)
+  assert.equal(normalizeCameraRotation(90), 90)
+  assert.equal(normalizeCameraRotation(180), 180)
+  assert.equal(normalizeCameraRotation(270), 270)
+  assert.equal(normalizeCameraRotation(360), 0)
+  assert.equal(normalizeCameraRotation(-90), 270)
+  assert.equal(normalizeCameraRotation(450), 90)
+  assert.equal(normalizeCameraRotation(Number.NaN), 0)
 })
 
 test('drive recording queue persists clips in order and removes them', async () => {
@@ -527,15 +547,17 @@ test('drive recording queue persists clips in order and removes them', async () 
 
 test('Drive camera publishes the camera source and releases its local track on stop', async (context) => {
   const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const storage = installLocalStorage()
   let stoppedTracks = 0
   let requestedConstraints
-  const videoTrack = { contentHint: '', onended: null, stop: () => { stoppedTracks++ } }
+  const videoTrack = { contentHint: '', onended: null, readyState: 'live', stop: () => { stoppedTracks++ } }
   const stream = { getVideoTracks: () => [videoTrack], getTracks: () => [videoTrack] }
   Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
     value: { mediaDevices: { getUserMedia: async (constraints) => { requestedConstraints = constraints; return stream } } }
   })
   context.after(() => {
+    storage.restore()
     if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
     else delete globalThis.navigator
   })
@@ -563,6 +585,19 @@ test('Drive camera publishes the camera source and releases its local track on s
   })
 
   await cameraShare.start()
+  // The first run shows the orientation preview and does not publish until the user confirms.
+  assert.equal(cameraShare.previewing.value, true)
+  assert.equal(cameraShare.previewStream.value, stream)
+  assert.equal(producerOptions, undefined)
+  assert.equal(streams.has('driver'), false)
+
+  cameraShare.rotate()
+  assert.equal(cameraShare.rotation.value, 90)
+  await cameraShare.confirmRotation()
+  assert.equal(cameraShare.previewing.value, false)
+  assert.equal(storage.store.get('roguecord.driveCameraRotationConfigured'), 'true')
+  assert.equal(storage.store.get('roguecord.driveCameraRotation'), '90')
+
   assert.equal(videoTrack.contentHint, 'motion')
   assert.equal(requestedConstraints.video.facingMode.ideal, 'environment')
   assert.equal(producerOptions.track, videoTrack)
@@ -579,6 +614,8 @@ test('Drive camera publishes the camera source and releases its local track on s
 
 test('Drive camera keeps its capture across a transport loss and resumes it', async (context) => {
   const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const storage = installLocalStorage()
+  storage.store.set('roguecord.driveCameraRotationConfigured', 'true')
   let stoppedTracks = 0
   const videoTrack = { contentHint: '', onended: null, readyState: 'live', stop: () => { stoppedTracks++ } }
   const stream = { getVideoTracks: () => [videoTrack], getTracks: () => [videoTrack] }
@@ -587,6 +624,7 @@ test('Drive camera keeps its capture across a transport loss and resumes it', as
     value: { mediaDevices: { getUserMedia: async () => stream } }
   })
   context.after(() => {
+    storage.restore()
     if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
     else delete globalThis.navigator
   })
