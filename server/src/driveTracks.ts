@@ -170,14 +170,18 @@ export function gateRadiusMeters(accuracy: number): number {
   return Math.min(GATE_MAX_RADIUS_M, Math.max(GATE_MIN_RADIUS_M, scaled));
 }
 
-// Automatic runs time out when they take longer than a slow but plausible pace could cover the track.
-export const TRACK_TIMEOUT_MIN_MS = 60000;
-export const TRACK_MIN_AVG_SPEED_MPS = 1;
+// Automatic runs time out when they take longer than a slow but plausible driving pace could cover
+// the track, bounded so a forgotten or GPS-stalled run cannot linger for hours. A ~3 km track
+// finishes in roughly 1.5-3 minutes; the estimate below abandons it after about 10 minutes.
+export const TRACK_TIMEOUT_MIN_MS = 2 * 60 * 1000;
+export const TRACK_MIN_AVG_SPEED_MPS = 10;
 export const TRACK_TIMEOUT_MULTIPLIER = 2;
+export const TRACK_TIMEOUT_MAX_MS = 20 * 60 * 1000;
 
 export function trackMaxDurationMs(distanceMeters: number): number {
   if (!Number.isFinite(distanceMeters) || distanceMeters <= 0) return TRACK_TIMEOUT_MIN_MS;
-  return Math.max(TRACK_TIMEOUT_MIN_MS, (distanceMeters / TRACK_MIN_AVG_SPEED_MPS) * 1000 * TRACK_TIMEOUT_MULTIPLIER);
+  const estimate = (distanceMeters / TRACK_MIN_AVG_SPEED_MPS) * 1000 * TRACK_TIMEOUT_MULTIPLIER;
+  return Math.min(TRACK_TIMEOUT_MAX_MS, Math.max(TRACK_TIMEOUT_MIN_MS, estimate));
 }
 
 /**

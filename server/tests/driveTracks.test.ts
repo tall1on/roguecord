@@ -13,7 +13,10 @@ import {
   parseTrackPayload,
   trackDistanceMeters,
   trackGates,
+  trackMaxDurationMs,
   TRACK_CHECKPOINT_MAX,
+  TRACK_TIMEOUT_MAX_MS,
+  TRACK_TIMEOUT_MIN_MS,
   type RunProgress
 } from '../src/driveTracks';
 
@@ -63,6 +66,19 @@ test('gate radius grants GPS leeway but is clamped at both ends', () => {
   assert.equal(gateRadiusMeters(5), GATE_MIN_RADIUS_M);
   assert.equal(gateRadiusMeters(30), 45);
   assert.equal(gateRadiusMeters(1000), GATE_MAX_RADIUS_M);
+});
+
+test('run timeouts scale with distance but stay within sane bounds', () => {
+  // Short tracks keep the floor so a tiny loop is never abandoned instantly.
+  assert.equal(trackMaxDurationMs(0), TRACK_TIMEOUT_MIN_MS);
+  assert.equal(trackMaxDurationMs(200), TRACK_TIMEOUT_MIN_MS);
+  // A ~3 km track finishes in 1.5-3 minutes, so it must not linger for over an hour.
+  assert.equal(trackMaxDurationMs(3000), 10 * 60 * 1000);
+  assert.ok(trackMaxDurationMs(3000) < TRACK_TIMEOUT_MAX_MS);
+  // Very long tracks are capped instead of growing without bound.
+  assert.equal(trackMaxDurationMs(100000), TRACK_TIMEOUT_MAX_MS);
+  // The estimate stays monotonic between the bounds.
+  assert.ok(trackMaxDurationMs(1000) <= trackMaxDurationMs(2000));
 });
 
 const progress = (nextGate: number, gateTimes: number[]): RunProgress => ({ nextGate, gateTimes, status: 'active', finishedAt: null });
