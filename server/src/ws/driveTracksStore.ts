@@ -20,6 +20,7 @@ import {
   type DriveTrackGate,
   type DriveTrackPayload,
   type DriveTrackRun,
+  type DriveTrackRunRecording,
   type DriveTrackRunStatus,
   type DriveTrackVote
 } from '../driveTracks';
@@ -36,8 +37,10 @@ export type DriveTrackLeaderboardEntry = {
   run_id: string;
   duration_ms: number;
   avg_speed_mps: number | null;
+  max_speed_mps: number | null;
   distance_m: number;
   finished_at: number;
+  has_recording: boolean;
 };
 
 export const LEADERBOARD_PAGE_SIZE = 50;
@@ -84,6 +87,13 @@ type RunRow = {
   max_speed_mps: number | null;
   status: DriveTrackRunStatus;
   updated_at: number;
+  recording_storage_provider?: string | null;
+  recording_storage_key?: string | null;
+  recording_storage_name?: string | null;
+  recording_mime_type?: string | null;
+  recording_size_bytes?: number | null;
+  recording_duration_ms?: number | null;
+  recording_created_at?: number | null;
 };
 
 const parseGateTimes = (value: string): number[] => {
@@ -174,7 +184,8 @@ export class DriveTracksStore {
       avg_speed_mps: row.avg_speed_mps === null || row.avg_speed_mps === undefined ? null : Number(row.avg_speed_mps),
       max_speed_mps: row.max_speed_mps === null || row.max_speed_mps === undefined ? null : Number(row.max_speed_mps),
       distance_m: Number(row.distance_m),
-      finished_at: Number(row.finished_at)
+      finished_at: Number(row.finished_at),
+      has_recording: Boolean(row.recording_storage_name && row.recording_storage_provider)
     };
   }
 
@@ -322,6 +333,38 @@ export class DriveTracksStore {
       [channelId]
     );
     return rows.map((row) => this.toRun(row));
+  }
+
+  async getRunById(runId: string): Promise<DriveTrackRun | null> {
+    const row = await this.queryOne<RunRow>('SELECT * FROM drive_track_runs WHERE id = ?', [runId]);
+    return row ? this.toRun(row) : null;
+  }
+
+  async getRunRecording(runId: string): Promise<DriveTrackRunRecording | null> {
+    const row = await this.queryOne<RunRow>('SELECT * FROM drive_track_runs WHERE id = ?', [runId]);
+    if (!row || !row.recording_storage_name || !row.recording_storage_provider) return null;
+    if (row.recording_storage_provider !== 'data_dir' && row.recording_storage_provider !== 's3') return null;
+    return {
+      storage_provider: row.recording_storage_provider,
+      storage_key: row.recording_storage_key ?? null,
+      storage_name: row.recording_storage_name,
+      mime_type: row.recording_mime_type ?? 'video/webm',
+      size_bytes: Number(row.recording_size_bytes ?? 0),
+      duration_ms: row.recording_duration_ms === null || row.recording_duration_ms === undefined ? null : Number(row.recording_duration_ms)
+    };
+  }
+
+  async setRunRecording(runId: string, recording: DriveTrackRunRecording, now = this.now()): Promise<boolean> {
+    const row = await this.queryOne<{ id: string }>('SELECT id FROM drive_track_runs WHERE id = ?', [runId]);
+    if (!row) return false;
+    await this.execute(
+      `UPDATE drive_track_runs SET recording_storage_provider = ?, recording_storage_key = ?, recording_storage_name = ?,
+        recording_mime_type = ?, recording_size_bytes = ?, recording_duration_ms = ?, recording_created_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [recording.storage_provider, recording.storage_key, recording.storage_name, recording.mime_type,
+        recording.size_bytes, recording.duration_ms, now, now, runId]
+    );
+    return true;
   }
 
   /** Advances every active run of a driver by at most one gate. Retained for direct unit tests. */

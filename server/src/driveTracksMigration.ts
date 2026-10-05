@@ -44,6 +44,13 @@ export async function migrateDriveTracks(db: sqlite3.Database): Promise<void> {
       duration_ms INTEGER,
       avg_speed_mps REAL,
       max_speed_mps REAL,
+      recording_storage_provider TEXT,
+      recording_storage_key TEXT,
+      recording_storage_name TEXT,
+      recording_mime_type TEXT,
+      recording_size_bytes INTEGER,
+      recording_duration_ms INTEGER,
+      recording_created_at INTEGER,
       status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'finished', 'abandoned')),
       updated_at INTEGER NOT NULL,
       FOREIGN KEY (track_id) REFERENCES drive_tracks(id) ON DELETE CASCADE
@@ -57,5 +64,21 @@ export async function migrateDriveTracks(db: sqlite3.Database): Promise<void> {
   const runColumns = await columns(db, 'drive_track_runs');
   if (!runColumns.some((column) => column.name === 'max_speed_mps')) {
     await run(db, 'ALTER TABLE drive_track_runs ADD COLUMN max_speed_mps REAL');
+  }
+  // Additive upgrade for databases created before camera run recordings existed.
+  const runColumnNames = new Set(runColumns.map((column) => column.name));
+  const recordingColumns: Array<[string, string]> = [
+    ['recording_storage_provider', 'TEXT'],
+    ['recording_storage_key', 'TEXT'],
+    ['recording_storage_name', 'TEXT'],
+    ['recording_mime_type', 'TEXT'],
+    ['recording_size_bytes', 'INTEGER'],
+    ['recording_duration_ms', 'INTEGER'],
+    ['recording_created_at', 'INTEGER']
+  ];
+  for (const [name, type] of recordingColumns) {
+    if (!runColumnNames.has(name)) {
+      await run(db, `ALTER TABLE drive_track_runs ADD COLUMN ${name} ${type}`);
+    }
   }
 }

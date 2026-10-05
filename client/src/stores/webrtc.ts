@@ -700,7 +700,10 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     producer: cameraProducer,
     error: cameraShareError,
     starting: cameraShareStarting,
+    detached: cameraShareDetached,
     cleanup: cleanupCameraShareProducer,
+    detach: detachCameraShare,
+    resume: resumeCameraShare,
     start: startCameraShare,
     stop: stopCameraShare
   } = useDriveCameraShare({
@@ -1551,14 +1554,20 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     });
   };
 
-  const leaveVoiceChannel = () => {
+  const leaveVoiceChannel = (options: { preserveCameraCapture?: boolean } = {}) => {
     if (!activeVoiceChannelId.value) return;
-    
+
+    // On a dropped connection, keep the local camera capture (and any in-progress recording)
+    // alive so it can be re-published when the connection returns.
+    const preserveCamera = options.preserveCameraCapture === true
+      && (Boolean(cameraProducer.value) || cameraShareDetached.value);
+
     chatStore.send('leave_voice_channel', { channel_id: activeVoiceChannelId.value });
     
     stopLocalInput();
     cleanupScreenShareProducer();
-    cleanupCameraShareProducer();
+    if (preserveCamera) detachCameraShare();
+    else cleanupCameraShareProducer();
     cameraShareError.value = null;
 
     if (localStream.value) {
@@ -1609,17 +1618,34 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     });
     userScreenStreams.value.clear();
     userScreenStreams.value = new Map(userScreenStreams.value);
-    userCameraStreams.value.forEach((stream) => {
-      stream.getTracks().forEach((track) => {
-        try {
-          track.stop();
-        } catch (_e) {
-          // no-op
-        }
+    if (preserveCamera) {
+      // Keep only the local driver's preserved camera stream; drop stale remote camera entries.
+      const localUserId = chatStore.currentUser?.id;
+      for (const [userId, stream] of [...userCameraStreams.value.entries()]) {
+        if (userId === localUserId) continue;
+        stream.getTracks().forEach((track) => {
+          try {
+            track.stop();
+          } catch (_e) {
+            // no-op
+          }
+        });
+        userCameraStreams.value.delete(userId);
+      }
+      userCameraStreams.value = new Map(userCameraStreams.value);
+    } else {
+      userCameraStreams.value.forEach((stream) => {
+        stream.getTracks().forEach((track) => {
+          try {
+            track.stop();
+          } catch (_e) {
+            // no-op
+          }
+        });
       });
-    });
-    userCameraStreams.value.clear();
-    userCameraStreams.value = new Map(userCameraStreams.value);
+      userCameraStreams.value.clear();
+      userCameraStreams.value = new Map(userCameraStreams.value);
+    }
 
     remoteStreams.value.clear();
     voiceParticipants.value = [];
@@ -1638,7 +1664,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       case 'authenticated':
         if (activeVoiceChannelId.value) {
           const id = activeVoiceChannelId.value;
-          leaveVoiceChannel();
+          // Preserve the camera capture across the re-auth/rejoin so a recording is not interrupted.
+          leaveVoiceChannel({ preserveCameraCapture: true });
           // Rejoin after a short delay to ensure state is clean
           setTimeout(() => {
             joinVoiceChannel(id);
@@ -1908,7 +1935,11 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           } catch (error) {
             console.error('Failed to get user media or produce:', error);
           }
-          
+
+          // Re-publish a camera capture that was preserved across a reconnect so an in-progress
+          // track recording keeps running without re-acquiring the camera.
+          if (cameraShareDetached.value) void resumeCameraShare();
+
         } else if (payload.direction === 'recv') {
           recvTransport.value = device.value.createRecvTransport(payload.transportOptions);
           
@@ -2162,7 +2193,8 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
     if (!isConnected) {
       if (activeVoiceChannelId.value) {
         lastActiveVoiceChannelId.value = activeVoiceChannelId.value;
-        leaveVoiceChannel();
+        // Preserve the camera capture so an in-progress track recording keeps running.
+        leaveVoiceChannel({ preserveCameraCapture: true });
       }
       channelParticipants.value = new Map();
       callStartedAt.value = new Map();
@@ -2198,6 +2230,7 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
     cameraProducer,
     cameraShareError,
     cameraShareStarting,
+    cameraShareDetached,
     ping,
     bandwidth,
     pingHistory,

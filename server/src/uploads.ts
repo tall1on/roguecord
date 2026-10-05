@@ -11,13 +11,14 @@ export const MAX_UPLOAD_PATH_TTL_MS = 15 * 60 * 1000;
 
 const uploadsRootDir = path.resolve(dataDir, 'uploads');
 
-export type PendingUploadKind = 'message_attachment' | 'folder_file';
+export type PendingUploadKind = 'message_attachment' | 'folder_file' | 'track_recording';
 
 export interface PendingUploadRecord {
   uploadId: string;
   kind: PendingUploadKind;
   channelId: string;
   userId: string;
+  runId: string | null;
   originalName: string;
   mimeType: string | null;
   storageName: string;
@@ -87,6 +88,7 @@ export const createPendingUpload = (input: {
   kind: PendingUploadKind;
   channelId: string;
   userId: string;
+  runId?: string | null;
   originalName: string;
   mimeType?: string | null;
   expectedSize: number;
@@ -108,6 +110,7 @@ export const createPendingUpload = (input: {
     kind: input.kind,
     channelId: input.channelId,
     userId: input.userId,
+    runId: input.runId?.trim() || null,
     originalName,
     mimeType: input.mimeType?.trim() || null,
     storageName,
@@ -163,6 +166,7 @@ export const finalizePendingUpload = async (uploadId: string, input: {
   storageType: 'data_dir' | 's3';
   s3Config?: S3StorageConfig | null;
   s3Prefix?: string | null;
+  s3KeyOverride?: string | null;
   localTargetPath?: string | null;
 }) => {
   const record = getPendingUpload(uploadId);
@@ -182,7 +186,7 @@ export const finalizePendingUpload = async (uploadId: string, input: {
       throw new Error('S3 configuration is missing');
     }
     storageProvider = 's3';
-    storageKey = buildS3StorageKey(input.s3Prefix || '', record.channelId, record.storageName);
+    storageKey = input.s3KeyOverride?.trim() || buildS3StorageKey(input.s3Prefix || '', record.channelId, record.storageName);
     await uploadFilePathToS3Multipart({
       config: input.s3Config,
       key: storageKey,

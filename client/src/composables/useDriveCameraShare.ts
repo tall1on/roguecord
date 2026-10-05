@@ -1,5 +1,6 @@
 import { ref, shallowRef } from 'vue'
 import { getDriveCameraCaptureConstraints, getDriveCameraProducerOptions } from '../utils/driveCamera'
+import { createOrientationAwareStream, type OrientationAwareStream } from '../utils/cameraOrientation'
 
 type CameraShareOptions = {
   getChannelId: () => string | null
@@ -18,11 +19,15 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
   const stream = shallowRef<MediaStream | null>(null)
   const error = ref<string | null>(null)
   const starting = ref(false)
+  const detached = ref(false)
   let generation = 0
+  let orientationStream: OrientationAwareStream | null = null
+  let localOutput: MediaStream | null = null
 
   const cleanup = (notifyServer = true) => {
     generation++
     starting.value = false
+    detached.value = false
     const producerId = producer.value?.id as string | undefined
     try {
       producer.value?.close()
@@ -35,6 +40,10 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
     if (notifyServer && producerId && channelId) {
       options.send('close_producer', { channel_id: channelId, producer_id: producerId })
     }
+
+    orientationStream?.dispose()
+    orientationStream = null
+    localOutput = null
 
     stream.value?.getTracks().forEach((track) => {
       try {
@@ -54,6 +63,50 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
     cleanup()
   }
 
+  /**
+   * Closes the SFU producer but keeps the local capture (camera stream + orientation pipeline)
+   * alive so a short websocket/WebRTC outage does not interrupt an in-progress recording.
+   */
+  const detach = () => {
+    if (!localOutput && !producer.value) return
+    const current = producer.value
+    producer.value = null
+    try {
+      current?.close()
+    } catch (_error) {
+      // no-op
+    }
+    detached.value = true
+  }
+
+  /** Re-publishes the preserved local capture on a new send transport after a reconnect. */
+  const resume = async (): Promise<boolean> => {
+    if (!detached.value || !localOutput) return false
+    const outputTrack = localOutput.getVideoTracks()[0]
+    if (!outputTrack || outputTrack.readyState !== 'live') return false
+    const channelId = options.getChannelId()
+    if (!channelId || !options.isDriveChannel()) return false
+    const sendTransport = await options.waitForSendTransport()
+    if (!sendTransport || !options.getDevice()?.canProduce('video')) return false
+    try {
+      const cameraProducer = await sendTransport.produce({
+        track: outputTrack,
+        ...getDriveCameraProducerOptions(),
+        appData: { source: 'camera' }
+      })
+      producer.value = cameraProducer
+      detached.value = false
+      cameraProducer.on('transportclose', () => detach())
+      const userId = options.getUserId()
+      if (userId) options.setUserStream(userId, localOutput)
+      return true
+    } catch (cause) {
+      // Keep the capture and the detached flag so a later reconnect can try again.
+      console.warn('[WebRTC][camera] Failed to resume camera capture after reconnect:', cause)
+      return false
+    }
+  }
+
   const start = async () => {
     const channelId = options.getChannelId()
     if (!channelId) {
@@ -65,6 +118,11 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
       return
     }
     if (producer.value || starting.value) return
+    // A preserved capture from before a reconnect is re-published, never captured twice.
+    if (detached.value && localOutput) {
+      void resume()
+      return
+    }
     if (!navigator.mediaDevices?.getUserMedia) {
       error.value = 'Camera access requires HTTPS (or localhost) and a browser that supports camera capture.'
       return
@@ -108,23 +166,35 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
       stream.value = requestedStream
       videoTrack.onended = stop
 
+      // Normalise device/sensor rotation into the encoded frames so every viewer and the
+      // recording see an upright picture without per-client CSS transforms. Falls back to the
+      // raw track when the canvas pipeline is unavailable.
+      orientationStream = createOrientationAwareStream(requestedStream, { frameRate: 20 })
+      const outputTrack = orientationStream?.stream.getVideoTracks()[0] ?? videoTrack
+      outputTrack.contentHint = 'motion'
+      const outputStream = orientationStream?.stream ?? requestedStream
+
       const cameraProducer = await sendTransport.produce({
-        track: videoTrack,
+        track: outputTrack,
         ...getDriveCameraProducerOptions(),
         appData: { source: 'camera' }
       })
       if (!isRequestCurrent()) {
         cameraProducer.close()
         options.send('close_producer', { channel_id: channelId, producer_id: cameraProducer.id })
+        orientationStream?.dispose()
+        orientationStream = null
         requestedStream.getTracks().forEach((track) => track.stop())
         if (stream.value === requestedStream) cleanup(false)
         return
       }
 
       producer.value = cameraProducer
+      localOutput = outputStream
       const userId = options.getUserId()
-      if (userId) options.setUserStream(userId, requestedStream)
-      producer.value.on('transportclose', () => cleanup(false))
+      if (userId) options.setUserStream(userId, outputStream)
+      // Keep the capture alive on transport loss so a short outage does not stop the recording.
+      producer.value.on('transportclose', () => detach())
     } catch (cause) {
       if (!isRequestCurrent()) {
         requestedStream?.getTracks().forEach((track) => track.stop())
@@ -145,5 +215,5 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
     }
   }
 
-  return { producer, error, starting, cleanup, start, stop }
+  return { producer, error, starting, detached, cleanup, detach, resume, start, stop }
 }

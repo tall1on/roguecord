@@ -8,6 +8,8 @@ import { useDriveStore } from '../../stores/drive'
 import { useDriveTracksStore } from '../../stores/driveTracks'
 import { useDriveRoutes } from '../../composables/useDriveRoutes'
 import { usePhoneLayout } from '../../composables/usePhoneLayout'
+import { useTrackRecording } from '../../composables/useTrackRecording'
+import { useTrackRecordingUploadsStore } from '../../stores/trackRecordingUploads'
 import { DRIVE_SELF_COLOR, getDriveMapCoordinates, getDriveRoute, getRouteHeading, pickDriveColor, rankDriveParticipants, searchDriveDestinations, setDriveDestination, type DriveDestination } from '../../utils/driveNavigation'
 import { distanceToGate, getTrackHeading, type DriveTrack, type DriveTrackGate } from '../../utils/driveTracks'
 
@@ -40,6 +42,7 @@ const isJoined = computed(() => driveStore.joinedChannelId === props.channelId)
 const participants = computed(() => webrtcStore.channelParticipants.get(props.channelId) || [])
 const visibleLocations = computed(() => isJoined.value ? [...driveStore.locations.values()] : [])
 const driveTracksStore = useDriveTracksStore()
+const trackRecordingUploads = useTrackRecordingUploadsStore()
 const tracksPanelOpen = ref(false)
 const trackEditorOpen = ref(false)
 const editingTrack = ref<DriveTrack | null>(null)
@@ -104,6 +107,21 @@ const toggleNavPanel = () => {
 const openTrackEditor = (track: DriveTrack | null) => { editingTrack.value = track; trackEditorOpen.value = true }
 const handleTrackSaved = () => { trackEditorOpen.value = false; editingTrack.value = null }
 const toggleCameraShare = () => webrtcStore.cameraProducer ? webrtcStore.stopCameraShare() : webrtcStore.startCameraShare()
+const trackRecording = useTrackRecording({
+  getChannelId: () => props.channelId,
+  isJoined: () => isJoined.value,
+  getCameraStream: () => {
+    const userId = chatStore.currentUser?.id
+    return userId ? webrtcStore.userCameraStreams.get(userId) ?? null : null
+  },
+  send: (type, payload) => chatStore.send(type, payload),
+  addMessageListener: (listener) => chatStore.addMessageListener(listener),
+  removeMessageListener: (listener) => chatStore.removeMessageListener(listener),
+  storeRecording: (input) => trackRecordingUploads.enqueue(input)
+})
+const showRecordingBadge = computed(() => trackRecording.isRecording.value || trackRecording.isUploading.value)
+const recordingUploading = computed(() => trackRecording.isUploading.value)
+const recordingError = computed(() => trackRecording.error.value)
 const cameraView = ref<'map' | 'split' | 'cameras' | 'leaderboard'>('map')
 const desktopViews = [
   { value: 'map', label: 'Map', ariaLabel: 'Show map only' },
@@ -664,6 +682,16 @@ onBeforeUnmount(() => {
         <h2 class="truncate font-bold text-white">{{ channelName }}</h2>
         <p class="text-xs text-zinc-400">Drive Together - {{ visibleLocations.length }} live locations</p>
       </div>
+      <span
+        v-if="showRecordingBadge"
+        class="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-red-500/40 bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold text-red-300"
+        role="status"
+        :title="recordingUploading ? 'Uploading the track recording' : 'Recording your camera for the active track run'"
+        :aria-label="recordingUploading ? 'Uploading track recording' : 'Recording camera for the active track run'"
+      >
+        <span class="h-2 w-2 rounded-full" :class="recordingUploading ? 'bg-sky-400' : 'animate-pulse bg-red-500'" aria-hidden="true" />
+        {{ recordingUploading ? 'Uploading' : 'Recording' }}
+      </span>
       <button
         v-if="cameraPhoneLayout && isJoined"
         type="button"
@@ -708,6 +736,7 @@ onBeforeUnmount(() => {
     </div>
     <p v-if="driveStore.locationError && isJoined" class="drive-location-error shrink-0 bg-amber-950/30 px-4 py-3 text-sm text-amber-200" role="alert">{{ driveStore.locationError }}</p>
     <p v-if="webrtcStore.cameraShareError" class="drive-camera-error shrink-0 bg-amber-950/30 px-4 py-2 text-xs text-amber-200" role="alert">{{ webrtcStore.cameraShareError }}</p>
+    <p v-if="recordingError" class="shrink-0 bg-amber-950/30 px-4 py-2 text-xs text-amber-200" role="alert">{{ recordingError }}</p>
     <div
       class="drive-workspace min-h-0 min-w-0 flex-1"
       :class="cameraPhoneLayout ? 'drive-workspace--phone' : `drive-workspace--${cameraView}`"

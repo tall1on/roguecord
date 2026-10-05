@@ -258,7 +258,7 @@ test('drive signaling rejects unrelated sockets and screen media while allowing 
     type: 'drive_track_leaderboard',
     payload: {
       request_id: 'leaderboard-request', track_id: 'track-1', offset: 0, total: 1, has_more: false,
-      entries: [{ user_id: 'driver', run_id: 'run-1', duration_ms: 4000, avg_speed_mps: 55.5, max_speed_mps: 71.2, distance_m: 222, finished_at: 5000 }]
+      entries: [{ user_id: 'driver', run_id: 'run-1', duration_ms: 4000, avg_speed_mps: 55.5, max_speed_mps: 71.2, distance_m: 222, finished_at: 5000, has_recording: false }]
     }
   });
   await send(owner.client, 'drive_track_leaderboard', {
@@ -267,8 +267,8 @@ test('drive signaling rejects unrelated sockets and screen media while allowing 
   assert.deepEqual(owner.messages.at(-1).payload, {
     request_id: 'leaderboard-all-request', track_id: 'track-1', offset: 0, total: 2, has_more: false,
     entries: [
-      { user_id: 'driver', run_id: 'run-1', duration_ms: 4000, avg_speed_mps: 55.5, max_speed_mps: 71.2, distance_m: 222, finished_at: 5000 },
-      { user_id: 'driver', run_id: 'run-2', duration_ms: 5000, avg_speed_mps: 44.4, max_speed_mps: 60, distance_m: 222, finished_at: 7000 }
+      { user_id: 'driver', run_id: 'run-1', duration_ms: 4000, avg_speed_mps: 55.5, max_speed_mps: 71.2, distance_m: 222, finished_at: 5000, has_recording: false },
+      { user_id: 'driver', run_id: 'run-2', duration_ms: 5000, avg_speed_mps: 44.4, max_speed_mps: 60, distance_m: 222, finished_at: 7000, has_recording: false }
     ]
   });
   await send(owner.client, 'drive_track_leaderboard', {

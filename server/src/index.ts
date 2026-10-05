@@ -14,6 +14,7 @@ import { getServer, getServerStorageSettings, getUsersWithLegacyDataUrlAvatars, 
 import type { S3StorageConfig } from './storage/s3Storage';
 import { getFileStreamFromS3 } from './storage/s3Storage';
 import { parseUserAvatarDataUrl, storeUserAvatar } from './storage/userAvatarStorage';
+import { getSafeLocalTrackRecordingPath } from './storage/trackRecordingStorage';
 
 dotenv.config();
 
@@ -96,6 +97,17 @@ const getFileContentType = (filePath: string, fallback: string | null = null) =>
             return 'application/pdf';
         case '.json':
             return 'application/json; charset=utf-8';
+        case '.webm':
+            return 'video/webm';
+        case '.mp4':
+        case '.m4v':
+            return 'video/mp4';
+        case '.mkv':
+            return 'video/x-matroska';
+        case '.mov':
+            return 'video/quicktime';
+        case '.ogv':
+            return 'video/ogg';
         default:
             return 'application/octet-stream';
     }
@@ -136,11 +148,12 @@ const handleStreamingResponseError = (res: http.ServerResponse, error: unknown, 
 
 const MEDIA_RANGE_HEADER = 'bytes';
 
-const buildBaseFileHeaders = (contentType: string, contentLength: number, cacheControl = DEFAULT_FILE_CACHE_CONTROL) => ({
+const buildBaseFileHeaders = (contentType: string, contentLength: number, cacheControl = DEFAULT_FILE_CACHE_CONTROL, contentDisposition: string | null = null) => ({
     'Content-Type': contentType,
     'Content-Length': contentLength,
     'Accept-Ranges': MEDIA_RANGE_HEADER,
-    'Cache-Control': cacheControl
+    'Cache-Control': cacheControl,
+    ...(contentDisposition ? { 'Content-Disposition': contentDisposition } : {})
 });
 
 const getCacheControlForPath = (filePath: string) => {
@@ -219,14 +232,14 @@ const sendRangeNotSatisfiable = (res: http.ServerResponse, size: number) => {
     res.end();
 };
 
-const streamLocalFile = async (req: http.IncomingMessage, res: http.ServerResponse, filePath: string, fallbackContentType: string | null = null) => {
+const streamLocalFile = async (req: http.IncomingMessage, res: http.ServerResponse, filePath: string, fallbackContentType: string | null = null, contentDisposition: string | null = null) => {
     const stats = await fs.promises.stat(filePath);
     const parsedRange = parseSingleRangeHeader(req.headers.range, stats.size);
     const contentType = getFileContentType(filePath, fallbackContentType);
     const cacheControl = getCacheControlForPath(filePath);
 
     if (parsedRange && 'malformed' in parsedRange) {
-        res.writeHead(200, buildBaseFileHeaders(contentType, stats.size, cacheControl));
+        res.writeHead(200, buildBaseFileHeaders(contentType, stats.size, cacheControl, contentDisposition));
         await pipeline(fs.createReadStream(filePath), res);
         return;
     }
@@ -237,13 +250,13 @@ const streamLocalFile = async (req: http.IncomingMessage, res: http.ServerRespon
     }
 
     if (!parsedRange) {
-        res.writeHead(200, buildBaseFileHeaders(contentType, stats.size, cacheControl));
+        res.writeHead(200, buildBaseFileHeaders(contentType, stats.size, cacheControl, contentDisposition));
         await pipeline(fs.createReadStream(filePath), res);
         return;
     }
 
     res.writeHead(206, {
-        ...buildBaseFileHeaders(contentType, parsedRange.length, cacheControl),
+        ...buildBaseFileHeaders(contentType, parsedRange.length, cacheControl, contentDisposition),
         'Content-Range': `bytes ${parsedRange.start}-${parsedRange.end}/${stats.size}`
     });
     await pipeline(fs.createReadStream(filePath, { start: parsedRange.start, end: parsedRange.end }), res);
@@ -441,6 +454,39 @@ async function startServer() {
                 return;
             } catch (error) {
                 handleStreamingResponseError(res, error, 'Failed to serve stored file:');
+                return;
+            }
+        }
+
+        if (req.method === 'GET' && requestUrl.pathname.startsWith('/track-recordings/')) {
+            try {
+                const segments = requestUrl.pathname.split('/').filter(Boolean);
+                if (segments.length !== 3) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const runId = segments[1] || '';
+                const storageName = segments[2] || '';
+
+                if (!isSafeChannelId(runId) || !isSafeStorageName(storageName)) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const recordingFilePath = getSafeLocalTrackRecordingPath(runId, storageName);
+                if (!fs.existsSync(recordingFilePath)) {
+                    sendNotFound(res);
+                    return;
+                }
+
+                const contentDisposition = requestUrl.searchParams.get('download') === '1'
+                    ? `attachment; filename="${storageName}"`
+                    : null;
+                await streamLocalFile(req, res, recordingFilePath, getFileContentType(recordingFilePath), contentDisposition);
+                return;
+            } catch (error) {
+                handleStreamingResponseError(res, error, 'Failed to serve track recording:');
                 return;
             }
         }
