@@ -505,14 +505,16 @@ test('each driver gets a distinct color while the local driver keeps neon green'
   assert.ok(extras.every((color) => /^hsl\(/.test(color)))
 })
 
-test('Drive camera capture prefers the rear camera without forcing an orientation size', () => {
+test('Drive camera capture prefers the rear camera and bounds the frame size without forcing an aspect ratio', () => {
   const constraints = getDriveCameraCaptureConstraints()
   assert.equal(constraints.audio, false)
   assert.deepEqual(constraints.video.facingMode, { ideal: 'environment' })
   assert.deepEqual(constraints.video.frameRate, { ideal: 20, max: 24 })
-  // No width/height: the browser's own orientation handling decides the frame shape.
-  assert.equal(Object.prototype.hasOwnProperty.call(constraints.video, 'width'), false)
-  assert.equal(Object.prototype.hasOwnProperty.call(constraints.video, 'height'), false)
+  // Only max caps: the browser's own orientation handling still decides the frame shape.
+  assert.deepEqual(constraints.video.width, { max: 1280 })
+  assert.deepEqual(constraints.video.height, { max: 1280 })
+  assert.equal(constraints.video.width.exact, undefined)
+  assert.equal(constraints.video.height.exact, undefined)
   assert.notEqual(getDriveCameraCaptureConstraints().video, constraints.video)
 
   const producerOptions = getDriveCameraProducerOptions()

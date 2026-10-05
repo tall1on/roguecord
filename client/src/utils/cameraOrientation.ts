@@ -101,6 +101,8 @@ export const createOrientationAwareStream = (
   let dirty = true
   let currentRotation: CameraRotation = rotation
   let timeout: ReturnType<typeof setTimeout> | null = null
+  const frameIntervalMs = Math.max(1, Math.round(1000 / frameRate))
+  let nextDrawAt = 0
 
   const targetDimensions = () => {
     const rawWidth = video.videoWidth
@@ -119,11 +121,27 @@ export const createOrientationAwareStream = (
 
   const schedule = () => {
     if (disposed) return
-    const videoWithCallback = video as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number }
+    const videoWithCallback = video as HTMLVideoElement & {
+      requestVideoFrameCallback?: (cb: (now: number) => void) => number
+    }
     if (typeof videoWithCallback.requestVideoFrameCallback === 'function') {
-      videoWithCallback.requestVideoFrameCallback(() => drawFrame())
+      videoWithCallback.requestVideoFrameCallback((now) => {
+        // requestVideoFrameCallback fires for every presented camera frame (often 30-60fps), but
+        // the canvas is only captured at `frameRate`. Drawing the surplus frames wastes CPU/GPU
+        // and heats mobile devices. Accumulate the schedule from the last target time (not the
+        // actual draw time) so the rate averages out to `frameRate` even when the source frame
+        // rate is not a multiple of it.
+        if (now < nextDrawAt) {
+          schedule()
+          return
+        }
+        nextDrawAt += frameIntervalMs
+        // If we fell far behind (e.g. the tab was suspended), do not burst-catch up.
+        if (nextDrawAt <= now) nextDrawAt = now + frameIntervalMs
+        drawFrame()
+      })
     } else {
-      timeout = setTimeout(drawFrame, Math.max(16, Math.round(1000 / frameRate)))
+      timeout = setTimeout(drawFrame, frameIntervalMs)
     }
   }
 
