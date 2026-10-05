@@ -4,6 +4,7 @@ import { useChatStore } from './chat';
 import { useDriveStore } from './drive';
 import {
   deleteDriveTrack,
+  getDriveRecordingUrl,
   getDriveTrackLeaderboard,
   isDriveTrack,
   isDriveTrackRun,
@@ -47,6 +48,7 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
   const leaderboards = ref<Map<string, DriveTrackLeaderboardViews>>(new Map());
   const isLoading = ref(false);
   const isSaving = ref(false);
+  const downloadingRunId = ref<string | null>(null);
   const lastError = ref<string | null>(null);
   const pending = new Map<string, AbortController>();
   const pendingLeaderboards = new Map<string, AbortController>();
@@ -160,6 +162,30 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
     void loadLeaderboard(trackId, allTimes, view.entries.length);
   };
 
+  const downloadRecording = async (runId: string): Promise<boolean> => {
+    if (downloadingRunId.value) return false;
+    downloadingRunId.value = runId;
+    lastError.value = null;
+    try {
+      const recording = await getDriveRecordingUrl(chatStore, runId, new AbortController().signal);
+      const anchor = document.createElement('a');
+      anchor.href = recording.url;
+      anchor.download = recording.fileName;
+      anchor.target = '_blank';
+      anchor.rel = 'noopener';
+      anchor.style.display = 'none';
+      document.body.appendChild(anchor);
+      anchor.click();
+      window.setTimeout(() => anchor.remove(), 0);
+      return true;
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : 'Could not download the recording.';
+      return false;
+    } finally {
+      downloadingRunId.value = null;
+    }
+  };
+
   const vote = async (trackId: string, value: DriveTrackVote | 0): Promise<void> => {
     lastError.value = null;
     try {
@@ -246,6 +272,11 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
           if (board?.all) void loadLeaderboard(payload.run.track_id, true);
         }
       }
+    } else if (type === 'drive_track_recording_ready' && typeof payload?.track_id === 'string') {
+      // Refresh any open leaderboard so the download action appears once the clip is stored.
+      const board = leaderboards.value.get(payload.track_id);
+      if (board?.best) void loadLeaderboard(payload.track_id);
+      if (board?.all) void loadLeaderboard(payload.track_id, true);
     } else if (type === 'user_left_voice' && typeof payload?.user_id === 'string') {
       clearRun(payload.user_id);
     } else if (type === 'authenticated') {
@@ -259,5 +290,5 @@ export const useDriveTracksStore = defineStore('driveTracks', () => {
   chatStore.addMessageListener(handleMessage);
   onScopeDispose(() => chatStore.removeMessageListener(handleMessage));
 
-  return { tracks, trackList, runs, isLoading, isSaving, lastError, load, save, remove, vote, navigate, clearNavigation, activeTrack, activeRun, gatesFor, leaderboards, leaderboardView, loadLeaderboard, loadMoreLeaderboard };
+  return { tracks, trackList, runs, isLoading, isSaving, downloadingRunId, lastError, load, save, remove, vote, navigate, clearNavigation, activeTrack, activeRun, gatesFor, leaderboards, leaderboardView, loadLeaderboard, loadMoreLeaderboard, downloadRecording };
 });

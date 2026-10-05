@@ -345,3 +345,30 @@ test('starting a run replaces only the same track and channel cleanup ends the r
   await store.abandonRunsForChannel('room');
   assert.equal(await store.getActiveRun('room', 'driver'), null);
 });
+
+test('camera recordings attach to finished runs and surface on the leaderboard', async (t) => {
+  const { db, store, setClock } = await setup();
+  t.after(() => db.close());
+  const track = await store.createTrack('owner', input());
+  setClock(1000);
+  await store.startRun('room', track.id, 'driver');
+  setClock(2000);
+  await store.observeRun('room', 'driver', { latitude: 0, longitude: 0, accuracy: 10 });
+  setClock(4000);
+  await store.observeRun('room', 'driver', { latitude: 0, longitude: 0.001, accuracy: 10 });
+  setClock(8000);
+  const finished = await store.observeRun('room', 'driver', { latitude: 0, longitude: 0.002, accuracy: 10 });
+  assert.equal(finished?.status, 'finished');
+  const runId = finished!.id;
+
+  assert.equal(await store.getRunRecording(runId), null);
+  assert.equal((await store.leaderboard(track.id)).entries[0]!.has_recording, false);
+
+  const recording = { storage_provider: 'data_dir' as const, storage_key: null, storage_name: 'run-1.webm', mime_type: 'video/webm', size_bytes: 12345, duration_ms: 60000 };
+  assert.equal(await store.setRunRecording(runId, recording), true);
+  assert.deepEqual(await store.getRunRecording(runId), recording);
+  assert.equal((await store.leaderboard(track.id)).entries[0]!.has_recording, true);
+
+  assert.equal(await store.setRunRecording('missing', recording), false);
+  assert.equal(await store.getRunRecording('missing'), null);
+});

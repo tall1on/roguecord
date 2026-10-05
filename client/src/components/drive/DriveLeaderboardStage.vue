@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, ref, watch } from 'vue'
-import { ListOrdered, Loader2, MapPinned, RefreshCw, Trophy } from 'lucide-vue-next'
+import { ListOrdered, Loader2, MapPinned, RefreshCw, Trophy, Download } from 'lucide-vue-next'
 import AppAvatar from '../common/AppAvatar.vue'
 import { useChatStore } from '../../stores/chat'
 import { useDriveTracksStore } from '../../stores/driveTracks'
@@ -109,16 +109,17 @@ watch([selectedTrackId, allTimes], () => {
       <p v-else-if="loading && !entries.length" class="px-3 py-6 text-center text-xs text-zinc-500">Loading times…</p>
       <p v-else-if="!entries.length" class="rounded-xl border border-dashed border-white/10 px-3 py-6 text-center text-xs text-zinc-500">No finished runs recorded for this track yet. Be the first to set a time.</p>
       <template v-else>
-        <div class="grid grid-cols-[1.5rem_2rem_minmax(0,1fr)_3.75rem_4.75rem_4.75rem] items-center gap-2 px-3 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600" aria-hidden="true">
+        <div class="grid grid-cols-[1.5rem_2rem_minmax(0,1fr)_3.75rem_4.75rem_4.75rem_2rem] items-center gap-2 px-3 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600" aria-hidden="true">
           <span></span>
           <span></span>
           <span>Driver</span>
           <span class="justify-self-end text-amber-500/80">Time</span>
           <span class="justify-self-end text-emerald-500/80">Avg</span>
           <span class="justify-self-end text-cyan-500/80">Peak</span>
+          <span></span>
         </div>
         <ol class="space-y-1.5" :aria-label="allTimes ? 'All finished times' : 'Best times per driver'">
-          <li v-for="(entry, index) in entries" :key="entry.run_id" class="grid grid-cols-[1.5rem_2rem_minmax(0,1fr)_3.75rem_4.75rem_4.75rem] items-center gap-2 rounded-lg border px-3 py-2" :class="entry.user_id === chatStore.currentUser?.id ? 'border-indigo-500/40 bg-indigo-500/10' : 'border-white/10 bg-zinc-900/70'">
+          <li v-for="(entry, index) in entries" :key="entry.run_id" class="grid grid-cols-[1.5rem_2rem_minmax(0,1fr)_3.75rem_4.75rem_4.75rem_2rem] items-center gap-2 rounded-lg border px-3 py-2" :class="entry.user_id === chatStore.currentUser?.id ? 'border-indigo-500/40 bg-indigo-500/10' : 'border-white/10 bg-zinc-900/70'">
             <span class="flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold tabular-nums" :class="rankClass(index)">{{ index + 1 }}</span>
             <AppAvatar :src="avatarUrlFor(entry.user_id)" :fallback="username(entry.user_id)" :alt="username(entry.user_id)" wrapper-class="flex h-8 w-8 items-center justify-center overflow-visible rounded-full bg-indigo-500/20 text-[11px] font-bold text-indigo-200" image-class="h-full w-full rounded-full object-cover" />
             <div class="min-w-0">
@@ -128,6 +129,20 @@ watch([selectedTrackId, allTimes], () => {
             <p class="justify-self-end rounded-md px-1.5 py-1 text-[15px] font-extrabold leading-none tabular-nums" :class="timeChipClass(index)">{{ formatDriveDuration(entry.duration_ms) }}</p>
             <p class="justify-self-end text-[11px] font-semibold tabular-nums" :class="entry.avg_speed_mps === null ? 'text-zinc-600' : 'text-emerald-300'">{{ formatDriveSpeed(entry.avg_speed_mps) }}</p>
             <p class="justify-self-end text-[11px] font-semibold tabular-nums" :class="entry.max_speed_mps === null ? 'text-zinc-600' : 'text-cyan-300'">{{ formatDriveSpeed(entry.max_speed_mps) }}</p>
+            <span class="justify-self-end">
+              <button
+                v-if="entry.has_recording"
+                type="button"
+                class="inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-white disabled:cursor-wait disabled:opacity-40"
+                :disabled="driveTracksStore.downloadingRunId === entry.run_id"
+                :aria-label="`Download ${username(entry.user_id)}'s run recording`"
+                title="Download run recording"
+                @click="driveTracksStore.downloadRecording(entry.run_id)"
+              >
+                <Loader2 v-if="driveTracksStore.downloadingRunId === entry.run_id" class="h-3.5 w-3.5 animate-spin" />
+                <Download v-else class="h-3.5 w-3.5" />
+              </button>
+            </span>
           </li>
         </ol>
       </template>

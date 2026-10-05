@@ -202,6 +202,45 @@ test('leaderboard pages validate, paginate and allow unbounded all-times', async
   assert.equal(lastPage.hasMore, false)
 })
 
+test('leaderboard recording flags default to false and recording URLs resolve', async () => {
+  const state = makeTransport()
+  const pending = driveTracks.getDriveTrackLeaderboard(state.transport, 't1', signal())
+  await answer(state, 'drive_track_leaderboard', () => ({
+    total: 2, has_more: false,
+    entries: [
+      { user_id: 'u1', run_id: 'r1', duration_ms: 4000, avg_speed_mps: null, max_speed_mps: null, distance_m: 222, finished_at: 1000 },
+      { user_id: 'u2', run_id: 'r2', duration_ms: 5000, avg_speed_mps: null, max_speed_mps: null, distance_m: 222, finished_at: 1200, has_recording: true },
+    ],
+  }))
+  const page = await pending
+  assert.equal(page.entries[0].has_recording, false)
+  assert.equal(page.entries[1].has_recording, true)
+
+  const urlState = makeTransport()
+  const recording = driveTracks.getDriveRecordingUrl(urlState.transport, 'r2', signal())
+  await answer(urlState, 'drive_recording_url', () => ({ run_id: 'r2', url: '/track-recordings/r2/x.webm?download=1', file_name: 'drive-run-r2.webm', mime_type: 'video/webm' }))
+  const resolved = await recording
+  assert.equal(resolved.url, '/track-recordings/r2/x.webm?download=1')
+  assert.equal(resolved.fileName, 'drive-run-r2.webm')
+
+  const emptyState = makeTransport()
+  const invalid = driveTracks.getDriveRecordingUrl(emptyState.transport, 'r2', signal())
+  await answer(emptyState, 'drive_recording_url', () => ({ run_id: 'r2', url: '' }))
+  await assert.rejects(invalid, /invalid recording link/)
+})
+
+test('recording status reflects the server flag for retries', async () => {
+  const stored = makeTransport()
+  const pendingStored = driveTracks.getDriveRecordingStatus(stored.transport, 'r2', signal())
+  await answer(stored, 'drive_recording_status', () => ({ run_id: 'r2', has_recording: true }))
+  assert.equal(await pendingStored, true)
+
+  const empty = makeTransport()
+  const pendingEmpty = driveTracks.getDriveRecordingStatus(empty.transport, 'r9', signal())
+  await answer(empty, 'drive_recording_status', () => ({ run_id: 'r9', has_recording: false }))
+  assert.equal(await pendingEmpty, false)
+})
+
 test('personal route requests carry the personal flag while shared routes do not', async () => {
   const target = { latitude: 1, longitude: 2 }
   const personalState = makeTransport()

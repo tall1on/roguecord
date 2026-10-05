@@ -20,13 +20,17 @@ let usePhoneLayout
 let getDriveCameraCaptureConstraints
 let getDriveCameraProducerOptions
 let useDriveCameraShare
+let computeCameraRotation
+let trackRecordingQueue
 before(async () => {
   server = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom' })
   ;({ useDriveStore, getGpsSpeed } = await server.ssrLoadModule('/src/stores/drive.ts'))
   ;({ getDriveMapCoordinates, searchDriveDestinations, getDriveRoute, setDriveDestination, rankDriveParticipants, pickDriveColor, getRouteHeading, DRIVE_SELF_COLOR, DRIVE_DRIVER_COLORS } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
   ;({ getDriveCameraCaptureConstraints, getDriveCameraProducerOptions } = await server.ssrLoadModule('/src/utils/driveCamera.ts'))
+  ;({ computeCameraRotation } = await server.ssrLoadModule('/src/utils/cameraOrientation.ts'))
   ;({ useDriveCameraShare } = await server.ssrLoadModule('/src/composables/useDriveCameraShare.ts'))
   ;({ usePhoneLayout } = await server.ssrLoadModule('/src/composables/usePhoneLayout.ts'))
+  trackRecordingQueue = await server.ssrLoadModule('/src/utils/trackRecordingQueue.ts')
 })
 after(async () => server?.close())
 
@@ -494,6 +498,33 @@ test('Drive camera capture prefers the rear camera and caps mobile upload qualit
   assert.equal(producerOptions.codecOptions.videoGoogleStartBitrate, 350)
 })
 
+test('camera rotation corrects device orientation without double-rotating', () => {
+  // Landscape frames on a landscape device stay upright.
+  assert.equal(computeCameraRotation(640, 480, 'landscape', 0), 0)
+  assert.equal(computeCameraRotation(640, 480, 'landscape', 180), 180)
+  // The browser already rotated frames to portrait: no extra rotation.
+  assert.equal(computeCameraRotation(480, 640, 'portrait', 0), 0)
+  // Sensor-native landscape frames on a portrait device must be rotated upright.
+  assert.equal(computeCameraRotation(640, 480, 'portrait', 0), 90)
+  assert.equal(computeCameraRotation(640, 480, 'portrait', 180), 270)
+  // Unknown dimensions never rotate.
+  assert.equal(computeCameraRotation(0, 0, 'portrait', 0), 0)
+})
+
+test('drive recording queue persists clips in order and removes them', async () => {
+  trackRecordingQueue.clearTrackRecordingMemoryFallback()
+  const blob = new Blob(['clip'])
+  await trackRecordingQueue.enqueueTrackRecording({ runId: 'r2', mimeType: 'video/webm', durationMs: 2000, size: 4, createdAt: 2000, blob })
+  await trackRecordingQueue.enqueueTrackRecording({ runId: 'r1', mimeType: 'video/webm', durationMs: 1000, size: 4, createdAt: 1000, blob })
+  const queued = await trackRecordingQueue.listTrackRecordings()
+  assert.deepEqual(queued.map((entry) => entry.runId), ['r1', 'r2'])
+  assert.equal(await trackRecordingQueue.countTrackRecordings(), 2)
+  await trackRecordingQueue.removeTrackRecording('r1')
+  assert.deepEqual((await trackRecordingQueue.listTrackRecordings()).map((entry) => entry.runId), ['r2'])
+  assert.equal(await trackRecordingQueue.countTrackRecordings(), 1)
+  trackRecordingQueue.clearTrackRecordingMemoryFallback()
+})
+
 test('Drive camera publishes the camera source and releases its local track on stop', async (context) => {
   const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
   let stoppedTracks = 0
@@ -544,6 +575,59 @@ test('Drive camera publishes the camera source and releases its local track on s
   assert.equal(stoppedTracks, 1)
   assert.equal(streams.has('driver'), false)
   assert.deepEqual(messages, [{ type: 'close_producer', payload: { channel_id: 'drive', producer_id: 'camera-producer' } }])
+})
+
+test('Drive camera keeps its capture across a transport loss and resumes it', async (context) => {
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  let stoppedTracks = 0
+  const videoTrack = { contentHint: '', onended: null, readyState: 'live', stop: () => { stoppedTracks++ } }
+  const stream = { getVideoTracks: () => [videoTrack], getTracks: () => [videoTrack] }
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { mediaDevices: { getUserMedia: async () => stream } }
+  })
+  context.after(() => {
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
+    else delete globalThis.navigator
+  })
+
+  const makeProducer = (id) => ({ id, closed: false, close() { this.closed = true }, on() {} })
+  const produced = []
+  let current = { produce: async (options) => { produced.push(options); return makeProducer('p1') } }
+  const streams = new Map()
+  const cameraShare = useDriveCameraShare({
+    getChannelId: () => 'drive',
+    isDriveChannel: () => true,
+    getSendTransport: () => current,
+    getDevice: () => ({ canProduce: () => true }),
+    waitForSendTransport: async () => current,
+    getUserId: () => 'driver',
+    setUserStream: (userId, userStream) => streams.set(userId, userStream),
+    deleteUserStream: (userId) => streams.delete(userId),
+    send: () => {}
+  })
+
+  await cameraShare.start()
+  assert.equal(cameraShare.producer.value.id, 'p1')
+
+  // Transport loss closes the producer but keeps the local capture so recording is uninterrupted.
+  cameraShare.detach()
+  assert.equal(cameraShare.producer.value, null)
+  assert.equal(cameraShare.detached.value, true)
+  assert.equal(streams.get('driver'), stream)
+  assert.equal(stoppedTracks, 0)
+
+  // Reconnect: a new transport re-publishes the same capture.
+  current = { produce: async (options) => { produced.push(options); return makeProducer('p2') } }
+  assert.equal(await cameraShare.resume(), true)
+  assert.equal(cameraShare.producer.value.id, 'p2')
+  assert.equal(cameraShare.detached.value, false)
+  assert.equal(produced.length, 2)
+  assert.equal(produced[1].appData.source, 'camera')
+
+  cameraShare.stop()
+  assert.equal(stoppedTracks, 1)
+  assert.equal(streams.has('driver'), false)
 })
 
 test('Drive camera permission results arriving after leave are discarded', async (context) => {

@@ -44,6 +44,15 @@ export type DriveTrackRun = {
   status: DriveTrackRunStatus;
   updated_at: number;
 };
+// Camera recording stored for a finished/abandoned run (data-dir or S3).
+export type DriveTrackRunRecording = {
+  storage_provider: 'data_dir' | 's3';
+  storage_key: string | null;
+  storage_name: string;
+  mime_type: string;
+  size_bytes: number;
+  duration_ms: number | null;
+};
 export type RunProgress = {
   nextGate: number;
   gateTimes: number[];

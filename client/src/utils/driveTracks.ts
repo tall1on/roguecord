@@ -56,6 +56,7 @@ export type DriveTrackLeaderboardEntry = {
   max_speed_mps: number | null;
   distance_m: number;
   finished_at: number;
+  has_recording: boolean;
 };
 
 export const TRACK_NAME_MAX = 80;
@@ -143,7 +144,8 @@ export const isDriveTrackLeaderboardEntry = (value: unknown): value is DriveTrac
     && (entry.avg_speed_mps === null || (typeof entry.avg_speed_mps === 'number' && Number.isFinite(entry.avg_speed_mps) && entry.avg_speed_mps >= 0))
     && (entry.max_speed_mps === null || (typeof entry.max_speed_mps === 'number' && Number.isFinite(entry.max_speed_mps) && entry.max_speed_mps >= 0))
     && typeof entry.distance_m === 'number' && Number.isFinite(entry.distance_m) && entry.distance_m >= 0
-    && typeof entry.finished_at === 'number' && Number.isFinite(entry.finished_at);
+    && typeof entry.finished_at === 'number' && Number.isFinite(entry.finished_at)
+    && (entry.has_recording === undefined || typeof entry.has_recording === 'boolean');
 };
 
 export function trackGates(payload: DriveTrackPayload): DriveTrackGate[] {
@@ -210,7 +212,45 @@ export const getDriveTrackLeaderboard = async (
     || typeof response.has_more !== 'boolean') {
     throw new Error('The server returned an invalid leaderboard.');
   }
-  return { entries: response.entries, total: Number(response.total), hasMore: response.has_more };
+  const entries = (response.entries as DriveTrackLeaderboardEntry[]).map((entry) => ({
+    ...entry,
+    has_recording: entry.has_recording === true
+  }));
+  return { entries, total: Number(response.total), hasMore: response.has_more };
+};
+
+export type DriveRecordingUrl = {
+  url: string;
+  fileName: string;
+  mimeType: string | null;
+};
+
+/** Resolves a short-lived, download-disposition URL for a run's camera recording. */
+export const getDriveRecordingUrl = async (
+  transport: DriveNavigationTransport, runId: string, signal: AbortSignal
+): Promise<DriveRecordingUrl> => {
+  const response = await requestDriveMessage(
+    transport, 'drive_recording_url', 'drive_recording_url', null, { run_id: runId }, signal, 15000
+  );
+  if (typeof response.url !== 'string' || !response.url
+    || typeof response.file_name !== 'string' || !response.file_name) {
+    throw new Error('The server returned an invalid recording link.');
+  }
+  return {
+    url: response.url,
+    fileName: response.file_name,
+    mimeType: typeof response.mime_type === 'string' ? response.mime_type : null
+  };
+};
+
+/** Whether the server already stores a recording for this run (used to make upload retries idempotent). */
+export const getDriveRecordingStatus = async (
+  transport: DriveNavigationTransport, runId: string, signal: AbortSignal
+): Promise<boolean> => {
+  const response = await requestDriveMessage(
+    transport, 'drive_recording_status', 'drive_recording_status', null, { run_id: runId }, signal, 15000
+  );
+  return response.has_recording === true;
 };
 
 export const saveDriveTrack = async (
