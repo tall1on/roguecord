@@ -14,7 +14,14 @@ type TrackRecordingOptions = {
 
 const DEFAULT_MAX_DURATION_MS = 3 * 60 * 1000
 const MIN_UPLOAD_DURATION_MS = 1000
-const RECORDING_MIME_CANDIDATES = ['video/webm;codecs=vp8', 'video/webm;codecs=vp9', 'video/webm', 'video/mp4']
+const RECORDING_MIME_CANDIDATES = [
+  'video/mp4;codecs=avc1.42E01E',
+  'video/mp4;codecs=avc1',
+  'video/mp4',
+  'video/webm;codecs=vp8',
+  'video/webm;codecs=vp9',
+  'video/webm'
+]
 
 const pickRecordingMimeType = (): string | null => {
   if (typeof MediaRecorder === 'undefined') return null
