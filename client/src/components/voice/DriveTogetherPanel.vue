@@ -139,6 +139,58 @@ const desktopViews = [
   { value: 'cameras', label: 'Cameras', ariaLabel: 'Show cameras only' },
   { value: 'leaderboard', label: 'Leaderboard', ariaLabel: 'Show the track leaderboard' }
 ] as const
+const workspaceElement = ref<HTMLElement | null>(null)
+const splitRatio = ref(0.5)
+const splitDragging = ref(false)
+const SPLIT_MIN = 0.15
+const SPLIT_MAX = 0.85
+const SPLIT_HANDLE_WIDTH = 12
+const clampSplitRatio = (value: number): number => Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, value))
+const splitGridStyle = computed(() => {
+  if (cameraPhoneLayout.value || cameraView.value !== 'split') return undefined
+  return { gridTemplateColumns: `${splitRatio.value}fr ${SPLIT_HANDLE_WIDTH}px ${1 - splitRatio.value}fr` }
+})
+const updateSplitFromClientX = (clientX: number) => {
+  const element = workspaceElement.value
+  if (!element) return
+  const rect = element.getBoundingClientRect()
+  const padding = 8
+  const usable = rect.width - padding * 2 - SPLIT_HANDLE_WIDTH
+  if (usable <= 0) return
+  splitRatio.value = clampSplitRatio((clientX - rect.left - padding - SPLIT_HANDLE_WIDTH / 2) / usable)
+}
+const onSplitPointerMove = (event: PointerEvent) => {
+  if (!splitDragging.value) return
+  updateSplitFromClientX(event.clientX)
+}
+const stopSplitDrag = () => {
+  if (!splitDragging.value) return
+  splitDragging.value = false
+  window.removeEventListener('pointermove', onSplitPointerMove)
+  window.removeEventListener('pointerup', stopSplitDrag)
+  window.removeEventListener('pointercancel', stopSplitDrag)
+  document.body.classList.remove('drive-split-resizing')
+}
+const startSplitDrag = (event: PointerEvent) => {
+  if (event.button !== 0) return
+  splitDragging.value = true
+  updateSplitFromClientX(event.clientX)
+  window.addEventListener('pointermove', onSplitPointerMove)
+  window.addEventListener('pointerup', stopSplitDrag)
+  window.addEventListener('pointercancel', stopSplitDrag)
+  document.body.classList.add('drive-split-resizing')
+  event.preventDefault()
+}
+const resetSplit = () => { splitRatio.value = 0.5 }
+const onSplitKeydown = (event: KeyboardEvent) => {
+  if (event.key === 'ArrowLeft') splitRatio.value = clampSplitRatio(splitRatio.value - 0.05)
+  else if (event.key === 'ArrowRight') splitRatio.value = clampSplitRatio(splitRatio.value + 0.05)
+  else if (event.key === 'Home') splitRatio.value = SPLIT_MIN
+  else if (event.key === 'End') splitRatio.value = SPLIT_MAX
+  else return
+  event.preventDefault()
+}
+watch(cameraView, () => stopSplitDrag())
 const leaderboardPanelOpen = ref(false)
 const toggleLeaderboardPanel = () => {
   leaderboardPanelOpen.value = !leaderboardPanelOpen.value
@@ -663,6 +715,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   disposed = true
+  stopSplitDrag()
   webrtcStore.setCameraReceivingEnabled(false)
   if (bearingFrame !== null) cancelAnimationFrame(bearingFrame)
   bearingFrame = null
@@ -758,8 +811,10 @@ onBeforeUnmount(() => {
     <p v-if="webrtcStore.cameraShareError" class="drive-camera-error shrink-0 bg-amber-950/30 px-4 py-2 text-xs text-amber-200" role="alert">{{ webrtcStore.cameraShareError }}</p>
     <p v-if="recordingError" class="shrink-0 bg-amber-950/30 px-4 py-2 text-xs text-amber-200" role="alert">{{ recordingError }}</p>
     <div
+      ref="workspaceElement"
       class="drive-workspace min-h-0 min-w-0 flex-1"
       :class="cameraPhoneLayout ? 'drive-workspace--phone' : `drive-workspace--${cameraView}`"
+      :style="splitGridStyle"
     >
       <div v-show="cameraPhoneLayout || cameraView === 'map' || cameraView === 'split'" class="drive-map-area relative min-h-0 min-w-0 flex-1 isolate">
         <div ref="mapElement" class="drive-map absolute inset-0 z-0" aria-label="Dark OpenStreetMap showing participant GPS locations" />
@@ -803,6 +858,23 @@ onBeforeUnmount(() => {
           <p class="text-sm font-medium text-white">{{ mapError || (isJoined ? 'Waiting for shared GPS locations' : 'Join to see and share live locations') }}</p>
           <p class="mt-1 text-xs text-zinc-400">Voice works even if you do not share your location. The map always fits all known positions.</p>
         </div>
+      </div>
+      <div
+        v-if="!cameraPhoneLayout && cameraView === 'split'"
+        class="drive-split-handle"
+        :class="{ 'drive-split-handle--active': splitDragging }"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize map and camera panels"
+        aria-valuemin="15"
+        aria-valuemax="85"
+        :aria-valuenow="Math.round(splitRatio * 100)"
+        tabindex="0"
+        @pointerdown="startSplitDrag"
+        @keydown="onSplitKeydown"
+        @dblclick="resetSplit"
+      >
+        <span class="drive-split-handle-grip" aria-hidden="true" />
       </div>
       <DriveCameraStage
         v-if="!cameraPhoneLayout && (cameraView === 'split' || cameraView === 'cameras')"
@@ -949,14 +1021,45 @@ onBeforeUnmount(() => {
 }
 .drive-workspace--split {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr) 0.75rem minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
-  gap: 0.5rem;
+  gap: 0;
   padding: 0.5rem;
 }
 .drive-workspace--split > * {
   min-height: 0;
   min-width: 0;
+}
+.drive-split-handle {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+  border-radius: 9999px;
+}
+.drive-split-handle-grip {
+  width: 2px;
+  height: 100%;
+  border-radius: 9999px;
+  background: rgb(255 255 255 / 12%);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.drive-split-handle:hover .drive-split-handle-grip,
+.drive-split-handle:focus-visible .drive-split-handle-grip,
+.drive-split-handle--active .drive-split-handle-grip {
+  background: #818cf8;
+  box-shadow: 0 0 0 3px rgb(129 140 248 / 18%);
+}
+.drive-split-handle:focus-visible {
+  background: rgb(129 140 248 / 10%);
+}
+:global(body.drive-split-resizing) {
+  cursor: col-resize;
+  user-select: none;
 }
 .drive-workspace--cameras {
   display: flex;
