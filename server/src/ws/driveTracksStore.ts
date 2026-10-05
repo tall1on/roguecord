@@ -111,6 +111,7 @@ export class DriveTracksStore {
   private autoStartAt = new Map<string, number>();
   private departedRuns = new Set<string>();
   private lastSweepAt = new Map<string, number>();
+  private trackTimeouts = new Map<string, number>();
 
   constructor(private db: sqlite3.Database, private now: () => number = Date.now) {}
 
@@ -271,6 +272,7 @@ export class DriveTracksStore {
     await this.execute('DELETE FROM drive_track_runs WHERE track_id = ?', [trackId]);
     await this.execute('DELETE FROM drive_tracks WHERE id = ?', [trackId]);
     this.gateCache.delete(trackId);
+    this.trackTimeouts.delete(trackId);
     this.trackGateList = null;
     return true;
   }
@@ -408,7 +410,7 @@ export class DriveTracksStore {
       const startKey = `${channelId}\u0000${userId}\u0000${record.trackId}`;
       const existing = activeByTrack.get(record.trackId);
       if (existing) {
-        if (this.isRunTimedOut(existing, record.distance_m, now)) {
+        if (this.isRunTimedOut(existing, await this.trackTimeoutMs(record.trackId, record.distance_m), now)) {
           const expired = await this.endRunById(existing.id, 'abandoned', now);
           if (expired) changed.push(expired);
           activeByTrack.delete(record.trackId);
@@ -461,7 +463,8 @@ export class DriveTracksStore {
     for (const row of rows) {
       const run = this.toRun(row);
       const distance = row.track_distance_m === null || row.track_distance_m === undefined ? run.distance_m : Number(row.track_distance_m);
-      if (!this.isRunTimedOut(run, distance, now)) continue;
+      const timeout = await this.trackTimeoutMs(run.track_id, distance);
+      if (!this.isRunTimedOut(run, timeout, now)) continue;
       const updated = await this.endRunById(run.id, 'abandoned', now);
       if (updated) changed.push(updated);
     }
@@ -481,9 +484,27 @@ export class DriveTracksStore {
     return ended;
   }
 
-  private isRunTimedOut(run: DriveTrackRun, distanceMeters: number, now: number): boolean {
+  /**
+   * Abandon window for a track. The distance estimate is raised when the track already has a
+   * recorded finish: a run far slower than the track record is treated as abandoned. Cached per
+   * track and invalidated whenever a new finish changes the record.
+   */
+  private async trackTimeoutMs(trackId: string, distanceMeters: number): Promise<number> {
+    const cached = this.trackTimeouts.get(trackId);
+    if (cached !== undefined) return cached;
+    const row = await this.queryOne<{ best_duration_ms: number | null }>(
+      "SELECT MIN(duration_ms) AS best_duration_ms FROM drive_track_runs WHERE track_id = ? AND status = 'finished' AND duration_ms IS NOT NULL AND duration_ms > 0",
+      [trackId]
+    );
+    const best = row?.best_duration_ms === null || row?.best_duration_ms === undefined ? null : Number(row.best_duration_ms);
+    const timeout = trackMaxDurationMs(distanceMeters, best);
+    this.trackTimeouts.set(trackId, timeout);
+    return timeout;
+  }
+
+  private isRunTimedOut(run: DriveTrackRun, timeoutMs: number, now: number): boolean {
     const startedAt = run.gate_times[0] ?? run.started_at;
-    return now - startedAt > trackMaxDurationMs(distanceMeters);
+    return now - startedAt > timeoutMs;
   }
 
   private async endRunById(runId: string, status: Exclude<DriveTrackRunStatus, 'active'>, finishedAt: number): Promise<DriveTrackRun | null> {
@@ -501,6 +522,7 @@ export class DriveTracksStore {
       [status, finishedAt, stats.duration_ms, stats.avg_speed_mps, finishedAt, run.id]
     );
     const updated = await this.queryOne<RunRow>('SELECT * FROM drive_track_runs WHERE id = ?', [run.id]);
+    if (status === 'finished') this.trackTimeouts.delete(run.track_id);
     return updated ? this.toRun(updated) : null;
   }
 
@@ -540,6 +562,7 @@ export class DriveTracksStore {
       [result.progress.nextGate, JSON.stringify(result.progress.gateTimes), result.progress.status, finishedAt, stats.duration_ms, stats.avg_speed_mps, maxSpeed, now, run.id]
     );
     const updated = await this.queryOne<RunRow>('SELECT * FROM drive_track_runs WHERE id = ?', [run.id]);
+    if (finished) this.trackTimeouts.delete(run.track_id);
     return updated ? this.toRun(updated) : null;
   }
 

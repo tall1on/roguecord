@@ -372,3 +372,27 @@ test('camera recordings attach to finished runs and surface on the leaderboard',
   assert.equal(await store.setRunRecording('missing', recording), false);
   assert.equal(await store.getRunRecording('missing'), null);
 });
+
+test('recorded finish times extend the abandon window for slow tracks', async (t) => {
+  const { db, store, setClock } = await setup();
+  t.after(() => db.close());
+  const track = await store.createTrack('owner', input());
+
+  // A prior full lap took ten minutes, far slower than the two-minute distance estimate.
+  await run(db, `INSERT INTO drive_track_runs (id, track_id, user_id, channel_id, started_at, finished_at, next_gate, gates_total, gate_times_json, distance_m, duration_ms, avg_speed_mps, status, updated_at)
+    VALUES ('veteran-run', '${track.id}', 'veteran', 'room', 1000, 601000, 3, 3, '[1000,301000,601000]', 222, 600000, 0.37, 'finished', 601000)`);
+
+  setClock(1000000);
+  await store.startRun('room', track.id, 'driver');
+
+  // Twenty minutes in: past the distance estimate but inside four times the recorded time.
+  setClock(1000000 + 20 * 60 * 1000);
+  await store.autoTrack('room', 'driver', { latitude: 5, longitude: 5, accuracy: 10 });
+  assert.equal((await store.getActiveRun('room', 'driver'))?.status, 'active');
+
+  // Past four times the record (forty minutes) the run is abandoned.
+  setClock(1000000 + 41 * 60 * 1000);
+  const expired = await store.autoTrack('room', 'driver', { latitude: 5, longitude: 5, accuracy: 10 });
+  assert.equal(expired.some((entry) => entry.status === 'abandoned'), true);
+  assert.equal(await store.getActiveRun('room', 'driver'), null);
+});

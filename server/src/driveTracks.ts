@@ -172,16 +172,24 @@ export function gateRadiusMeters(accuracy: number): number {
 
 // Automatic runs time out when they take longer than a slow but plausible driving pace could cover
 // the track, bounded so a forgotten or GPS-stalled run cannot linger for hours. A ~3 km track
-// finishes in roughly 1.5-3 minutes; the estimate below abandons it after about 10 minutes.
+// finishes in roughly 1.5-3 minutes; the distance estimate below abandons it after about 10 minutes.
 export const TRACK_TIMEOUT_MIN_MS = 2 * 60 * 1000;
 export const TRACK_MIN_AVG_SPEED_MPS = 10;
 export const TRACK_TIMEOUT_MULTIPLIER = 2;
 export const TRACK_TIMEOUT_MAX_MS = 20 * 60 * 1000;
+// Once a track has a recorded finish, that time anchors the timeout too: a run more than this many
+// times slower than the track record is abandoned, and the timeout is never shorter than the record.
+export const TRACK_TIMEOUT_RECORDED_MULTIPLIER = 4;
+export const TRACK_TIMEOUT_ABSOLUTE_MAX_MS = 60 * 60 * 1000;
 
-export function trackMaxDurationMs(distanceMeters: number): number {
-  if (!Number.isFinite(distanceMeters) || distanceMeters <= 0) return TRACK_TIMEOUT_MIN_MS;
-  const estimate = (distanceMeters / TRACK_MIN_AVG_SPEED_MPS) * 1000 * TRACK_TIMEOUT_MULTIPLIER;
-  return Math.min(TRACK_TIMEOUT_MAX_MS, Math.max(TRACK_TIMEOUT_MIN_MS, estimate));
+export function trackMaxDurationMs(distanceMeters: number, bestDurationMs?: number | null): number {
+  const estimate = Number.isFinite(distanceMeters) && distanceMeters > 0
+    ? (distanceMeters / TRACK_MIN_AVG_SPEED_MPS) * 1000 * TRACK_TIMEOUT_MULTIPLIER
+    : TRACK_TIMEOUT_MIN_MS;
+  const byDistance = Math.min(TRACK_TIMEOUT_MAX_MS, Math.max(TRACK_TIMEOUT_MIN_MS, estimate));
+  if (typeof bestDurationMs !== 'number' || !Number.isFinite(bestDurationMs) || bestDurationMs <= 0) return byDistance;
+  const byRecord = bestDurationMs * TRACK_TIMEOUT_RECORDED_MULTIPLIER;
+  return Math.min(TRACK_TIMEOUT_ABSOLUTE_MAX_MS, Math.max(byDistance, byRecord));
 }
 
 /**

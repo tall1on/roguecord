@@ -15,6 +15,7 @@ import {
   trackGates,
   trackMaxDurationMs,
   TRACK_CHECKPOINT_MAX,
+  TRACK_TIMEOUT_ABSOLUTE_MAX_MS,
   TRACK_TIMEOUT_MAX_MS,
   TRACK_TIMEOUT_MIN_MS,
   type RunProgress
@@ -79,6 +80,12 @@ test('run timeouts scale with distance but stay within sane bounds', () => {
   assert.equal(trackMaxDurationMs(100000), TRACK_TIMEOUT_MAX_MS);
   // The estimate stays monotonic between the bounds.
   assert.ok(trackMaxDurationMs(1000) <= trackMaxDurationMs(2000));
+  // A recorded finish anchors the window: a slow record raises it up to the absolute cap, while a
+  // fast record never drops it below the distance estimate.
+  assert.equal(trackMaxDurationMs(3000, 20 * 60 * 1000), TRACK_TIMEOUT_ABSOLUTE_MAX_MS);
+  assert.equal(trackMaxDurationMs(3000, 30 * 1000), 10 * 60 * 1000);
+  assert.equal(trackMaxDurationMs(3000, 0), 10 * 60 * 1000);
+  assert.equal(trackMaxDurationMs(3000, Number.NaN), 10 * 60 * 1000);
 });
 
 const progress = (nextGate: number, gateTimes: number[]): RunProgress => ({ nextGate, gateTimes, status: 'active', finishedAt: null });
