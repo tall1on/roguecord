@@ -20,6 +20,7 @@ let usePhoneLayout
 let getDriveCameraCaptureConstraints
 let getDriveCameraProducerOptions
 let useDriveCameraShare
+let useTrackRecording
 let normalizeCameraRotation
 let trackRecordingQueue
 before(async () => {
@@ -29,6 +30,7 @@ before(async () => {
   ;({ getDriveCameraCaptureConstraints, getDriveCameraProducerOptions } = await server.ssrLoadModule('/src/utils/driveCamera.ts'))
   ;({ normalizeCameraRotation } = await server.ssrLoadModule('/src/utils/cameraOrientation.ts'))
   ;({ useDriveCameraShare } = await server.ssrLoadModule('/src/composables/useDriveCameraShare.ts'))
+  ;({ useTrackRecording } = await server.ssrLoadModule('/src/composables/useTrackRecording.ts'))
   ;({ usePhoneLayout } = await server.ssrLoadModule('/src/composables/usePhoneLayout.ts'))
   trackRecordingQueue = await server.ssrLoadModule('/src/utils/trackRecordingQueue.ts')
 })
@@ -545,6 +547,162 @@ test('drive recording queue persists clips in order and removes them', async () 
   assert.deepEqual((await trackRecordingQueue.listTrackRecordings()).map((entry) => entry.runId), ['r2'])
   assert.equal(await trackRecordingQueue.countTrackRecordings(), 1)
   trackRecordingQueue.clearTrackRecordingMemoryFallback()
+})
+
+function installFakeMediaRecorder(context) {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'MediaRecorder')
+  class FakeMediaRecorder {
+    static instances = []
+    static isTypeSupported() { return true }
+    constructor(stream, options) {
+      this.stream = stream
+      this.mimeType = (options && options.mimeType) || 'video/webm'
+      this.state = 'inactive'
+      this.ondataavailable = null
+      this.onerror = null
+      this.onstop = null
+      FakeMediaRecorder.instances.push(this)
+    }
+    start() { this.state = 'recording' }
+    stop() { if (this.state === 'recording') this.state = 'inactive' }
+    // The browser emits a final dataavailable before onstop; tests drive that explicitly.
+    finish(data = 'tail') {
+      if (this.ondataavailable) this.ondataavailable({ data: new Blob([data]) })
+      if (this.onstop) this.onstop()
+    }
+  }
+  Object.defineProperty(globalThis, 'MediaRecorder', { configurable: true, value: FakeMediaRecorder })
+  context.after(() => {
+    if (original) Object.defineProperty(globalThis, 'MediaRecorder', original)
+    else delete globalThis.MediaRecorder
+  })
+  return FakeMediaRecorder
+}
+
+function setupTrackRecording() {
+  const listeners = new Set()
+  const stored = []
+  const videoTrack = { readyState: 'live' }
+  const stream = { getVideoTracks: () => [videoTrack] }
+  const scope = effectScope()
+  let recording
+  scope.run(() => {
+    recording = useTrackRecording({
+      getChannelId: () => 'trip',
+      isJoined: () => true,
+      getCameraStream: () => stream,
+      getConnectionId: () => 'guild',
+      send: () => {},
+      addMessageListener: (listener) => listeners.add(listener),
+      removeMessageListener: (listener) => listeners.delete(listener),
+      storeRecording: (input) => { stored.push(input) }
+    })
+  })
+  const emit = (type, payload = {}) => {
+    for (const listener of listeners) listener({ type, payload: { channel_id: 'trip', ...payload } })
+  }
+  return { recording, stored, emit, scope }
+}
+
+test('track recording hands off to a queued run when the recorded run stops', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'], now: 10_000 })
+  const originalNow = Date.now
+  let now = 10_000
+  Date.now = () => now
+  context.after(() => { Date.now = originalNow })
+  const FakeMediaRecorder = installFakeMediaRecorder(context)
+  const { recording, stored, emit, scope } = setupTrackRecording()
+  context.after(() => scope.stop())
+
+  emit('drive_recording_start', { run_id: 'r1', max_duration_ms: 60000 })
+  assert.equal(recording.isRecording.value, true)
+  assert.equal(recording.recordingRunId.value, 'r1')
+  assert.equal(FakeMediaRecorder.instances.length, 1)
+  assert.equal(FakeMediaRecorder.instances[0].state, 'recording')
+
+  // A start for another run while the first is recording is queued, not dropped.
+  emit('drive_recording_start', { run_id: 'r2', max_duration_ms: 60000 })
+  assert.equal(FakeMediaRecorder.instances.length, 1)
+
+  // The recorded run's stop flushes its tail, then the queued run starts.
+  now = 12_000
+  context.mock.timers.tick(2000)
+  emit('drive_recording_stop', { run_id: 'r1', reason: 'track_finished' })
+  assert.equal(FakeMediaRecorder.instances[0].state, 'inactive')
+  FakeMediaRecorder.instances[0].finish()
+
+  assert.equal(stored.length, 1)
+  assert.equal(stored[0].runId, 'r1')
+  assert.equal(stored[0].connectionId, 'guild')
+  assert.equal(FakeMediaRecorder.instances.length, 2)
+  assert.equal(FakeMediaRecorder.instances[1].state, 'recording')
+  assert.equal(recording.recordingRunId.value, 'r2')
+  assert.equal(recording.isRecording.value, true)
+})
+
+test('a terminal run update stops only the matching recording', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'], now: 10_000 })
+  const originalNow = Date.now
+  let now = 10_000
+  Date.now = () => now
+  context.after(() => { Date.now = originalNow })
+  const FakeMediaRecorder = installFakeMediaRecorder(context)
+  const { recording, stored, emit, scope } = setupTrackRecording()
+  context.after(() => scope.stop())
+
+  emit('drive_recording_start', { run_id: 'r9', max_duration_ms: 60000 })
+  const fake = FakeMediaRecorder.instances[0]
+  now = 11_500
+  context.mock.timers.tick(1500)
+
+  // A finish for an unrelated run must not stop this recording.
+  emit('drive_track_run_updated', { run: { id: 'other', status: 'finished', channel_id: 'trip' } })
+  assert.equal(fake.state, 'recording')
+
+  // The recorded run's authoritative terminal status stops it even without a stop message.
+  emit('drive_track_run_updated', { run: { id: 'r9', status: 'finished', channel_id: 'trip' } })
+  assert.equal(fake.state, 'inactive')
+  fake.finish()
+  assert.equal(stored.length, 1)
+  assert.equal(stored[0].runId, 'r9')
+  assert.equal(recording.isRecording.value, false)
+})
+
+test('a start that arrives before the camera stream is live is retried, not lost', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 10_000 })
+  const FakeMediaRecorder = installFakeMediaRecorder(context)
+  const listeners = new Set()
+  let live = false
+  const videoTrack = { get readyState() { return live ? 'live' : 'ended' } }
+  const stream = { getVideoTracks: () => [videoTrack] }
+  const scope = effectScope()
+  let recording
+  scope.run(() => {
+    recording = useTrackRecording({
+      getChannelId: () => 'trip',
+      isJoined: () => true,
+      getCameraStream: () => stream,
+      getConnectionId: () => 'guild',
+      send: () => {},
+      addMessageListener: (listener) => listeners.add(listener),
+      removeMessageListener: (listener) => listeners.delete(listener),
+      storeRecording: () => {}
+    })
+  })
+  context.after(() => scope.stop())
+  const emit = (type, payload = {}) => {
+    for (const listener of listeners) listener({ type, payload: { channel_id: 'trip', ...payload } })
+  }
+
+  emit('drive_recording_start', { run_id: 'r1' })
+  assert.equal(FakeMediaRecorder.instances.length, 0)
+  assert.equal(recording.isRecording.value, false)
+
+  live = true
+  context.mock.timers.tick(400)
+  assert.equal(FakeMediaRecorder.instances.length, 1)
+  assert.equal(recording.isRecording.value, true)
+  assert.equal(recording.recordingRunId.value, 'r1')
 })
 
 test('Drive camera publishes the camera source and releases its local track on stop', async (context) => {

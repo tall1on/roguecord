@@ -124,6 +124,7 @@ const trackRecording = useTrackRecording({
     const userId = chatStore.currentUser?.id
     return userId ? webrtcStore.userCameraStreams.get(userId) ?? null : null
   },
+  getConnectionId: () => chatStore.activeConnectionId,
   send: (type, payload) => chatStore.send(type, payload),
   addMessageListener: (listener) => chatStore.addMessageListener(listener),
   removeMessageListener: (listener) => chatStore.removeMessageListener(listener),

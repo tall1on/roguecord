@@ -15,6 +15,7 @@ export type TrackRecordingStoreInput = {
   file: Blob
   mimeType: string
   durationMs: number
+  connectionId?: string | null
 }
 
 const BASE_RETRY_DELAY_MS = 2_000
@@ -57,12 +58,18 @@ export const useTrackRecordingUploadsStore = defineStore('trackRecordingUploads'
     }, delay)
   }
 
+  // Errors the server tags as permanent for this run. Anything else (a stale upload session, a
+  // transient save failure, a socket hiccup) stays queued and is retried, so a recoverable clip
+  // is never deleted just because an upload attempt failed.
+  const NON_RETRYABLE_CODES = new Set(['run_not_found', 'unsupported_format', 'invalid_metadata', 'invalid_duration'])
+
   const isNonRetryable = (error: unknown): boolean => {
+    const code = (error as { code?: unknown } | null)?.code
+    if (typeof code === 'string') return NON_RETRYABLE_CODES.has(code)
     const message = error instanceof Error ? error.message.toLowerCase() : ''
-    return message.includes('not found')
-      || message.includes('no longer exists')
-      || message.includes('unsupported')
-      || message.includes('invalid')
+    return message.includes('track run not found')
+      || message.includes('track run no longer exists')
+      || message.includes('unsupported drive recording format')
   }
 
   const process = async (): Promise<void> => {
@@ -74,11 +81,16 @@ export const useTrackRecordingUploadsStore = defineStore('trackRecordingUploads'
       while (chatStore.isConnected) {
         const entries = await listTrackRecordings()
         if (!entries.length) break
+        const activeConnectionId = chatStore.activeConnectionId ?? null
         let progressed = false
         let scheduledRetry = false
         for (const entry of entries) {
           if (!chatStore.isConnected) break
           if (processed.has(entry.runId)) continue
+          // Clips are only uploaded while connected to the guild that produced the run. A clip
+          // from another guild stays queued (instead of being uploaded and rejected as a missing
+          // run) until that guild is connected again.
+          if (entry.connectionId && entry.connectionId !== activeConnectionId) continue
           processed.add(entry.runId)
           try {
             const alreadyStored = await getDriveRecordingStatus(chatStore, entry.runId, new AbortController().signal)
@@ -125,7 +137,8 @@ export const useTrackRecordingUploadsStore = defineStore('trackRecordingUploads'
       durationMs: input.durationMs,
       size: input.file.size,
       createdAt: Date.now(),
-      blob: input.file
+      blob: input.file,
+      connectionId: input.connectionId ?? null
     }
     await enqueueTrackRecording(entry)
     await refreshCount()
