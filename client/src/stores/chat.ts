@@ -1005,12 +1005,20 @@ export const useChatStore = defineStore('chat', () => {
       throw new Error('Connect to the guild before uploading the recording');
     }
 
+    // Recording errors are matched by their run/upload id so an unrelated socket error cannot
+    // abort an in-flight upload, and the server's code is preserved for retry decisions.
+    const makeRecordingError = (payload: any, fallback: string) => {
+      const failure = new Error(typeof payload?.message === 'string' ? payload.message : fallback) as Error & { code?: string };
+      if (typeof payload?.code === 'string') failure.code = payload.code;
+      return failure;
+    };
+
     const readyPromise = waitForSocketMessage((message) => {
       if (message?.type === 'drive_recording_ready' && message?.payload?.run_id === input.runId) {
         return message.payload as { upload_id: string; chunk_size_bytes?: number };
       }
-      if (message?.type === 'error') {
-        throw new Error(message?.payload?.message || 'Recording upload initialization failed');
+      if (message?.type === 'error' && message?.payload?.run_id === input.runId) {
+        throw makeRecordingError(message.payload, 'Recording upload initialization failed');
       }
       return null;
     });
@@ -1037,8 +1045,8 @@ export const useChatStore = defineStore('chat', () => {
         if (message?.type === 'drive_recording_chunk_ack' && message?.payload?.upload_id === uploadId) {
           return message.payload as { received_bytes: number };
         }
-        if (message?.type === 'error') {
-          throw new Error(message?.payload?.message || 'Recording upload chunk failed');
+        if (message?.type === 'error' && message?.payload?.upload_id === uploadId) {
+          throw makeRecordingError(message.payload, 'Recording upload chunk failed');
         }
         return null;
       });
@@ -1054,8 +1062,9 @@ export const useChatStore = defineStore('chat', () => {
       if (message?.type === 'drive_recording_saved' && message?.payload?.run_id === input.runId) {
         return message.payload as { run_id: string };
       }
-      if (message?.type === 'error') {
-        throw new Error(message?.payload?.message || 'Recording upload failed');
+      if (message?.type === 'error'
+        && (message?.payload?.upload_id === uploadId || message?.payload?.run_id === input.runId)) {
+        throw makeRecordingError(message.payload, 'Recording upload failed');
       }
       return null;
     });

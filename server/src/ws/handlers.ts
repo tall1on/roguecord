@@ -3,7 +3,7 @@ import { driveParticipants, validDriveId } from './drive';
 import { handleDriveNavigation } from './driveNavigation';
 import { abandonDriveRunsForChannel, broadcastActiveRuns, driveTracksStore, endDriveTrackRun, handleDriveTracks, observeDriveLocation } from './driveTracks';
 import type { DriveTrackRun } from '../driveTracks';
-import { trackRecordings } from './driveTrackRecordings';
+import { trackRecordings } from './driveTrackRecordingsRuntime';
 import {
   MAX_TRACK_RECORDING_SIZE_BYTES,
   TRACK_RECORDING_DURATION_SLACK_MS,
@@ -2954,16 +2954,31 @@ const appendUploadChunk = async (
   const uploadId = typeof payload?.upload_id === 'string' ? payload.upload_id.trim() : '';
   const offset = typeof payload?.offset === 'number' ? payload.offset : Number(payload?.offset);
   const dataBase64 = typeof payload?.data_base64 === 'string' ? payload.data_base64 : '';
+  // Recording-upload errors carry a machine-readable code and the upload id so the driver's
+  // durable queue can tell its own failures apart from unrelated socket errors and decide
+  // whether a retry can still succeed.
+  const sendError = (message: string, code?: string) => {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: {
+        message,
+        ...(uploadId ? { upload_id: uploadId } : {}),
+        ...(expectedKind && code ? { code } : {})
+      }
+    }));
+  };
 
   if (!uploadId || !Number.isFinite(offset) || offset < 0 || !dataBase64) {
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid upload chunk payload' } }));
+    sendError('Invalid upload chunk payload', 'invalid_chunk');
     return;
   }
 
   if (expectedKind) {
     const pending = getPendingUpload(uploadId);
     if (!pending || pending.userId !== client.userId || pending.kind !== expectedKind) {
-      client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Upload session not found' } }));
+      // The server may have restarted or the session may have been cleaned up; the client can
+      // re-run drive_recording_begin and retry, so this must stay retryable.
+      sendError('Upload session not found', 'upload_session_not_found');
       return;
     }
   }
@@ -2981,10 +2996,7 @@ const appendUploadChunk = async (
       }
     }));
   } catch (error) {
-    client.ws.send(JSON.stringify({
-      type: 'error',
-      payload: { message: error instanceof Error ? error.message : 'Failed to append upload chunk' }
-    }));
+    sendError(error instanceof Error ? error.message : 'Failed to append upload chunk', 'chunk_failed');
   }
 };
 
@@ -2997,24 +3009,33 @@ const handleDriveRecordingBegin = async (
   client: ClientConnection,
   payload: { run_id?: string; mime_type?: string; size_bytes?: number }
 ) => {
-  if (!client.userId) return;
   const runId = typeof payload?.run_id === 'string' ? payload.run_id.trim() : '';
+  const sendError = (message: string, code: string) => {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message, code, ...(runId ? { run_id: runId } : {}) }
+    }));
+  };
+  if (!client.userId) {
+    sendError('Authentication required.', 'auth_required');
+    return;
+  }
   const mimeType = normalizeTrackRecordingMimeType(payload?.mime_type);
   const expectedSize = typeof payload?.size_bytes === 'number' ? payload.size_bytes : Number(payload?.size_bytes);
   if (!validDriveId(runId) || !mimeType || !Number.isFinite(expectedSize) || expectedSize <= 0 || expectedSize > MAX_TRACK_RECORDING_SIZE_BYTES) {
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid drive recording metadata' } }));
+    sendError('Invalid drive recording metadata', 'invalid_metadata');
     return;
   }
 
   const run = await driveTracksStore.getRunById(runId);
   if (!run || run.user_id !== client.userId) {
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Track run not found' } }));
+    sendError('Track run not found', 'run_not_found');
     return;
   }
 
   const extension = getTrackRecordingFileExtension(mimeType);
   if (!extension) {
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Unsupported drive recording format' } }));
+    sendError('Unsupported drive recording format', 'unsupported_format');
     return;
   }
 
@@ -3062,7 +3083,14 @@ const handleDriveRecordingComplete = async (
   const uploadId = typeof payload?.upload_id === 'string' ? payload.upload_id.trim() : '';
   const pending = uploadId ? getPendingUpload(uploadId) : null;
   if (!pending || pending.kind !== 'track_recording' || pending.userId !== client.userId || !pending.runId) {
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Recording upload session not found' } }));
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: {
+        message: 'Recording upload session not found',
+        code: 'upload_session_not_found',
+        ...(uploadId ? { upload_id: uploadId } : {})
+      }
+    }));
     return;
   }
 
@@ -3071,7 +3099,10 @@ const handleDriveRecordingComplete = async (
     ? Math.min(Math.round(rawDuration), TRACK_RECORDING_MAX_DURATION_MS + TRACK_RECORDING_DURATION_SLACK_MS)
     : null;
   if (durationMs === null) {
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid recording duration' } }));
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message: 'Invalid recording duration', code: 'invalid_duration', run_id: pending.runId, upload_id: uploadId }
+    }));
     return;
   }
 
@@ -3133,9 +3164,12 @@ const handleDriveRecordingComplete = async (
     client.ws.send(JSON.stringify({ type: 'drive_recording_saved', payload: { run_id: pending.runId } }));
   } catch (error) {
     try { abortPendingUpload(uploadId); } catch { /* ignore */ }
+    const message = error instanceof Error ? error.message : 'Failed to save the recording';
+    // A missing run means the clip can never be attached; any other failure can be retried.
+    const code = message === 'Track run not found' || message === 'Track run no longer exists' ? 'run_not_found' : 'save_failed';
     client.ws.send(JSON.stringify({
       type: 'error',
-      payload: { message: error instanceof Error ? error.message : 'Failed to save the recording' }
+      payload: { message, code, run_id: pending.runId, upload_id: uploadId }
     }));
   }
 };

@@ -1,7 +1,4 @@
-import { connectionManager } from './connectionManager';
-import { rooms } from '../mediasoup';
 import type { DriveTrackRun } from '../driveTracks';
-import { TRACK_RECORDING_MAX_DURATION_MS } from '../storage/trackRecordingStorage';
 
 type RecordingSession = {
   runId: string;
@@ -12,7 +9,14 @@ type RecordingSession = {
   timer: ReturnType<typeof setTimeout>;
 };
 
-type StopReason = 'track_finished' | 'track_abandoned' | 'camera_off' | 'timeout' | 'driver_left' | 'run_ended';
+export type RecordingStopReason = 'track_finished' | 'track_abandoned' | 'camera_off' | 'timeout' | 'driver_left' | 'run_ended';
+
+export type RecordingManagerDeps = {
+  /** Whether the driver currently has a live camera producer in the drive room. */
+  hasCameraProducer: (channelId: string, userId: string) => boolean;
+  /** Delivers a recording lifecycle message to one specific driver. */
+  sendToUser: (userId: string, message: unknown) => void;
+};
 
 /**
  * Starts and stops server-driven camera recordings for timed track runs.
@@ -21,27 +25,30 @@ type StopReason = 'track_finished' | 'track_abandoned' | 'camera_off' | 'timeout
  * run has a camera producer in the drive room, and it is stopped when the run ends, the
  * camera is turned off, the driver leaves, or the hard three-minute cap is reached. The
  * driver client performs the actual MediaRecorder capture and uploads the result.
+ *
+ * A driver can only ever produce one camera stream, and the client can only run one
+ * MediaRecorder, so at most one session is tracked per driver. When several runs are
+ * active at once (for example a forward and its reversed layout, whose start gate is the
+ * other track's finish), the chosen run is recorded and the session rolls over to the next
+ * eligible run as soon as the recorded one finishes. This keeps every start command
+ * correlated with a matching stop, so a finish is never mistaken for a restart and the
+ * client never strands a recording until the hard cap.
  */
 export class TrackRecordingManager {
   private sessions = new Map<string, RecordingSession>();
   private stopped = new Set<string>();
-  private readonly maxDurationMs: number;
 
-  constructor(maxDurationMs: number = TRACK_RECORDING_MAX_DURATION_MS) {
-    this.maxDurationMs = maxDurationMs;
-  }
+  constructor(private maxDurationMs: number, private deps: RecordingManagerDeps) {}
 
   private isActiveTimedRun(run: DriveTrackRun): boolean {
     return run.status === 'active' && run.gate_times.length > 0;
   }
 
-  private hasCameraProducer(channelId: string, userId: string): boolean {
-    const peer = rooms.get(channelId)?.peers.get(userId);
-    if (!peer) return false;
-    for (const producer of peer.producers.values()) {
-      if ((producer.appData as { source?: unknown } | undefined)?.source === 'camera') return true;
+  private sessionForDriver(channelId: string, userId: string): RecordingSession | null {
+    for (const session of this.sessions.values()) {
+      if (session.channelId === channelId && session.userId === userId) return session;
     }
-    return false;
+    return null;
   }
 
   private forgetStopped(runId: string): void {
@@ -56,34 +63,52 @@ export class TrackRecordingManager {
     }
   }
 
-  /** Reconciles recording sessions for one driver against the latest run list and camera state. */
+  /** Picks the run to record when a driver has more than one active timed run. */
+  private pickCandidate(eligible: Iterable<DriveTrackRun>): DriveTrackRun | null {
+    let candidate: DriveTrackRun | null = null;
+    for (const run of eligible) {
+      if (this.stopped.has(run.id)) continue;
+      if (!candidate) { candidate = run; continue; }
+      // Prefer the run that is furthest along, then the one that started earliest. This keeps a
+      // finishing forward run recorded until it completes instead of switching to a freshly
+      // started reversed run that merely shares the same physical start/finish point.
+      if (run.next_gate > candidate.next_gate) { candidate = run; continue; }
+      if (run.next_gate === candidate.next_gate && run.started_at < candidate.started_at) candidate = run;
+    }
+    return candidate;
+  }
+
+  /**
+   * Reconciles recording sessions for one driver against the latest run list and camera state.
+   * At most one session per driver is kept: the current one while its run stays eligible, then
+   * the best remaining eligible run once it ends.
+   */
   sync(channelId: string, userId: string, runs: readonly DriveTrackRun[]): void {
     const eligible = new Map<string, DriveTrackRun>();
     for (const run of runs) {
       if (run.channel_id === channelId && run.user_id === userId && this.isActiveTimedRun(run)) eligible.set(run.id, run);
     }
-    const cameraOn = this.hasCameraProducer(channelId, userId);
+    const cameraOn = this.deps.hasCameraProducer(channelId, userId);
 
-    for (const [runId, session] of [...this.sessions]) {
-      if (session.channelId !== channelId || session.userId !== userId) continue;
-      if (!cameraOn || !eligible.has(runId)) {
-        const run = runs.find((entry) => entry.id === runId);
-        const reason: StopReason = !cameraOn
-          ? 'camera_off'
-          : run?.status === 'finished'
-            ? 'track_finished'
-            : run?.status === 'abandoned'
-              ? 'track_abandoned'
-              : 'run_ended';
-        this.stop(runId, reason);
-      }
+    const current = this.sessionForDriver(channelId, userId);
+    if (current && (!cameraOn || !eligible.has(current.runId))) {
+      const ended = runs.find((entry) => entry.id === current.runId);
+      const reason: RecordingStopReason = !cameraOn
+        ? 'camera_off'
+        : ended?.status === 'finished'
+          ? 'track_finished'
+          : ended?.status === 'abandoned'
+            ? 'track_abandoned'
+            : 'run_ended';
+      this.stop(current.runId, reason);
     }
 
     if (!cameraOn) return;
-    for (const run of eligible.values()) {
-      if (this.sessions.has(run.id) || this.stopped.has(run.id)) continue;
-      this.start(run);
-    }
+    // A session is already running; never start a second one for the same driver.
+    if (this.sessionForDriver(channelId, userId)) return;
+
+    const candidate = this.pickCandidate(eligible.values());
+    if (candidate) this.start(candidate);
   }
 
   /**
@@ -95,17 +120,15 @@ export class TrackRecordingManager {
     for (const run of runs) {
       if (run.channel_id === channelId && run.user_id === userId && this.isActiveTimedRun(run)) eligible.add(run.id);
     }
-    for (const [runId, session] of [...this.sessions]) {
-      if (session.channelId !== channelId || session.userId !== userId) continue;
-      if (eligible.has(runId)) continue;
-      const run = runs.find((entry) => entry.id === runId);
-      const reason: StopReason = run?.status === 'finished'
-        ? 'track_finished'
-        : run?.status === 'abandoned'
-          ? 'track_abandoned'
-          : 'run_ended';
-      this.stop(runId, reason);
-    }
+    const current = this.sessionForDriver(channelId, userId);
+    if (!current || eligible.has(current.runId)) return;
+    const run = runs.find((entry) => entry.id === current.runId);
+    const reason: RecordingStopReason = run?.status === 'finished'
+      ? 'track_finished'
+      : run?.status === 'abandoned'
+        ? 'track_abandoned'
+        : 'run_ended';
+    this.stop(current.runId, reason);
   }
 
   private start(run: DriveTrackRun): void {
@@ -119,7 +142,7 @@ export class TrackRecordingManager {
       startedAt: Date.now(),
       timer
     });
-    connectionManager.sendToUser(run.user_id, {
+    this.deps.sendToUser(run.user_id, {
       type: 'drive_recording_start',
       payload: {
         channel_id: run.channel_id,
@@ -130,13 +153,13 @@ export class TrackRecordingManager {
     });
   }
 
-  private stop(runId: string, reason: StopReason): void {
+  private stop(runId: string, reason: RecordingStopReason): void {
     const session = this.sessions.get(runId);
     if (!session) return;
     clearTimeout(session.timer);
     this.sessions.delete(runId);
     this.forgetStopped(runId);
-    connectionManager.sendToUser(session.userId, {
+    this.deps.sendToUser(session.userId, {
       type: 'drive_recording_stop',
       payload: { channel_id: session.channelId, run_id: runId, reason }
     });
@@ -165,5 +188,3 @@ export class TrackRecordingManager {
     }
   }
 }
-
-export const trackRecordings = new TrackRecordingManager();

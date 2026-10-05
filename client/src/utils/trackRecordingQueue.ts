@@ -9,6 +9,8 @@ export type QueuedTrackRecording = {
   size: number
   createdAt: number
   blob: Blob
+  /** Guild connection the run belongs to, so a clip is never uploaded to another server. */
+  connectionId?: string | null
 }
 
 const DB_NAME = 'roguecord-track-recordings'
