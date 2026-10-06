@@ -930,6 +930,7 @@ export const createPresignedReadUrlForS3 = async (input: {
   expiresInSeconds?: number;
   fileName?: string | null;
   mimeType?: string | null;
+  download?: boolean;
 }): Promise<string> => {
   const normalized = sanitizeConfig(input.config);
   const resolved = resolveS3ClientConfig(normalized);
@@ -941,7 +942,7 @@ export const createPresignedReadUrlForS3 = async (input: {
     Bucket: resolved.bucket,
     Key: input.key,
     ResponseContentDisposition: fileName
-      ? `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`
+      ? `${input.download ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(fileName)}`
       : undefined,
     ResponseContentType: mimeType || undefined
   }), {

@@ -1,6 +1,20 @@
 import { ClientConnection, connectionManager } from './connectionManager';
 import { driveParticipants, validDriveId } from './drive';
 import { handleDriveNavigation } from './driveNavigation';
+import { abandonDriveRunsForChannel, broadcastActiveRuns, driveTracksStore, endDriveTrackRun, handleDriveTracks, observeDriveLocation } from './driveTracks';
+import type { DriveTrackRun } from '../driveTracks';
+import { trackRecordings } from './driveTrackRecordingsRuntime';
+import {
+  MAX_TRACK_RECORDING_SIZE_BYTES,
+  TRACK_RECORDING_DURATION_SLACK_MS,
+  TRACK_RECORDING_MAX_DURATION_MS,
+  buildTrackRecordingClientUrl,
+  buildTrackRecordingS3Key,
+  deleteTrackRecording,
+  getSafeLocalTrackRecordingPath,
+  getTrackRecordingFileExtension,
+  normalizeTrackRecordingMimeType
+} from '../storage/trackRecordingStorage';
 import {
   createUser,
   getUserByPublicKey,
@@ -1849,6 +1863,14 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'drive_get_route':
         await handleDriveNavigation(client, type, payload);
         break;
+      case 'drive_track_leaderboard':
+      case 'drive_tracks_list':
+      case 'drive_track_create':
+      case 'drive_track_update':
+      case 'drive_track_delete':
+      case 'drive_track_vote':
+        await handleDriveTracks(client, type, payload);
+        break;
       case 'drive_set_destination': {
         const identifiers = {
           request_id: validDriveId(payload?.request_id) ? payload.request_id : null,
@@ -1918,6 +1940,24 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
       case 'abort_file_upload':
         await handleAbortFileUpload(client, payload);
         break;
+      case 'drive_recording_begin':
+        await handleDriveRecordingBegin(client, payload);
+        break;
+      case 'drive_recording_chunk':
+        await handleDriveRecordingChunk(client, payload);
+        break;
+      case 'drive_recording_complete':
+        await handleDriveRecordingComplete(client, payload);
+        break;
+      case 'drive_recording_abort':
+        await handleDriveRecordingAbort(client, payload);
+        break;
+      case 'drive_recording_url':
+        await handleDriveRecordingUrl(client, payload);
+        break;
+      case 'drive_recording_status':
+        await handleDriveRecordingStatus(client, payload);
+        break;
       case 'delete_message':
         await handleDeleteMessage(client, payload);
         break;
@@ -1947,7 +1987,19 @@ export const handleMessage = async (client: ClientConnection, messageStr: string
           client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Join the drive channel before sharing location' } }));
           break;
         }
-        driveParticipants.update(payload?.channel_id, client, payload?.location);
+        {
+          const location = driveParticipants.update(payload?.channel_id, client, payload?.location);
+          if (location) {
+            // Track timing is best-effort; a timing failure must never drop a GPS update.
+            const changedRuns = await observeDriveLocation(payload.channel_id, client.userId, {
+              latitude: location.latitude, longitude: location.longitude, accuracy: location.accuracy, speed: location.speed
+            }).catch<DriveTrackRun[]>(() => []);
+            // autoTrack only returns *changed* runs, so merge the full active set or an ordinary
+            // GPS tick would look like the run had ended and stop the recording.
+            const activeRuns = await driveTracksStore.getActiveRuns(payload.channel_id, client.userId).catch<DriveTrackRun[]>(() => []);
+            trackRecordings.sync(payload.channel_id, client.userId, [...changedRuns, ...activeRuns]);
+          }
+        }
         break;
       case 'create_webrtc_transport':
         await handleCreateWebRtcTransport(client, payload);
@@ -2744,6 +2796,10 @@ const handleDeleteChannel = async (client: ClientConnection, payload: { channel_
 
     if (channel.type === 'voice' || channel.type === 'drive') {
       driveParticipants.removeChannel(channel_id);
+      if (channel.type === 'drive') {
+        trackRecordings.shutdownChannel(channel_id);
+        void abandonDriveRunsForChannel(channel_id).catch(console.error);
+      }
       const room = rooms.get(channel_id);
       if (room) {
         for (const peer of room.peers.values()) {
@@ -2887,26 +2943,51 @@ const handleBeginFileUpload = async (
   }));
 };
 
-const handleUploadFileChunk = async (
+const appendUploadChunk = async (
   client: ClientConnection,
-  payload: { upload_id?: string; offset?: number; data_base64?: string }
+  payload: { upload_id?: string; offset?: number; data_base64?: string },
+  ackType: string,
+  expectedKind?: 'track_recording'
 ) => {
   if (!client.userId) return;
 
   const uploadId = typeof payload?.upload_id === 'string' ? payload.upload_id.trim() : '';
   const offset = typeof payload?.offset === 'number' ? payload.offset : Number(payload?.offset);
   const dataBase64 = typeof payload?.data_base64 === 'string' ? payload.data_base64 : '';
+  // Recording-upload errors carry a machine-readable code and the upload id so the driver's
+  // durable queue can tell its own failures apart from unrelated socket errors and decide
+  // whether a retry can still succeed.
+  const sendError = (message: string, code?: string) => {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: {
+        message,
+        ...(uploadId ? { upload_id: uploadId } : {}),
+        ...(expectedKind && code ? { code } : {})
+      }
+    }));
+  };
 
   if (!uploadId || !Number.isFinite(offset) || offset < 0 || !dataBase64) {
-    client.ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid upload chunk payload' } }));
+    sendError('Invalid upload chunk payload', 'invalid_chunk');
     return;
+  }
+
+  if (expectedKind) {
+    const pending = getPendingUpload(uploadId);
+    if (!pending || pending.userId !== client.userId || pending.kind !== expectedKind) {
+      // The server may have restarted or the session may have been cleaned up; the client can
+      // re-run drive_recording_begin and retry, so this must stay retryable.
+      sendError('Upload session not found', 'upload_session_not_found');
+      return;
+    }
   }
 
   try {
     const buffer = Buffer.from(dataBase64, 'base64');
     const upload = appendPendingUploadChunk(uploadId, buffer, offset);
     client.ws.send(JSON.stringify({
-      type: 'file_upload_chunk_ack',
+      type: ackType,
       payload: {
         upload_id: uploadId,
         received_bytes: upload.receivedBytes,
@@ -2915,11 +2996,253 @@ const handleUploadFileChunk = async (
       }
     }));
   } catch (error) {
+    sendError(error instanceof Error ? error.message : 'Failed to append upload chunk', 'chunk_failed');
+  }
+};
+
+const handleUploadFileChunk = async (
+  client: ClientConnection,
+  payload: { upload_id?: string; offset?: number; data_base64?: string }
+) => appendUploadChunk(client, payload, 'file_upload_chunk_ack');
+
+const handleDriveRecordingBegin = async (
+  client: ClientConnection,
+  payload: { run_id?: string; mime_type?: string; size_bytes?: number }
+) => {
+  const runId = typeof payload?.run_id === 'string' ? payload.run_id.trim() : '';
+  const sendError = (message: string, code: string) => {
     client.ws.send(JSON.stringify({
       type: 'error',
-      payload: { message: error instanceof Error ? error.message : 'Failed to append upload chunk' }
+      payload: { message, code, ...(runId ? { run_id: runId } : {}) }
+    }));
+  };
+  if (!client.userId) {
+    sendError('Authentication required.', 'auth_required');
+    return;
+  }
+  const mimeType = normalizeTrackRecordingMimeType(payload?.mime_type);
+  const expectedSize = typeof payload?.size_bytes === 'number' ? payload.size_bytes : Number(payload?.size_bytes);
+  if (!validDriveId(runId) || !mimeType || !Number.isFinite(expectedSize) || expectedSize <= 0 || expectedSize > MAX_TRACK_RECORDING_SIZE_BYTES) {
+    sendError('Invalid drive recording metadata', 'invalid_metadata');
+    return;
+  }
+
+  const run = await driveTracksStore.getRunById(runId);
+  if (!run || run.user_id !== client.userId) {
+    sendError('Track run not found', 'run_not_found');
+    return;
+  }
+
+  const extension = getTrackRecordingFileExtension(mimeType);
+  if (!extension) {
+    sendError('Unsupported drive recording format', 'unsupported_format');
+    return;
+  }
+
+  const upload = createPendingUpload({
+    kind: 'track_recording',
+    channelId: run.channel_id,
+    userId: client.userId,
+    runId,
+    originalName: `drive-run-${runId}.${extension}`,
+    mimeType,
+    expectedSize
+  });
+
+  client.ws.send(JSON.stringify({
+    type: 'drive_recording_ready',
+    payload: {
+      upload_id: upload.uploadId,
+      run_id: runId,
+      chunk_size_bytes: MAX_UPLOAD_CHUNK_SIZE_BYTES,
+      max_file_size_bytes: MAX_TRACK_RECORDING_SIZE_BYTES
+    }
+  }));
+};
+
+const handleDriveRecordingChunk = async (
+  client: ClientConnection,
+  payload: { upload_id?: string; offset?: number; data_base64?: string }
+) => appendUploadChunk(client, payload, 'drive_recording_chunk_ack', 'track_recording');
+
+const handleDriveRecordingAbort = async (client: ClientConnection, payload: { upload_id?: string }) => {
+  if (!client.userId) return;
+  const uploadId = typeof payload?.upload_id === 'string' ? payload.upload_id.trim() : '';
+  if (!uploadId) return;
+  const pending = getPendingUpload(uploadId);
+  if (!pending || pending.userId !== client.userId || pending.kind !== 'track_recording') return;
+  abortPendingUpload(uploadId);
+  client.ws.send(JSON.stringify({ type: 'drive_recording_aborted', payload: { upload_id: uploadId } }));
+};
+
+const handleDriveRecordingComplete = async (
+  client: ClientConnection,
+  payload: { upload_id?: string; duration_ms?: number }
+) => {
+  if (!client.userId) return;
+  const uploadId = typeof payload?.upload_id === 'string' ? payload.upload_id.trim() : '';
+  const pending = uploadId ? getPendingUpload(uploadId) : null;
+  if (!pending || pending.kind !== 'track_recording' || pending.userId !== client.userId || !pending.runId) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: {
+        message: 'Recording upload session not found',
+        code: 'upload_session_not_found',
+        ...(uploadId ? { upload_id: uploadId } : {})
+      }
+    }));
+    return;
+  }
+
+  const rawDuration = typeof payload?.duration_ms === 'number' ? payload.duration_ms : Number(payload?.duration_ms);
+  const durationMs = Number.isFinite(rawDuration) && rawDuration > 0
+    ? Math.min(Math.round(rawDuration), TRACK_RECORDING_MAX_DURATION_MS + TRACK_RECORDING_DURATION_SLACK_MS)
+    : null;
+  if (durationMs === null) {
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message: 'Invalid recording duration', code: 'invalid_duration', run_id: pending.runId, upload_id: uploadId }
+    }));
+    return;
+  }
+
+  try {
+    const run = await driveTracksStore.getRunById(pending.runId);
+    if (!run || run.user_id !== client.userId) throw new Error('Track run not found');
+    // Retried uploads overwrite the previous clip for the run; remember it for cleanup.
+    const previousRecording = await driveTracksStore.getRunRecording(pending.runId).catch(() => null);
+
+    const storageRuntime = await getStorageRuntimeConfig();
+    const mimeType = pending.mimeType || 'video/webm';
+    const finalized = storageRuntime.storageType === 's3' && storageRuntime.s3Config
+      ? await finalizePendingUpload(uploadId, {
+          storageType: 's3',
+          s3Config: storageRuntime.s3Config,
+          s3KeyOverride: buildTrackRecordingS3Key(storageRuntime.s3Config.prefix, pending.runId, pending.storageName)
+        })
+      : await finalizePendingUpload(uploadId, {
+          storageType: 'data_dir',
+          localTargetPath: getSafeLocalTrackRecordingPath(pending.runId, pending.storageName)
+        });
+
+    const saved = await driveTracksStore.setRunRecording(pending.runId, {
+      storage_provider: finalized.storageProvider,
+      storage_key: finalized.storageKey,
+      storage_name: finalized.storageName,
+      mime_type: mimeType,
+      size_bytes: pending.expectedSize,
+      duration_ms: durationMs
+    });
+    if (!saved) {
+      // The run was deleted while the clip was uploading; do not leave an orphaned file behind.
+      await deleteTrackRecording({
+        runId: pending.runId,
+        storageProvider: finalized.storageProvider,
+        storageKey: finalized.storageKey,
+        storageName: finalized.storageName,
+        persistedS3Config: storageRuntime.s3Config ?? null
+      });
+      throw new Error('Track run no longer exists');
+    }
+    trackRecordings.complete(pending.runId);
+
+    if (previousRecording
+      && !(previousRecording.storage_provider === finalized.storageProvider && previousRecording.storage_name === finalized.storageName)) {
+      await deleteTrackRecording({
+        runId: pending.runId,
+        storageProvider: previousRecording.storage_provider,
+        storageKey: previousRecording.storage_key,
+        storageName: previousRecording.storage_name,
+        persistedS3Config: storageRuntime.s3Config ?? null
+      }).catch(() => { /* the new clip is already saved; a stale file is non-fatal */ });
+    }
+
+    connectionManager.broadcastToAuthenticated({
+      type: 'drive_track_recording_ready',
+      payload: { channel_id: run.channel_id, track_id: run.track_id, run_id: pending.runId }
+    });
+    client.ws.send(JSON.stringify({ type: 'drive_recording_saved', payload: { run_id: pending.runId } }));
+  } catch (error) {
+    try { abortPendingUpload(uploadId); } catch { /* ignore */ }
+    const message = error instanceof Error ? error.message : 'Failed to save the recording';
+    // A missing run means the clip can never be attached; any other failure can be retried.
+    const code = message === 'Track run not found' || message === 'Track run no longer exists' ? 'run_not_found' : 'save_failed';
+    client.ws.send(JSON.stringify({
+      type: 'error',
+      payload: { message, code, run_id: pending.runId, upload_id: uploadId }
     }));
   }
+};
+
+const handleDriveRecordingUrl = async (client: ClientConnection, payload: { run_id?: string; request_id?: string }) => {
+  const requestId = typeof payload?.request_id === 'string' ? payload.request_id : null;
+  const replyError = (message: string) => {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message, request_id: requestId } }));
+  };
+  if (!client.userId) {
+    replyError('Authentication required.');
+    return;
+  }
+  const runId = typeof payload?.run_id === 'string' ? payload.run_id.trim() : '';
+  if (!validDriveId(runId)) {
+    replyError('Run identifier is required.');
+    return;
+  }
+
+  const recording = await driveTracksStore.getRunRecording(runId);
+  if (!recording) {
+    replyError('No recording is available for this run.');
+    return;
+  }
+
+  const extension = path.extname(recording.storage_name) || '.webm';
+  const url = await buildTrackRecordingClientUrl({
+    runId,
+    storageProvider: recording.storage_provider,
+    storageKey: recording.storage_key,
+    storageName: recording.storage_name,
+    mimeType: recording.mime_type,
+    persistedS3Config: await getPersistedS3Config(),
+    download: true
+  });
+  if (!url) {
+    replyError('Recording is not available right now.');
+    return;
+  }
+
+  client.ws.send(JSON.stringify({
+    type: 'drive_recording_url',
+    payload: {
+      request_id: requestId,
+      run_id: runId,
+      url,
+      file_name: `drive-run-${runId}${extension}`,
+      mime_type: recording.mime_type
+    }
+  }));
+};
+
+const handleDriveRecordingStatus = async (client: ClientConnection, payload: { run_id?: string; request_id?: string }) => {
+  const requestId = typeof payload?.request_id === 'string' ? payload.request_id : null;
+  const replyError = (message: string) => {
+    client.ws.send(JSON.stringify({ type: 'error', payload: { message, request_id: requestId } }));
+  };
+  if (!client.userId) {
+    replyError('Authentication required.');
+    return;
+  }
+  const runId = typeof payload?.run_id === 'string' ? payload.run_id.trim() : '';
+  if (!validDriveId(runId)) {
+    replyError('Run identifier is required.');
+    return;
+  }
+
+  // Used by the client's durable upload queue so a retried clip is not uploaded twice.
+  const recording = await driveTracksStore.getRunRecording(runId).catch(() => null);
+  client.ws.send(JSON.stringify({
+    type: 'drive_recording_status',
+    payload: { request_id: requestId, run_id: runId, has_recording: Boolean(recording) }
+  }));
 };
 
 const createMessageAttachmentRecord = async (input: {
@@ -3658,9 +3981,11 @@ export const handleClientDisconnect = (client: ClientConnection) => {
   if (!client.userId) return;
 
   for (const channel_id of driveParticipants.channelsFor(client)) {
-    handleLeaveVoiceChannel(client, { channel_id }).catch(console.error);
+    handleLeaveVoiceChannel(client, { channel_id }, { keepTrackRuns: true }).catch(console.error);
     driveParticipants.leave(channel_id, client);
   }
+  // A dropped connection keeps in-progress recordings alive; only an explicit leave stops them
+  // so the driver can keep recording through a short outage and upload once reconnected.
 
   for (const [channel_id, room] of rooms.entries()) {
     if (room.type !== 'drive' && room.peers.has(client.userId)) {
@@ -3771,6 +4096,14 @@ const handleJoinVoiceChannel = async (client: ClientConnection, payload: { chann
     }
   }));
   if (channel.type === 'drive') driveParticipants.snapshot(channel_id, client);
+  if (channel.type === 'drive') {
+    void broadcastActiveRuns(channel_id).catch(console.error);
+    // Rejoining after an outage re-syncs the recording session: an expired run stops it, an active
+    // run keeps the session (and its three-minute cap) running.
+    void driveTracksStore.getActiveRuns(channel_id, client.userId)
+      .then((runs) => trackRecordings.reconcile(channel_id, client.userId as string, runs))
+      .catch(console.error);
+  }
 };
 
 const handleCreateWebRtcTransport = async (client: ClientConnection, payload: { channel_id: string, direction: 'send' | 'recv' }) => {
@@ -3860,6 +4193,12 @@ const handleProduce = async (client: ClientConnection, payload: { channel_id: st
     await producer.pause();
   }
 
+  if (normalizedSource === 'camera' && room.type === 'drive') {
+    // A camera turned on mid-run should begin recording for the driver's timed run.
+    const runs = await driveTracksStore.getActiveRuns(channel_id, client.userId).catch(() => []);
+    trackRecordings.sync(channel_id, client.userId, runs);
+  }
+
   client.ws.send(JSON.stringify({
     type: 'produced',
     payload: { channel_id, id: producer.id, source, request_id: request_id || null }
@@ -3921,6 +4260,12 @@ const handleCloseProducer = async (client: ClientConnection, payload: { channel_
       source
     }
   });
+
+  if (source === 'camera' && room.type === 'drive') {
+    // Turning the camera off ends any in-progress recording for this driver's active run.
+    const runs = await driveTracksStore.getActiveRuns(channel_id, client.userId).catch(() => []);
+    trackRecordings.sync(channel_id, client.userId, runs);
+  }
 };
 
 const handleConsume = async (client: ClientConnection, payload: { channel_id: string, transport_id: string, producer_id: string, rtpCapabilities: any }) => {
@@ -4004,18 +4349,28 @@ const handlePauseConsumer = async (client: ClientConnection, payload: { channel_
   await consumer.pause();
 };
 
-const handleLeaveVoiceChannel = async (client: ClientConnection, payload: { channel_id: string }) => {
+const handleLeaveVoiceChannel = async (client: ClientConnection, payload: { channel_id: string }, options: { keepTrackRuns?: boolean } = {}) => {
   if (!client.userId) return;
   const { channel_id } = payload;
   
   const room = rooms.get(channel_id);
   if (!room) {
     driveParticipants.leave(channel_id, client);
+    // Keep the recording session across a dropped connection; stop it on an explicit leave.
+    if (!options.keepTrackRuns) {
+      trackRecordings.shutdownDriver(channel_id, client.userId);
+      void endDriveTrackRun(channel_id, client.userId).catch(console.error);
+    }
     return;
   }
   if (room.type === 'drive') {
     if (!driveParticipants.owns(channel_id, client)) return;
     driveParticipants.leave(channel_id, client);
+    // A dropped connection keeps runs and recordings alive so short outages do not lose them.
+    if (!options.keepTrackRuns) {
+      trackRecordings.shutdownDriver(channel_id, client.userId);
+      void endDriveTrackRun(channel_id, client.userId).catch(console.error);
+    }
   }
   
   const peer = room.peers.get(client.userId);

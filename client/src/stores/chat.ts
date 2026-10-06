@@ -994,6 +994,85 @@ export const useChatStore = defineStore('chat', () => {
     });
   };
 
+  const uploadTrackRecording = async (input: {
+    runId: string;
+    file: Blob;
+    mimeType: string;
+    durationMs: number;
+    onProgress?: (loadedBytes: number, totalBytes: number) => void;
+  }) => {
+    if (!ws.value || !isConnected.value) {
+      throw new Error('Connect to the guild before uploading the recording');
+    }
+
+    // Recording errors are matched by their run/upload id so an unrelated socket error cannot
+    // abort an in-flight upload, and the server's code is preserved for retry decisions.
+    const makeRecordingError = (payload: any, fallback: string) => {
+      const failure = new Error(typeof payload?.message === 'string' ? payload.message : fallback) as Error & { code?: string };
+      if (typeof payload?.code === 'string') failure.code = payload.code;
+      return failure;
+    };
+
+    const readyPromise = waitForSocketMessage((message) => {
+      if (message?.type === 'drive_recording_ready' && message?.payload?.run_id === input.runId) {
+        return message.payload as { upload_id: string; chunk_size_bytes?: number };
+      }
+      if (message?.type === 'error' && message?.payload?.run_id === input.runId) {
+        throw makeRecordingError(message.payload, 'Recording upload initialization failed');
+      }
+      return null;
+    });
+
+    send('drive_recording_begin', {
+      run_id: input.runId,
+      mime_type: input.mimeType || 'video/webm',
+      size_bytes: input.file.size
+    });
+
+    const ready = await readyPromise;
+    const uploadId = ready.upload_id;
+    const chunkSize = typeof ready.chunk_size_bytes === 'number' && ready.chunk_size_bytes > 0
+      ? ready.chunk_size_bytes
+      : uploadChunkSizeBytes;
+
+    let offset = 0;
+    while (offset < input.file.size) {
+      const end = Math.min(offset + chunkSize, input.file.size);
+      const arrayBuffer = await readBlobAsArrayBuffer(input.file.slice(offset, end));
+      const dataBase64 = arrayBufferToBase64(arrayBuffer);
+
+      const ackPromise = waitForSocketMessage((message) => {
+        if (message?.type === 'drive_recording_chunk_ack' && message?.payload?.upload_id === uploadId) {
+          return message.payload as { received_bytes: number };
+        }
+        if (message?.type === 'error' && message?.payload?.upload_id === uploadId) {
+          throw makeRecordingError(message.payload, 'Recording upload chunk failed');
+        }
+        return null;
+      });
+
+      send('drive_recording_chunk', { upload_id: uploadId, offset, data_base64: dataBase64 });
+
+      const ack = await ackPromise;
+      offset = ack.received_bytes;
+      input.onProgress?.(offset, input.file.size);
+    }
+
+    const savedPromise = waitForSocketMessage((message) => {
+      if (message?.type === 'drive_recording_saved' && message?.payload?.run_id === input.runId) {
+        return message.payload as { run_id: string };
+      }
+      if (message?.type === 'error'
+        && (message?.payload?.upload_id === uploadId || message?.payload?.run_id === input.runId)) {
+        throw makeRecordingError(message.payload, 'Recording upload failed');
+      }
+      return null;
+    });
+
+    send('drive_recording_complete', { upload_id: uploadId, duration_ms: input.durationMs });
+    await savedPromise;
+  };
+
   const saveLocalUsername = (username: string) => {
     localUsername.value = username;
     localStorage.setItem('username', username);
@@ -3220,6 +3299,7 @@ export const useChatStore = defineStore('chat', () => {
     setActiveVoicePanel,
     requestFolderFiles,
     uploadFolderFile,
+    uploadTrackRecording,
     downloadFolderFile,
     deleteFolderFile,
     resolveServerIconUrl,

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { migrateChannelsSchema } from './channelMigration';
 import { migrateDriveGeocodeCache } from './driveGeocodeMigration';
+import { migrateDriveTracks } from './driveTracksMigration';
 import {
   ADMIN_ROLE_KEY,
   ALL_SERVER_PERMISSIONS,
@@ -47,12 +48,13 @@ let messageAttachmentsSchemaMigrated = false;
 let messagesSchemaMigrated = false;
 let messageReactionsSchemaMigrated = false;
 let driveGeocodeSchemaMigrated = false;
+let driveTracksSchemaMigrated = false;
 
 function failSchemaInitialization(error: Error) {
   rejectChannelsSchemaReady?.(error);
 }
 
-function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'user_server_roles' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions' | 'drive_geocode_cache') {
+function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'user_server_roles' | 'channels' | 'folder_files' | 'message_attachments' | 'messages' | 'message_reactions' | 'drive_geocode_cache' | 'drive_tracks') {
   if (step === 'servers') serversSchemaMigrated = true;
   if (step === 'users') usersSchemaMigrated = true;
   if (step === 'roles') rolesSchemaMigrated = true;
@@ -63,8 +65,9 @@ function markSchemaStepDone(step: 'servers' | 'users' | 'roles' | 'user_server_r
   if (step === 'messages') messagesSchemaMigrated = true;
   if (step === 'message_reactions') messageReactionsSchemaMigrated = true;
   if (step === 'drive_geocode_cache') driveGeocodeSchemaMigrated = true;
+  if (step === 'drive_tracks') driveTracksSchemaMigrated = true;
 
-  if (serversSchemaMigrated && usersSchemaMigrated && rolesSchemaMigrated && userServerRolesSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated && driveGeocodeSchemaMigrated) {
+  if (serversSchemaMigrated && usersSchemaMigrated && rolesSchemaMigrated && userServerRolesSchemaMigrated && channelsSchemaMigrated && folderFilesSchemaMigrated && messageAttachmentsSchemaMigrated && messagesSchemaMigrated && messageReactionsSchemaMigrated && driveGeocodeSchemaMigrated && driveTracksSchemaMigrated) {
     resolveChannelsSchemaReady?.();
   }
 }
@@ -133,6 +136,7 @@ export const normalizeStoredServerRolePositions = async (serverId?: string): Pro
 
 function initializeDatabase() {
   migrateDriveGeocodeCache(db).then(() => markSchemaStepDone('drive_geocode_cache'), failSchemaInitialization);
+  migrateDriveTracks(db).then(() => markSchemaStepDone('drive_tracks'), failSchemaInitialization);
   db.serialize(() => {
     // Servers Table
     db.run(`
