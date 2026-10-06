@@ -46,6 +46,32 @@ const RECORDING_MIME_CANDIDATES = [
   'video/webm'
 ]
 
+const DEFAULT_RECORDING_WIDTH = 640
+const DEFAULT_RECORDING_HEIGHT = 480
+const DEFAULT_RECORDING_FRAME_RATE = 20
+const MIN_RECORDING_VIDEO_BITRATE = 3_000_000
+const MAX_RECORDING_VIDEO_BITRATE = 12_000_000
+// ~0.2 bits per pixel per frame is visually transparent for webcam footage while staying below the
+// point where the encoder wastes bits on sensor noise. The old fixed 600 kbps budget was far lower
+// (roughly 0.05 bpp at 640x480@20), which is what made saved MP4 clips look blocky.
+const RECORDING_BITS_PER_PIXEL = 0.2
+
+/**
+ * Derives the recording bitrate from the camera track's real output so a high-resolution capture is
+ * never starved by a fixed budget. Only the MediaRecorder consumes this value, so raising it never
+ * affects the live video that remote viewers receive (that stays on the separate producer bitrate).
+ */
+const resolveRecordingVideoBitrate = (track: MediaStreamTrack): number => {
+  const settings = typeof track.getSettings === 'function' ? track.getSettings() : {}
+  const width = typeof settings.width === 'number' && settings.width > 0 ? settings.width : DEFAULT_RECORDING_WIDTH
+  const height = typeof settings.height === 'number' && settings.height > 0 ? settings.height : DEFAULT_RECORDING_HEIGHT
+  const frameRate = typeof settings.frameRate === 'number' && settings.frameRate > 0
+    ? Math.min(settings.frameRate, 60)
+    : DEFAULT_RECORDING_FRAME_RATE
+  const target = Math.round(width * height * frameRate * RECORDING_BITS_PER_PIXEL)
+  return Math.min(MAX_RECORDING_VIDEO_BITRATE, Math.max(MIN_RECORDING_VIDEO_BITRATE, target))
+}
+
 const pickRecordingMimeType = (): string | null => {
   if (typeof MediaRecorder === 'undefined') return null
   for (const candidate of RECORDING_MIME_CANDIDATES) {
@@ -169,9 +195,11 @@ export const useTrackRecording = (options: TrackRecordingOptions) => {
     }
 
     try {
-      const nextRecorder = new MediaRecorder(stream, mimeType
-        ? { mimeType, videoBitsPerSecond: 600_000 }
-        : { videoBitsPerSecond: 600_000 })
+      const recorderOptions: MediaRecorderOptions = {
+        videoBitsPerSecond: resolveRecordingVideoBitrate(videoTrack)
+      }
+      if (mimeType) recorderOptions.mimeType = mimeType
+      const nextRecorder = new MediaRecorder(stream, recorderOptions)
       const created: RecordingSession = {
         runId,
         recorder: nextRecorder,
