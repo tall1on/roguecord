@@ -1,8 +1,10 @@
 export type CameraRotation = 0 | 90 | 180 | 270
+export type DeviceOrientation = 'portrait' | 'landscape'
 
 const MAX_OUTPUT_SIDE = 640
 const ROTATION_STORAGE_KEY = 'roguecord.driveCameraRotation'
 const CONFIGURED_STORAGE_KEY = 'roguecord.driveCameraRotationConfigured'
+const CONFIGURED_ORIENTATION_KEY = 'roguecord.driveCameraRotationOrientation'
 
 const readStorage = (key: string): string | null => {
   try {
@@ -23,6 +25,32 @@ const writeStorage = (key: string, value: string): void => {
   }
 }
 
+const removeStorage = (key: string): void => {
+  try {
+    if (typeof localStorage === 'undefined') return
+    localStorage.removeItem(key)
+  } catch (_error) {
+    // no-op
+  }
+}
+
+/**
+ * The current physical orientation of the display, or null when it cannot be determined.
+ *
+ * The camera rotation the user picks is only correct for the orientation it was chosen in, so the
+ * confirmed rotation is remembered per orientation and the preview is shown again when the device
+ * is turned (or when no orientation was recorded).
+ */
+export const getScreenOrientation = (): DeviceOrientation | null => {
+  if (typeof screen !== 'undefined' && screen.orientation && typeof screen.orientation.type === 'string' && screen.orientation.type) {
+    return screen.orientation.type.startsWith('portrait') ? 'portrait' : 'landscape'
+  }
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    return window.matchMedia('(orientation: portrait)').matches ? 'portrait' : 'landscape'
+  }
+  return null
+}
+
 /** Snaps arbitrary degrees to the nearest quarter turn used by the camera pipeline. */
 export const normalizeCameraRotation = (degrees: number): CameraRotation => {
   if (!Number.isFinite(degrees)) return 0
@@ -36,12 +64,23 @@ export const saveCameraRotation = (rotation: CameraRotation): void => {
   writeStorage(ROTATION_STORAGE_KEY, String(normalizeCameraRotation(rotation)))
 }
 
-/** Whether the user already confirmed the camera orientation on this device. */
-export const hasConfiguredCameraRotation = (): boolean =>
-  readStorage(CONFIGURED_STORAGE_KEY) === 'true'
+/** Whether the user already confirmed the camera orientation for the current screen orientation. */
+export const hasConfiguredCameraRotation = (): boolean => {
+  if (readStorage(CONFIGURED_STORAGE_KEY) !== 'true') return false
+  const current = getScreenOrientation()
+  // No orientation information is available (headless/test environments): trust the stored value.
+  if (!current) return true
+  const configured = readStorage(CONFIGURED_ORIENTATION_KEY)
+  // Configurations saved before orientation tracking, or confirmed in a different orientation, no
+  // longer apply: the rotation the user chose may now be sideways, so show the preview again.
+  return configured === current
+}
 
 export const markCameraRotationConfigured = (): void => {
   writeStorage(CONFIGURED_STORAGE_KEY, 'true')
+  const current = getScreenOrientation()
+  if (current) writeStorage(CONFIGURED_ORIENTATION_KEY, current)
+  else removeStorage(CONFIGURED_ORIENTATION_KEY)
 }
 
 export const subscribeOrientationChange = (listener: () => void): (() => void) => {
@@ -61,6 +100,8 @@ export type OrientationAwareStream = {
   stream: MediaStream
   setRotation: (rotation: CameraRotation) => void
   refresh: () => void
+  /** Swaps in a fresh camera stream (after the previous capture ended) without dropping the output. */
+  replaceSource: (source: MediaStream) => void
   dispose: () => void
 }
 
@@ -101,8 +142,24 @@ export const createOrientationAwareStream = (
   let dirty = true
   let currentRotation: CameraRotation = rotation
   let timeout: ReturnType<typeof setTimeout> | null = null
+  let watchdog: ReturnType<typeof setTimeout> | null = null
+  let pendingFrameCallback = false
+  let frameCallbackHandle: number | null = null
   const frameIntervalMs = Math.max(1, Math.round(1000 / frameRate))
   let nextDrawAt = 0
+
+  const clearWatchdog = () => {
+    if (watchdog !== null) { clearTimeout(watchdog); watchdog = null }
+  }
+
+  const cancelPendingFrame = () => {
+    const api = video as HTMLVideoElement & { cancelVideoFrameCallback?: (handle: number) => void }
+    if (frameCallbackHandle !== null && typeof api.cancelVideoFrameCallback === 'function') {
+      try { api.cancelVideoFrameCallback(frameCallbackHandle) } catch (_error) { /* no-op */ }
+    }
+    frameCallbackHandle = null
+    pendingFrameCallback = false
+  }
 
   const targetDimensions = () => {
     const rawWidth = video.videoWidth
@@ -125,21 +182,39 @@ export const createOrientationAwareStream = (
       requestVideoFrameCallback?: (cb: (now: number) => void) => number
     }
     if (typeof videoWithCallback.requestVideoFrameCallback === 'function') {
-      videoWithCallback.requestVideoFrameCallback((now) => {
-        // requestVideoFrameCallback fires for every presented camera frame (often 30-60fps), but
-        // the canvas is only captured at `frameRate`. Drawing the surplus frames wastes CPU/GPU
-        // and heats mobile devices. Accumulate the schedule from the last target time (not the
-        // actual draw time) so the rate averages out to `frameRate` even when the source frame
-        // rate is not a multiple of it.
-        if (now < nextDrawAt) {
-          schedule()
-          return
-        }
-        nextDrawAt += frameIntervalMs
-        // If we fell far behind (e.g. the tab was suspended), do not burst-catch up.
-        if (nextDrawAt <= now) nextDrawAt = now + frameIntervalMs
-        drawFrame()
-      })
+      if (!pendingFrameCallback) {
+        pendingFrameCallback = true
+        frameCallbackHandle = videoWithCallback.requestVideoFrameCallback((now) => {
+          frameCallbackHandle = null
+          pendingFrameCallback = false
+          clearWatchdog()
+          if (disposed) return
+          // requestVideoFrameCallback fires for every presented camera frame (often 30-60fps), but
+          // the canvas is only captured at `frameRate`. Drawing the surplus frames wastes CPU/GPU
+          // and heats mobile devices. Accumulate the schedule from the last target time (not the
+          // actual draw time) so the rate averages out to `frameRate` even when the source frame
+          // rate is not a multiple of it.
+          if (now < nextDrawAt) {
+            schedule()
+            return
+          }
+          nextDrawAt += frameIntervalMs
+          // If we fell far behind (e.g. the tab was suspended), do not burst-catch up.
+          if (nextDrawAt <= now) nextDrawAt = now + frameIntervalMs
+          drawFrame()
+        })
+      }
+      // Watchdog: frame callbacks stop when the source ends (screen lock, camera reclaimed). Cancel
+      // the stale request and keep drawing so the published track never freezes and a replaced
+      // source resumes immediately.
+      if (watchdog === null) {
+        watchdog = setTimeout(() => {
+          watchdog = null
+          if (disposed) return
+          cancelPendingFrame()
+          drawFrame()
+        }, Math.max(1000, frameIntervalMs * 4))
+      }
     } else {
       timeout = setTimeout(drawFrame, frameIntervalMs)
     }
@@ -183,11 +258,26 @@ export const createOrientationAwareStream = (
     setRotation: (next: CameraRotation) => {
       rotation = normalizeCameraRotation(next)
       dirty = true
+      schedule()
     },
-    refresh: () => { dirty = true },
+    refresh: () => {
+      dirty = true
+      schedule()
+    },
+    replaceSource: (next: MediaStream) => {
+      if (disposed) return
+      video.srcObject = next
+      void video.play().catch(() => { /* autoplay of a muted camera stream may still be rejected */ })
+      dirty = true
+      // A stalled callback chain (source ended) may have left the loop idle: restart it.
+      cancelPendingFrame()
+      schedule()
+    },
     dispose: () => {
       disposed = true
       if (timeout !== null) { clearTimeout(timeout); timeout = null }
+      clearWatchdog()
+      cancelPendingFrame()
       video.removeEventListener('resize', onFrameResize)
       unsubscribe()
       try { video.pause() } catch (_error) { /* no-op */ }

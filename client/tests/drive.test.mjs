@@ -22,13 +22,16 @@ let getDriveCameraProducerOptions
 let useDriveCameraShare
 let useTrackRecording
 let normalizeCameraRotation
+let hasConfiguredCameraRotation
+let markCameraRotationConfigured
+let getScreenOrientation
 let trackRecordingQueue
 before(async () => {
   server = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom' })
   ;({ useDriveStore, getGpsSpeed } = await server.ssrLoadModule('/src/stores/drive.ts'))
   ;({ getDriveMapCoordinates, searchDriveDestinations, getDriveRoute, setDriveDestination, rankDriveParticipants, pickDriveColor, getRouteHeading, DRIVE_SELF_COLOR, DRIVE_DRIVER_COLORS } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
   ;({ getDriveCameraCaptureConstraints, getDriveCameraProducerOptions } = await server.ssrLoadModule('/src/utils/driveCamera.ts'))
-  ;({ normalizeCameraRotation } = await server.ssrLoadModule('/src/utils/cameraOrientation.ts'))
+  ;({ normalizeCameraRotation, hasConfiguredCameraRotation, markCameraRotationConfigured, getScreenOrientation } = await server.ssrLoadModule('/src/utils/cameraOrientation.ts'))
   ;({ useDriveCameraShare } = await server.ssrLoadModule('/src/composables/useDriveCameraShare.ts'))
   ;({ useTrackRecording } = await server.ssrLoadModule('/src/composables/useTrackRecording.ts'))
   ;({ usePhoneLayout } = await server.ssrLoadModule('/src/composables/usePhoneLayout.ts'))
@@ -906,4 +909,150 @@ test('phone layout follows modern and legacy media changes and cleans up on unmo
   assert.equal(legacyPhone.value, true)
   legacyScope.stop()
   assert.equal(removed, true)
+})
+
+test('camera rotation is re-confirmed whenever the device orientation changes', () => {
+  const storage = installLocalStorage()
+  const originalScreen = Object.getOwnPropertyDescriptor(globalThis, 'screen')
+  let orientationType = 'portrait-primary'
+  Object.defineProperty(globalThis, 'screen', {
+    configurable: true,
+    value: { get orientation() { return { type: orientationType } } }
+  })
+  try {
+    assert.equal(getScreenOrientation(), 'portrait')
+    assert.equal(hasConfiguredCameraRotation(), false)
+
+    markCameraRotationConfigured()
+    assert.equal(hasConfiguredCameraRotation(), true)
+
+    // Turning the phone sideways invalidates the rotation that was chosen in portrait.
+    orientationType = 'landscape-primary'
+    assert.equal(getScreenOrientation(), 'landscape')
+    assert.equal(hasConfiguredCameraRotation(), false)
+
+    markCameraRotationConfigured()
+    assert.equal(hasConfiguredCameraRotation(), true)
+
+    // A configuration saved before orientation tracking existed must not suppress the preview.
+    storage.store.set('roguecord.driveCameraRotationConfigured', 'true')
+    storage.store.delete('roguecord.driveCameraRotationOrientation')
+    assert.equal(hasConfiguredCameraRotation(), false)
+  } finally {
+    storage.restore()
+    if (originalScreen) Object.defineProperty(globalThis, 'screen', originalScreen)
+    else delete globalThis.screen
+  }
+})
+
+test('Drive camera shows the rotate preview when the saved orientation no longer matches', async (context) => {
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const originalScreen = Object.getOwnPropertyDescriptor(globalThis, 'screen')
+  const storage = installLocalStorage()
+  storage.store.set('roguecord.driveCameraRotationConfigured', 'true')
+  storage.store.set('roguecord.driveCameraRotationOrientation', 'landscape')
+  Object.defineProperty(globalThis, 'screen', {
+    configurable: true,
+    value: { orientation: { type: 'portrait-primary' } }
+  })
+  let produceCalls = 0
+  const videoTrack = { contentHint: '', onended: null, readyState: 'live', stop() {} }
+  const stream = { getVideoTracks: () => [videoTrack], getTracks: () => [videoTrack] }
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { mediaDevices: { getUserMedia: async () => stream } }
+  })
+  context.after(() => {
+    storage.restore()
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
+    else delete globalThis.navigator
+    if (originalScreen) Object.defineProperty(globalThis, 'screen', originalScreen)
+    else delete globalThis.screen
+  })
+
+  const transport = { produce: async () => { produceCalls++; return { id: 'p', close() {}, on() {} } } }
+  const cameraShare = useDriveCameraShare({
+    getChannelId: () => 'drive',
+    isDriveChannel: () => true,
+    getSendTransport: () => transport,
+    getDevice: () => ({ canProduce: () => true }),
+    waitForSendTransport: async () => transport,
+    getUserId: () => 'driver',
+    setUserStream: () => {},
+    deleteUserStream: () => {},
+    send: () => {}
+  })
+
+  await cameraShare.start()
+  // Previously confirmed in landscape, but the phone is now portrait: prompt again.
+  assert.equal(cameraShare.previewing.value, true)
+  assert.equal(produceCalls, 0)
+  cameraShare.cancelRotation()
+})
+
+test('Drive camera re-acquires the camera when the capture ends unexpectedly', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
+  const storage = installLocalStorage()
+  storage.store.set('roguecord.driveCameraRotationConfigured', 'true')
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} }
+  })
+
+  let getUserMediaCalls = 0
+  let lastTrack = null
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      mediaDevices: {
+        getUserMedia: async () => {
+          getUserMediaCalls++
+          lastTrack = { contentHint: '', onended: null, readyState: 'live', stop() {} }
+          return { getVideoTracks: () => [lastTrack], getTracks: () => [lastTrack] }
+        }
+      }
+    }
+  })
+  context.after(() => {
+    storage.restore()
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
+    else delete globalThis.navigator
+    if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument)
+    else delete globalThis.document
+  })
+
+  let produceCount = 0
+  const transport = { produce: async () => { produceCount++; return { id: `p${produceCount}`, close() {}, on() {} } } }
+  const cameraShare = useDriveCameraShare({
+    getChannelId: () => 'drive',
+    isDriveChannel: () => true,
+    getSendTransport: () => transport,
+    getDevice: () => ({ canProduce: () => true }),
+    waitForSendTransport: async () => transport,
+    getUserId: () => 'driver',
+    setUserStream: () => {},
+    deleteUserStream: () => {},
+    send: () => {}
+  })
+
+  await cameraShare.start()
+  assert.equal(produceCount, 1)
+  assert.equal(getUserMediaCalls, 1)
+
+  // The OS ends the camera track (for example the phone screen locked): re-acquire instead of
+  // silently turning the share off.
+  assert.equal(typeof lastTrack.onended, 'function')
+  lastTrack.onended()
+  await new Promise((resolve) => setImmediate(resolve))
+  context.mock.timers.tick(1000)
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(getUserMediaCalls, 2)
+  assert.equal(produceCount, 2)
+  assert.equal(cameraShare.producer.value.id, 'p2')
+
+  cameraShare.stop()
+  assert.equal(cameraShare.producer.value, null)
 })

@@ -23,6 +23,13 @@ type CameraShareOptions = {
   send: (type: string, payload: Record<string, unknown>) => void
 }
 
+// Bounded retries so a persistent failure (no camera, no transport) cannot spin forever.
+const MAX_RESUME_ATTEMPTS = 4
+const RESUME_RETRY_MS = 1000
+const MAX_CAPTURE_RECOVERY_ATTEMPTS = 3
+const CAPTURE_RECOVERY_RETRY_MS = 1000
+const RECOVERY_STABLE_MS = 5000
+
 export const useDriveCameraShare = (options: CameraShareOptions) => {
   const producer = shallowRef<any | null>(null)
   const stream = shallowRef<MediaStream | null>(null)
@@ -35,6 +42,41 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
   let generation = 0
   let orientationStream: OrientationAwareStream | null = null
   let localOutput: MediaStream | null = null
+  // Set when the user explicitly stops so environmental recovery never fights a deliberate stop.
+  let userStopped = false
+  let resumeTimer: ReturnType<typeof setTimeout> | null = null
+  let resumeAttempts = 0
+  let recoveryTimer: ReturnType<typeof setTimeout> | null = null
+  let recoveryAttempts = 0
+  let recoveryResetTimer: ReturnType<typeof setTimeout> | null = null
+  let visibilityBound = false
+
+  const clearResumeRetry = () => {
+    if (resumeTimer !== null) { clearTimeout(resumeTimer); resumeTimer = null }
+  }
+
+  const unbindVisibilityRecovery = () => {
+    if (visibilityBound && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      visibilityBound = false
+    }
+  }
+
+  const clearRecovery = () => {
+    if (recoveryTimer !== null) { clearTimeout(recoveryTimer); recoveryTimer = null }
+    unbindVisibilityRecovery()
+  }
+
+  const clearRecoveryReset = () => {
+    if (recoveryResetTimer !== null) { clearTimeout(recoveryResetTimer); recoveryResetTimer = null }
+  }
+
+  // Once the capture has been healthy for a while, restore the recovery budget so a later,
+  // unrelated outage can recover again without allowing a tight failure loop.
+  const markCaptureHealthy = () => {
+    clearRecoveryReset()
+    recoveryResetTimer = setTimeout(() => { recoveryResetTimer = null; recoveryAttempts = 0 }, RECOVERY_STABLE_MS)
+  }
 
   const cleanup = (notifyServer = true) => {
     generation++
@@ -42,6 +84,9 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
     detached.value = false
     previewing.value = false
     previewStream.value = null
+    clearResumeRetry()
+    clearRecovery()
+    clearRecoveryReset()
     const producerId = producer.value?.id as string | undefined
     try {
       producer.value?.close()
@@ -59,6 +104,11 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
     orientationStream = null
     localOutput = null
 
+    stream.value?.getVideoTracks().forEach((track) => {
+      // Detach the handler before stopping so an expected teardown never looks like an unexpected
+      // camera end (which would trigger the recovery path).
+      track.onended = null
+    })
     stream.value?.getTracks().forEach((track) => {
       try {
         track.stop()
@@ -73,6 +123,9 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
   }
 
   const stop = () => {
+    userStopped = true
+    resumeAttempts = 0
+    recoveryAttempts = 0
     error.value = null
     cleanup()
   }
@@ -123,6 +176,10 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
     localOutput = outputStream
     previewing.value = false
     previewStream.value = null
+    // A successful re-publish is a fresh resume cycle.
+    resumeAttempts = 0
+    clearResumeRetry()
+    markCaptureHealthy()
     const userId = options.getUserId()
     if (userId) options.setUserStream(userId, outputStream)
     // Keep the capture alive on transport loss so a short outage does not stop the recording.
@@ -140,15 +197,125 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
     console.error('[WebRTC][camera] Failed to start camera share:', cause)
   }
 
+  /**
+   * Re-acquires a fresh camera after the OS/browser ended the capture (screen lock, the phone
+   * reclaiming the camera, a mobile background pause). The canvas pipeline keeps the published
+   * track (and any in-progress recording) alive by swapping in the new source; only when no
+   * pipeline exists is the producer re-created. Retries are bounded and deferred while the page is
+   * hidden so a locked phone does not spin up the camera in the background.
+   */
+  const recoverPipelineSource = async (pipeline: OrientationAwareStream) => {
+    if (userStopped) return
+    try {
+      const next = await navigator.mediaDevices.getUserMedia(getDriveCameraCaptureConstraints())
+      if (userStopped || orientationStream !== pipeline) {
+        next.getTracks().forEach((track) => track.stop())
+        return
+      }
+      const nextTrack = next.getVideoTracks()[0]
+      if (!nextTrack) {
+        next.getTracks().forEach((track) => track.stop())
+        scheduleCaptureRecovery()
+        return
+      }
+      nextTrack.contentHint = 'motion'
+      nextTrack.onended = onCaptureEnded
+      const previous = stream.value
+      stream.value = next
+      pipeline.replaceSource(next)
+      markCaptureHealthy()
+      previous?.getVideoTracks().forEach((track) => { track.onended = null })
+      previous?.getTracks().forEach((track) => {
+        try { track.stop() } catch (_error) { /* no-op */ }
+      })
+      console.info('[WebRTC][camera] Re-acquired the camera source after an unexpected end')
+    } catch (cause) {
+      console.warn('[WebRTC][camera] Failed to re-acquire the camera source:', cause)
+      scheduleCaptureRecovery()
+    }
+  }
+
+  const attemptCaptureRecovery = () => {
+    if (userStopped) return
+    const pipeline = orientationStream
+    if (pipeline) {
+      void recoverPipelineSource(pipeline)
+      return
+    }
+    cleanup()
+    void beginCapture()
+  }
+
+  const scheduleCaptureRecovery = () => {
+    if (userStopped || recoveryTimer !== null || recoveryAttempts >= MAX_CAPTURE_RECOVERY_ATTEMPTS) return
+    const channelId = options.getChannelId()
+    if (!channelId || !options.isDriveChannel()) return
+    // A new failure means the capture is not healthy: cancel the pending budget reset.
+    clearRecoveryReset()
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      bindVisibilityRecovery()
+      return
+    }
+    recoveryAttempts++
+    recoveryTimer = setTimeout(() => {
+      recoveryTimer = null
+      if (userStopped) return
+      // The screen may have locked again while waiting; defer until the page is visible.
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        bindVisibilityRecovery()
+        return
+      }
+      attemptCaptureRecovery()
+    }, CAPTURE_RECOVERY_RETRY_MS)
+  }
+
+  function onVisibilityChange() {
+    if (userStopped) return
+    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return
+    unbindVisibilityRecovery()
+    scheduleCaptureRecovery()
+  }
+
+  const bindVisibilityRecovery = () => {
+    if (visibilityBound || typeof document === 'undefined') return
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    visibilityBound = true
+  }
+
+  const onCaptureEnded = () => {
+    if (userStopped) return
+    console.warn('[WebRTC][camera] Camera capture ended unexpectedly; attempting to recover')
+    scheduleCaptureRecovery()
+  }
+
+  const scheduleResumeRetry = () => {
+    if (resumeTimer !== null || !detached.value || userStopped) return
+    if (resumeAttempts >= MAX_RESUME_ATTEMPTS) return
+    resumeAttempts++
+    resumeTimer = setTimeout(() => {
+      resumeTimer = null
+      void resume()
+    }, RESUME_RETRY_MS)
+  }
+
   /** Re-publishes the preserved local capture on a new send transport after a reconnect. */
   const resume = async (): Promise<boolean> => {
     if (!detached.value || !localOutput) return false
-    const outputTrack = localOutput.getVideoTracks()[0]
-    if (!outputTrack || outputTrack.readyState !== 'live') return false
     const channelId = options.getChannelId()
     if (!channelId || !options.isDriveChannel()) return false
+    const outputTrack = localOutput.getVideoTracks()[0]
+    if (!outputTrack || outputTrack.readyState !== 'live') {
+      // The preserved capture died while detached (for example the OS ended the camera track):
+      // fall back to a fresh capture instead of leaving the camera silently off.
+      cleanup(false)
+      scheduleCaptureRecovery()
+      return false
+    }
     const sendTransport = await options.waitForSendTransport()
-    if (!sendTransport || !options.getDevice()?.canProduce('video')) return false
+    if (!sendTransport || !options.getDevice()?.canProduce('video')) {
+      scheduleResumeRetry()
+      return false
+    }
     try {
       const cameraProducer = await sendTransport.produce({
         track: outputTrack,
@@ -157,18 +324,21 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
       })
       producer.value = cameraProducer
       detached.value = false
+      resumeAttempts = 0
+      clearResumeRetry()
       cameraProducer.on('transportclose', () => detach())
       const userId = options.getUserId()
       if (userId) options.setUserStream(userId, localOutput)
       return true
     } catch (cause) {
-      // Keep the capture and the detached flag so a later reconnect can try again.
+      // Keep the capture and the detached flag so a later reconnect/retry can try again.
       console.warn('[WebRTC][camera] Failed to resume camera capture after reconnect:', cause)
+      scheduleResumeRetry()
       return false
     }
   }
 
-  const start = async () => {
+  const beginCapture = async () => {
     const channelId = options.getChannelId()
     if (!channelId) {
       error.value = 'Join Drive Together before sharing your camera.'
@@ -221,7 +391,9 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
 
       videoTrack.contentHint = 'motion'
       stream.value = requestedStream
-      videoTrack.onended = stop
+      // An unexpected end (screen lock, another app claiming the camera) is recovered automatically
+      // instead of silently dropping the driver's feed.
+      videoTrack.onended = onCaptureEnded
 
       console.info('[WebRTC][camera] Captured stream', {
         settings: typeof videoTrack.getSettings === 'function' ? videoTrack.getSettings() : null,
@@ -238,8 +410,9 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
       localOutput = outputStream
 
       if (!hasConfiguredCameraRotation()) {
-        // First time on this device: show the live preview and let the user pick the rotation
-        // before anything is published. No producer exists yet, so nothing leaves the device.
+        // The orientation is unknown for this device/orientation: show the live preview and let the
+        // user pick the rotation before anything is published. No producer exists yet, so nothing
+        // leaves the device.
         previewing.value = true
         previewStream.value = outputStream
         return
@@ -257,6 +430,16 @@ export const useDriveCameraShare = (options: CameraShareOptions) => {
     } finally {
       if (generation === requestGeneration) starting.value = false
     }
+  }
+
+  /** Starts or retries a camera share. A deliberate start resets the automatic recovery budget. */
+  const start = (): Promise<void> => {
+    userStopped = false
+    recoveryAttempts = 0
+    resumeAttempts = 0
+    clearRecovery()
+    clearResumeRetry()
+    return beginCapture()
   }
 
   /** Confirms the first-run orientation preview and publishes the camera. */

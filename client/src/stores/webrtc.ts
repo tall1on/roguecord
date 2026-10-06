@@ -1564,9 +1564,10 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     if (!activeVoiceChannelId.value) return;
 
     // On a dropped connection, keep the local camera capture (and any in-progress recording)
-    // alive so it can be re-published when the connection returns.
+    // alive so it can be re-published when the connection returns. A first-run orientation
+    // preview is also kept alive so a brief outage does not hide the rotate popup.
     const preserveCamera = options.preserveCameraCapture === true
-      && (Boolean(cameraProducer.value) || cameraShareDetached.value);
+      && (Boolean(cameraProducer.value) || cameraShareDetached.value || cameraSharePreviewing.value);
 
     chatStore.send('leave_voice_channel', { channel_id: activeVoiceChannelId.value });
     
