@@ -607,7 +607,7 @@ function setupTrackRecording() {
   return { recording, stored, emit, scope }
 }
 
-test('track recording hands off to a queued run when the recorded run stops', (context) => {
+test('track recording records overlapping runs concurrently on one camera stream', (context) => {
   context.mock.timers.enable({ apis: ['setTimeout'], now: 10_000 })
   const originalNow = Date.now
   let now = 10_000
@@ -619,27 +619,32 @@ test('track recording hands off to a queued run when the recorded run stops', (c
 
   emit('drive_recording_start', { run_id: 'r1', max_duration_ms: 60000 })
   assert.equal(recording.isRecording.value, true)
-  assert.equal(recording.recordingRunId.value, 'r1')
+  assert.deepEqual(recording.recordingRunIds.value, ['r1'])
   assert.equal(FakeMediaRecorder.instances.length, 1)
   assert.equal(FakeMediaRecorder.instances[0].state, 'recording')
 
-  // A start for another run while the first is recording is queued, not dropped.
+  // A second overlapping run starts its own recorder immediately on the same camera stream.
   emit('drive_recording_start', { run_id: 'r2', max_duration_ms: 60000 })
-  assert.equal(FakeMediaRecorder.instances.length, 1)
+  assert.equal(FakeMediaRecorder.instances.length, 2)
+  assert.equal(FakeMediaRecorder.instances[1].state, 'recording')
+  assert.deepEqual(recording.recordingRunIds.value, ['r1', 'r2'])
+  assert.equal(FakeMediaRecorder.instances[0].stream, FakeMediaRecorder.instances[1].stream)
+  // A duplicate start for an already-recording run is ignored.
+  emit('drive_recording_start', { run_id: 'r2', max_duration_ms: 60000 })
+  assert.equal(FakeMediaRecorder.instances.length, 2)
 
-  // The recorded run's stop flushes its tail, then the queued run starts.
+  // Stopping r1 flushes only its clip; r2 keeps recording.
   now = 12_000
   context.mock.timers.tick(2000)
   emit('drive_recording_stop', { run_id: 'r1', reason: 'track_finished' })
   assert.equal(FakeMediaRecorder.instances[0].state, 'inactive')
+  assert.equal(FakeMediaRecorder.instances[1].state, 'recording')
   FakeMediaRecorder.instances[0].finish()
 
   assert.equal(stored.length, 1)
   assert.equal(stored[0].runId, 'r1')
   assert.equal(stored[0].connectionId, 'guild')
-  assert.equal(FakeMediaRecorder.instances.length, 2)
-  assert.equal(FakeMediaRecorder.instances[1].state, 'recording')
-  assert.equal(recording.recordingRunId.value, 'r2')
+  assert.deepEqual(recording.recordingRunIds.value, ['r2'])
   assert.equal(recording.isRecording.value, true)
 })
 
@@ -705,7 +710,7 @@ test('a start that arrives before the camera stream is live is retried, not lost
   context.mock.timers.tick(400)
   assert.equal(FakeMediaRecorder.instances.length, 1)
   assert.equal(recording.isRecording.value, true)
-  assert.equal(recording.recordingRunId.value, 'r1')
+  assert.deepEqual(recording.recordingRunIds.value, ['r1'])
 })
 
 test('Drive camera publishes the camera source and releases its local track on stop', async (context) => {
