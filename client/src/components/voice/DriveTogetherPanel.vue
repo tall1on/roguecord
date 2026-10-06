@@ -1,22 +1,30 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Camera, CameraOff, Car, Flag, Headphones, LocateFixed, MapPin, Mic, MicOff, Navigation, PhoneOff, Search, X } from 'lucide-vue-next'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from 'vue'
+import { ArrowLeft, Camera, CameraOff, Car, Check, Crosshair, Flag, Headphones, LocateFixed, MapPin, Mic, MicOff, Navigation, PhoneOff, Route, RotateCw, Search, Trophy, X } from 'lucide-vue-next'
 import type { CircleMarker, LatLngBounds, Map as LeafletMap, Marker as LeafletMarker, Polyline } from 'leaflet'
 import { useChatStore } from '../../stores/chat'
 import { useWebRtcStore } from '../../stores/webrtc'
 import { useDriveStore } from '../../stores/drive'
+import { useDriveTracksStore } from '../../stores/driveTracks'
 import { useDriveRoutes } from '../../composables/useDriveRoutes'
 import { usePhoneLayout } from '../../composables/usePhoneLayout'
-import { DRIVE_SELF_COLOR, getDriveMapCoordinates, getRouteHeading, pickDriveColor, rankDriveParticipants, searchDriveDestinations, setDriveDestination, type DriveDestination } from '../../utils/driveNavigation'
+import { useTrackRecording } from '../../composables/useTrackRecording'
+import { useTrackRecordingUploadsStore } from '../../stores/trackRecordingUploads'
+import { DRIVE_SELF_COLOR, getDriveMapCoordinates, getDriveRoute, getRouteHeading, pickDriveColor, rankDriveParticipants, searchDriveDestinations, setDriveDestination, type DriveDestination } from '../../utils/driveNavigation'
+import { distanceToGate, getTrackHeading, type DriveTrack, type DriveTrackGate } from '../../utils/driveTracks'
 
 const DriveCameraStage = defineAsyncComponent(() => import('./DriveCameraStage.vue'))
+const TrackEditor = defineAsyncComponent(() => import('../drive/TrackEditor.vue'))
+const DriveTracksContent = defineAsyncComponent(() => import('../drive/DriveTracksContent.vue'))
+const DriveLeaderboardStage = defineAsyncComponent(() => import('../drive/DriveLeaderboardStage.vue'))
 const props = withDefaults(defineProps<{ channelId: string; channelName: string; phoneLayout?: boolean }>(), { phoneLayout: false })
 const emit = defineEmits<{ (e: 'back'): void }>()
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
 const driveStore = useDriveStore()
 const isPhoneResponsive = usePhoneLayout()
-const cameraPhoneLayout = computed(() => props.phoneLayout || isPhoneResponsive.value)
+const isPhoneLayout = computed(() => props.phoneLayout || isPhoneResponsive.value)
+const cameraPhoneLayout = isPhoneLayout
 const mapElement = ref<HTMLElement | null>(null)
 const mapError = ref<string | null>(null)
 const navigationElement = ref<HTMLElement | null>(null)
@@ -33,13 +41,167 @@ let lastSearchAt = 0
 const isJoined = computed(() => driveStore.joinedChannelId === props.channelId)
 const participants = computed(() => webrtcStore.channelParticipants.get(props.channelId) || [])
 const visibleLocations = computed(() => isJoined.value ? [...driveStore.locations.values()] : [])
+const driveTracksStore = useDriveTracksStore()
+const trackRecordingUploads = useTrackRecordingUploadsStore()
+const tracksPanelOpen = ref(false)
+const trackEditorOpen = ref(false)
+const editingTrack = ref<DriveTrack | null>(null)
+const activeTrack = computed<DriveTrack | null>(() => driveTracksStore.activeTrack(props.channelId))
+const activeRun = computed(() => driveTracksStore.activeRun(props.channelId))
+const trackGates = computed<DriveTrackGate[]>(() => activeTrack.value ? driveTracksStore.gatesFor(activeTrack.value) : [])
+const trackMode = computed(() => isJoined.value && !!activeTrack.value)
+const trackElapsedMs = ref(0)
+const trackStarted = computed(() => !!activeRun.value && activeRun.value.gate_times.length > 0)
+const trackElapsed = () => {
+  const run = activeRun.value
+  if (!run || run.gate_times.length === 0) return 0
+  return Math.max(0, (run.finished_at ?? Date.now()) - run.gate_times[0]!)
+}
+let trackClockTimer: ReturnType<typeof setInterval> | null = null
+watch(trackMode, (on) => {
+  if (on) {
+    trackElapsedMs.value = trackElapsed()
+    trackClockTimer ??= setInterval(() => { trackElapsedMs.value = trackElapsed() }, 1000)
+  } else if (trackClockTimer) {
+    clearInterval(trackClockTimer)
+    trackClockTimer = null
+    trackElapsedMs.value = 0
+  }
+}, { immediate: true })
+const formatDuration = (ms: number): string => {
+  const total = Math.floor(ms / 1000)
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}` : `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+const trackNextGate = computed(() => {
+  const run = activeRun.value
+  if (!run || run.status !== 'active') return null
+  return trackGates.value[run.next_gate] ?? null
+})
+const trackNextGateDistance = computed(() => {
+  const point = selfLocation.value
+  const gate = trackNextGate.value
+  return point && gate ? distanceToGate(point, gate) : null
+})
+// Before the start gate is passed, route to it like a normal destination; afterwards follow the track.
+const navigationPersonal = computed(() => trackMode.value && !trackStarted.value && trackGates.value.length > 0)
+const navigationTarget = computed<DriveDestination | null>(() => {
+  if (!trackMode.value) return destination.value
+  if (navigationPersonal.value) {
+    const start = trackGates.value[0]!
+    return { latitude: start.latitude, longitude: start.longitude, label: 'Track start' }
+  }
+  return null
+})
+const toggleTracksPanel = () => {
+  tracksPanelOpen.value = !tracksPanelOpen.value
+  if (tracksPanelOpen.value) { navPanelOpen.value = false; leaderboardPanelOpen.value = false; void driveTracksStore.load() }
+}
+const closeTracksPanel = () => { tracksPanelOpen.value = false }
+const toggleNavPanel = () => {
+  navPanelOpen.value = !navPanelOpen.value
+  if (navPanelOpen.value) { tracksPanelOpen.value = false; leaderboardPanelOpen.value = false }
+}
+const openTrackEditor = (track: DriveTrack | null) => { editingTrack.value = track; trackEditorOpen.value = true }
+const handleTrackSaved = () => { trackEditorOpen.value = false; editingTrack.value = null }
 const toggleCameraShare = () => webrtcStore.cameraProducer ? webrtcStore.stopCameraShare() : webrtcStore.startCameraShare()
-const cameraView = ref<'map' | 'split' | 'cameras'>('map')
+const rotateCamera = () => { webrtcStore.rotateCamera() }
+const confirmCameraRotation = () => { void webrtcStore.confirmCameraRotation() }
+const cancelCameraRotation = () => { webrtcStore.cancelCameraRotation() }
+// The preview plays the rotated canvas output, which is exactly what gets published and recorded.
+const setCameraPreviewVideo = (element: Element | ComponentPublicInstance | null) => {
+  if (!(element instanceof HTMLVideoElement)) return
+  const stream = webrtcStore.cameraSharePreviewStream
+  if (element.srcObject !== stream) element.srcObject = stream
+  if (stream) void element.play().catch(() => {})
+}
+const trackRecording = useTrackRecording({
+  getChannelId: () => props.channelId,
+  isJoined: () => isJoined.value,
+  getCameraStream: () => {
+    const userId = chatStore.currentUser?.id
+    return userId ? webrtcStore.userCameraStreams.get(userId) ?? null : null
+  },
+  getConnectionId: () => chatStore.activeConnectionId,
+  send: (type, payload) => chatStore.send(type, payload),
+  addMessageListener: (listener) => chatStore.addMessageListener(listener),
+  removeMessageListener: (listener) => chatStore.removeMessageListener(listener),
+  storeRecording: (input) => trackRecordingUploads.enqueue(input)
+})
+const recordingCount = computed(() => trackRecording.recordingRunIds.value.length)
+const showRecordingBadge = computed(() => recordingCount.value > 0 || trackRecording.isUploading.value)
+const recordingUploading = computed(() => trackRecording.isUploading.value && recordingCount.value === 0)
+const recordingLabel = computed(() => recordingCount.value > 1 ? `Recording ${recordingCount.value}` : recordingCount.value === 1 ? 'Recording' : 'Uploading')
+const recordingBadgeTitle = computed(() => recordingCount.value > 0
+  ? `Recording your camera for ${recordingCount.value} active track run${recordingCount.value === 1 ? '' : 's'}`
+  : 'Uploading the track recording')
+const recordingError = computed(() => trackRecording.error.value)
+const cameraView = ref<'map' | 'split' | 'cameras' | 'leaderboard'>('map')
 const desktopViews = [
   { value: 'map', label: 'Map', ariaLabel: 'Show map only' },
   { value: 'split', label: 'Map + cameras', ariaLabel: 'Show map and cameras side by side' },
-  { value: 'cameras', label: 'Cameras', ariaLabel: 'Show cameras only' }
+  { value: 'cameras', label: 'Cameras', ariaLabel: 'Show cameras only' },
+  { value: 'leaderboard', label: 'Leaderboard', ariaLabel: 'Show the track leaderboard' }
 ] as const
+const workspaceElement = ref<HTMLElement | null>(null)
+const splitRatio = ref(0.5)
+const splitDragging = ref(false)
+const SPLIT_MIN = 0.15
+const SPLIT_MAX = 0.85
+const SPLIT_HANDLE_WIDTH = 12
+const clampSplitRatio = (value: number): number => Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, value))
+const splitGridStyle = computed(() => {
+  if (cameraPhoneLayout.value || cameraView.value !== 'split') return undefined
+  return { gridTemplateColumns: `${splitRatio.value}fr ${SPLIT_HANDLE_WIDTH}px ${1 - splitRatio.value}fr` }
+})
+const updateSplitFromClientX = (clientX: number) => {
+  const element = workspaceElement.value
+  if (!element) return
+  const rect = element.getBoundingClientRect()
+  const padding = 8
+  const usable = rect.width - padding * 2 - SPLIT_HANDLE_WIDTH
+  if (usable <= 0) return
+  splitRatio.value = clampSplitRatio((clientX - rect.left - padding - SPLIT_HANDLE_WIDTH / 2) / usable)
+}
+const onSplitPointerMove = (event: PointerEvent) => {
+  if (!splitDragging.value) return
+  updateSplitFromClientX(event.clientX)
+}
+const stopSplitDrag = () => {
+  if (!splitDragging.value) return
+  splitDragging.value = false
+  window.removeEventListener('pointermove', onSplitPointerMove)
+  window.removeEventListener('pointerup', stopSplitDrag)
+  window.removeEventListener('pointercancel', stopSplitDrag)
+  document.body.classList.remove('drive-split-resizing')
+}
+const startSplitDrag = (event: PointerEvent) => {
+  if (event.button !== 0) return
+  splitDragging.value = true
+  updateSplitFromClientX(event.clientX)
+  window.addEventListener('pointermove', onSplitPointerMove)
+  window.addEventListener('pointerup', stopSplitDrag)
+  window.addEventListener('pointercancel', stopSplitDrag)
+  document.body.classList.add('drive-split-resizing')
+  event.preventDefault()
+}
+const resetSplit = () => { splitRatio.value = 0.5 }
+const onSplitKeydown = (event: KeyboardEvent) => {
+  if (event.key === 'ArrowLeft') splitRatio.value = clampSplitRatio(splitRatio.value - 0.05)
+  else if (event.key === 'ArrowRight') splitRatio.value = clampSplitRatio(splitRatio.value + 0.05)
+  else if (event.key === 'Home') splitRatio.value = SPLIT_MIN
+  else if (event.key === 'End') splitRatio.value = SPLIT_MAX
+  else return
+  event.preventDefault()
+}
+watch(cameraView, () => stopSplitDrag())
+const leaderboardPanelOpen = ref(false)
+const toggleLeaderboardPanel = () => {
+  leaderboardPanelOpen.value = !leaderboardPanelOpen.value
+  if (leaderboardPanelOpen.value) { navPanelOpen.value = false; tracksPanelOpen.value = false; void driveTracksStore.load() }
+}
 const selfLocation = computed(() => {
   const userId = chatStore.currentUser?.id
   return userId ? visibleLocations.value.find((point) => point.user_id === userId) ?? null : null
@@ -48,6 +210,17 @@ const navMode = ref(false)
 const navPanelOpen = ref(false)
 const canUseNav = computed(() => isJoined.value && driveStore.isSharing && !!selfLocation.value)
 watch(canUseNav, (value) => { if (!value) navMode.value = false })
+const followUserId = ref<string | null>(null)
+const isFollowingUser = (userId: string): boolean => followUserId.value === userId
+const toggleFollowUser = (userId: string) => {
+  const next = followUserId.value === userId ? null : userId
+  followUserId.value = next
+  if (next) navMode.value = false
+}
+watch([isJoined, () => props.channelId], () => { if (!isJoined.value) followUserId.value = null })
+watch(participants, (list) => {
+  if (followUserId.value && !list.some((participant) => participant.id === followUserId.value)) followUserId.value = null
+})
 const driverColors = new Map<string, string>()
 const driverColor = (userId: string): string => {
   const existing = driverColors.get(userId)
@@ -78,13 +251,13 @@ const podiumClasses = [
   'border-orange-400/50 bg-orange-700/15 text-orange-300'
 ]
 const { routes, routeErrors, isRouting } = useDriveRoutes(chatStore, () => props.channelId,
-  () => visibleLocations.value, () => destination.value, () => isJoined.value)
+  () => visibleLocations.value, () => navigationTarget.value, () => isJoined.value, getDriveRoute, () => navigationPersonal.value)
 const renderedStreets = computed(() => {
   const entries = [...routes.value]
   const positions = entries.flatMap(([, route]) => route.coordinates.map(([longitude, latitude]) => ({ latitude, longitude })))
-  const coordinates = getDriveMapCoordinates([], destination.value, positions)
+  const coordinates = getDriveMapCoordinates([], navigationTarget.value, positions)
   const paths = new Map<string, [number, number][]>()
-  let offset = destination.value ? 1 : 0
+  let offset = navigationTarget.value ? 1 : 0
   for (const [userId, route] of entries) {
     paths.set(userId, coordinates.slice(offset, offset + route.coordinates.length))
     offset += route.coordinates.length
@@ -104,11 +277,16 @@ const renderedStreets = computed(() => {
 const renderedMap = computed(() => {
   const streets = renderedStreets.value
   const points = visibleLocations.value
-  if (!destination.value || !streets.paths.size) return { coordinates: getDriveMapCoordinates(points, destination.value), paths: streets.paths }
+  const trackCoordinates = trackMode.value
+    ? trackGates.value.map<[number, number]>((gate) => [gate.latitude, gate.longitude])
+    : []
+  if (!navigationTarget.value || !streets.paths.size) {
+    return { coordinates: [...getDriveMapCoordinates(points, navigationTarget.value), ...trackCoordinates], paths: streets.paths }
+  }
   // Road geometry stays cached between route updates; GPS-only updates fit just markers and road bounds.
   const coordinates = points.map<[number, number]>((point) => [point.latitude,
     streets.centerLongitude + ((point.longitude - streets.centerLongitude) % 360 + 540) % 360 - 180])
-  coordinates.push(streets.target!, ...streets.bounds)
+  coordinates.push(streets.target!, ...streets.bounds, ...trackCoordinates)
   return { coordinates, paths: streets.paths }
 })
 const routingErrors = computed(() => [...routeErrors.value].map(([userId, error]) => ({
@@ -125,6 +303,36 @@ const linePositions = new Map<string, [number, number][]>()
 let lastFittedBounds: LatLngBounds | null = null
 let lastFitSignature = ''
 let destinationMarker: CircleMarker | null = null
+let trackLine: Polyline | null = null
+const trackGateMarkers = new Map<string, LeafletMarker>()
+let trackLayerSignature = ''
+const buildTrackGateIcon = (gate: DriveTrackGate) => {
+  const color = gate.kind === 'start' ? '#22c55e' : gate.kind === 'end' ? '#f59e0b' : '#a78bfa'
+  const label = gate.kind === 'start' ? 'S' : gate.kind === 'end' ? 'F' : String(gate.index)
+  const html = `<span style="display:flex;width:24px;height:24px;align-items:center;justify-content:center;border-radius:9999px;background:${color};color:#fff;font:700 11px/1 system-ui;border:2px solid #fff;box-shadow:0 1px 3px rgb(0 0 0/.6)">${label}</span>`
+  return leaflet!.divIcon({ className: 'drive-track-gate-icon', html, iconSize: [24, 24], iconAnchor: [12, 12] })
+}
+const clearTrackLayer = () => {
+  if (trackLine) { trackLine.remove(); trackLine = null }
+  for (const marker of trackGateMarkers.values()) marker.remove()
+  trackGateMarkers.clear()
+  trackLayerSignature = ''
+}
+const syncTrackLayer = () => {
+  if (!map || !leaflet) return
+  const track = trackMode.value ? activeTrack.value : null
+  if (!track) { clearTrackLayer(); return }
+  const gates = trackGates.value
+  const signature = `${track.id}|${gates.map((gate) => `${gate.latitude.toFixed(6)},${gate.longitude.toFixed(6)},${gate.kind}`).join(';')}`
+  if (signature === trackLayerSignature) return
+  clearTrackLayer()
+  trackLayerSignature = signature
+  const latLngs = gates.map((gate) => [gate.latitude, gate.longitude] as [number, number])
+  if (latLngs.length >= 2) trackLine = leaflet.polyline(latLngs, { color: '#a78bfa', weight: 5, opacity: 0.85, interactive: false }).addTo(map)
+  gates.forEach((gate) => {
+    trackGateMarkers.set(`${gate.kind}-${gate.index}`, leaflet!.marker([gate.latitude, gate.longitude], { icon: buildTrackGateIcon(gate), interactive: false, keyboard: false }).addTo(map!))
+  })
+}
 const driverAvatarSignature = (avatarUrl: string | null): string => {
   if (!avatarUrl) return ''
   return `${avatarUrl.length}:${avatarUrl.slice(0, 24)}:${avatarUrl.slice(-24)}`
@@ -152,6 +360,7 @@ const buildDriverIcon = (color: string, avatarUrl: string | null, speaking: bool
   })
 }
 const NAV_ZOOM = 17
+const FOLLOW_ZOOM = 16
 const BEARING_EASING = 0.18
 const NAV_LOOK_AHEAD_MIN_METERS = 25
 const NAV_LOOK_AHEAD_MAX_METERS = 80
@@ -175,14 +384,19 @@ const headingCenter = (point: { latitude: number; longitude: number }, heading: 
   return [latitude + latitudeOffset, point.longitude + longitudeOffset]
 }
 // Prefer the street route's next waypoint over the noisy GPS compass so the view turns early and holds steady.
+// An active track overrules the destination route so navigation follows the planned line.
 const routeHeading = (point: { latitude: number; longitude: number; speed: number | null }): number | null => {
+  const speed = typeof point.speed === 'number' && Number.isFinite(point.speed) ? point.speed : null
+  const lookAhead = speed === null
+    ? NAV_LOOK_AHEAD_MIN_METERS + 10
+    : Math.min(NAV_LOOK_AHEAD_MAX_METERS, Math.max(NAV_LOOK_AHEAD_MIN_METERS, NAV_LOOK_AHEAD_MIN_METERS + speed * 2))
+  if (trackMode.value && !navigationPersonal.value && activeTrack.value && trackGates.value.length >= 2) {
+    const heading = getTrackHeading(point, trackGates.value, lookAhead)
+    if (heading !== null) return heading
+  }
   const userId = chatStore.currentUser?.id
   const route = userId ? routes.value.get(userId) : undefined
   if (route) {
-    const speed = typeof point.speed === 'number' && Number.isFinite(point.speed) ? point.speed : null
-    const lookAhead = speed === null
-      ? NAV_LOOK_AHEAD_MIN_METERS + 10
-      : Math.min(NAV_LOOK_AHEAD_MAX_METERS, Math.max(NAV_LOOK_AHEAD_MIN_METERS, NAV_LOOK_AHEAD_MIN_METERS + speed * 2))
     const heading = getRouteHeading(point, route.coordinates, lookAhead)
     if (heading !== null) return heading
   }
@@ -321,6 +535,7 @@ const leaveDriveChannel = () => {
 
 const syncMap = (forceFit = false) => {
   if (!map || !leaflet) return
+  syncTrackLayer()
   const points = visibleLocations.value
   const userIds = new Set(points.map((point) => point.user_id))
   for (const [userId, marker] of markers) {
@@ -331,7 +546,7 @@ const syncMap = (forceFit = false) => {
     }
   }
   for (const [userId, line] of destinationLines) {
-    if (!destination.value || !userIds.has(userId) || !renderedMap.value.paths.has(userId)) {
+    if (!navigationTarget.value || !userIds.has(userId) || !renderedMap.value.paths.has(userId)) {
       line.remove()
       destinationLines.delete(userId)
       linePositions.delete(userId)
@@ -342,14 +557,14 @@ const syncMap = (forceFit = false) => {
     if (!userIds.has(userId) && !participantIds.has(userId)) driverColors.delete(userId)
   }
   const { coordinates, paths } = renderedMap.value
-  const target = destination.value ? coordinates[points.length]! : null
-  if (target && destination.value) {
+  const target = navigationTarget.value ? coordinates[points.length]! : null
+  if (target && !navigationPersonal.value) {
     if (!destinationMarker) {
       destinationMarker = leaflet.circleMarker(target, { radius: 11, weight: 3, color: '#fef3c7', fillColor: '#f59e0b', fillOpacity: 1 }).addTo(map)
     }
     destinationMarker.setLatLng(target)
     const label = document.createElement('span')
-    label.textContent = `Destination: ${destination.value.label}`
+    label.textContent = `Destination: ${navigationTarget.value!.label}`
     if (destinationMarker.getTooltip()) destinationMarker.setTooltipContent(label)
     else destinationMarker.bindTooltip(label, { permanent: true, direction: 'bottom', offset: [0, 12] })
   } else {
@@ -406,6 +621,23 @@ const syncMap = (forceFit = false) => {
     if (marker.getTooltip()) marker.setTooltipContent(label)
     else marker.bindTooltip(label, { permanent: true, direction: 'top', offset: [0, -10] })
   }
+  // Following a driver overrides both the navigation close-up and the fit-all overview.
+  if (followUserId.value) {
+    const followedIndex = points.findIndex((point) => point.user_id === followUserId.value)
+    if (followedIndex !== -1) {
+      lastSelfPoint = null
+      clearDirectionArrow()
+      if (displayedHeading !== 0) {
+        targetHeading = 0
+        bearingExitRefit = true
+        startBearingAnimation()
+      }
+      map.setView(coordinates[followedIndex]!, FOLLOW_ZOOM, { animate: false })
+      lastFittedBounds = map.getBounds()
+      lastFitSignature = ''
+      return
+    }
+  }
   if (navMode.value) {
     const selfPoint = points.find((point) => point.user_id === chatStore.currentUser?.id)
     if (selfPoint) {
@@ -439,7 +671,7 @@ const syncMap = (forceFit = false) => {
   }
   // Refit only when the driver/destination set changes or someone leaves the current view.
   // GPS ticks that keep everyone visible just move the markers, avoiding per-second zoom/tile flashes.
-  const fitSignature = `${destination.value?.label ?? ''}|${points.map((point) => point.user_id).sort().join(',')}`
+  const fitSignature = `${navigationTarget.value?.label ?? ''}|${navigationPersonal.value ? 'start' : 'shared'}|${activeTrack.value?.id ?? ''}|${points.map((point) => point.user_id).sort().join(',')}`
   const shouldRefit = forceFit || !lastFittedBounds || fitSignature !== lastFitSignature || !lastFittedBounds.contains(bounds)
   if (!shouldRefit) return
   map.fitBounds(bounds, {
@@ -451,13 +683,13 @@ const syncMap = (forceFit = false) => {
 }
 
 watch([cameraView, cameraPhoneLayout, isJoined], async ([view, isPhone, joined]) => {
-  webrtcStore.setCameraReceivingEnabled(joined && !isPhone && view !== 'map')
+  webrtcStore.setCameraReceivingEnabled(joined && !isPhone && (view === 'split' || view === 'cameras'))
   await nextTick()
   map?.invalidateSize({ animate: false, pan: false })
   syncMap(true)
 }, { flush: 'post', immediate: true })
 
-watch([visibleLocations, destination, routes, participants, () => [...webrtcStore.speakingUserIds], navMode, () => chatStore.getLocalDriverAvatar(), () => chatStore.currentUser?.driver_avatar_url], () => syncMap(), { deep: true })
+watch([visibleLocations, destination, routes, participants, () => [...webrtcStore.speakingUserIds], navMode, followUserId, activeTrack, trackGates, () => chatStore.getLocalDriverAvatar(), () => chatStore.currentUser?.driver_avatar_url], () => syncMap(), { deep: true })
 onMounted(async () => {
   try {
     const [module] = await Promise.all([import('leaflet'), import('leaflet/dist/leaflet.css')])
@@ -489,6 +721,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   disposed = true
+  stopSplitDrag()
   webrtcStore.setCameraReceivingEnabled(false)
   if (bearingFrame !== null) cancelAnimationFrame(bearingFrame)
   bearingFrame = null
@@ -497,6 +730,8 @@ onBeforeUnmount(() => {
   cancelDestinationChange()
   resizeObserver?.disconnect()
   clearDirectionArrow()
+  clearTrackLayer()
+  if (trackClockTimer) { clearInterval(trackClockTimer); trackClockTimer = null }
   map?.remove()
   map = null
   markers.clear()
@@ -509,13 +744,23 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="flex min-h-0 min-w-0 flex-1 flex-col bg-zinc-950" :class="{ 'phone-drive-panel': phoneLayout }">
+  <section class="relative flex min-h-0 min-w-0 flex-1 flex-col bg-zinc-950" :class="{ 'phone-drive-panel': phoneLayout }">
     <header class="flex shrink-0 items-center gap-3 border-b border-white/5 px-4 py-3 md:px-6" :class="phoneLayout ? 'pl-12' : ''">
       <Car class="h-6 w-6 shrink-0 text-indigo-400" />
       <div class="min-w-0 flex-1">
         <h2 class="truncate font-bold text-white">{{ channelName }}</h2>
         <p class="text-xs text-zinc-400">Drive Together - {{ visibleLocations.length }} live locations</p>
       </div>
+      <span
+        v-if="showRecordingBadge"
+        class="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-red-500/40 bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold text-red-300"
+        role="status"
+        :title="recordingBadgeTitle"
+        :aria-label="recordingBadgeTitle"
+      >
+        <span class="h-2 w-2 rounded-full" :class="recordingUploading ? 'bg-sky-400' : 'animate-pulse bg-red-500'" aria-hidden="true" />
+        {{ recordingLabel }}
+      </span>
       <button
         v-if="cameraPhoneLayout && isJoined"
         type="button"
@@ -529,6 +774,16 @@ onBeforeUnmount(() => {
       >
         <CameraOff v-if="webrtcStore.cameraProducer" class="h-5 w-5" />
         <Camera v-else class="h-5 w-5" :class="webrtcStore.cameraShareStarting ? 'animate-pulse' : ''" />
+      </button>
+      <button
+        v-if="cameraPhoneLayout && isJoined && webrtcStore.cameraProducer"
+        type="button"
+        class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-white/10 p-2 text-zinc-300 transition-colors hover:bg-zinc-800"
+        aria-label="Rotate shared camera 90 degrees"
+        title="Rotate camera 90 degrees"
+        @click="rotateCamera"
+      >
+        <RotateCw class="h-5 w-5" />
       </button>
       <div v-if="!cameraPhoneLayout" class="ml-auto flex shrink-0 items-center gap-1 rounded-xl border border-white/10 bg-zinc-900/80 p-1" role="group" aria-label="Drive Together view">
         <button
@@ -545,7 +800,7 @@ onBeforeUnmount(() => {
     </header>
     <div class="drive-leaderboard shrink-0 border-b border-white/5 px-4 py-2 md:px-6">
       <div class="drive-leaderboard-list flex flex-col gap-1 overflow-y-auto" aria-label="Driver leaderboard">
-        <span v-for="entry in rankedParticipants" :key="entry.participant.id" class="driver-row flex w-full min-w-0 items-center gap-2 rounded-lg border px-3 py-1.5 text-xs" :data-rank="entry.rank ?? undefined" :class="[entry.rank !== null && entry.rank <= 3 ? podiumClasses[entry.rank - 1] : webrtcStore.isUserSpeaking(entry.participant.id) ? 'border-green-500/50 text-green-300' : 'border-white/10 text-zinc-300', webrtcStore.isUserSpeaking(entry.participant.id) && entry.rank !== null && entry.rank <= 3 ? 'ring-1 ring-green-500/60' : '']" :title="entry.distance_m !== null ? `${Math.round(entry.distance_m)} m GPS distance to the shared destination` : undefined">
+        <span v-for="entry in rankedParticipants" :key="entry.participant.id" class="driver-row flex w-full min-w-0 items-center gap-2 rounded-lg border px-3 py-2 text-xs" :data-rank="entry.rank ?? undefined" :class="[entry.rank !== null && entry.rank <= 3 ? podiumClasses[entry.rank - 1] : webrtcStore.isUserSpeaking(entry.participant.id) ? 'border-green-500/50 text-green-300' : 'border-white/10 text-zinc-300', webrtcStore.isUserSpeaking(entry.participant.id) && entry.rank !== null && entry.rank <= 3 ? 'ring-1 ring-green-500/60' : '']" :title="entry.distance_m !== null ? `${Math.round(entry.distance_m)} m GPS distance to the shared destination` : undefined">
           <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-black/20 text-[10px] font-bold tabular-nums" :class="entry.rank !== null ? '' : 'text-zinc-500'">{{ entry.rank ?? '-' }}</span>
           <span class="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-white/30" :style="{ backgroundColor: driverColor(entry.participant.id) }" aria-hidden="true" />
           <MicOff v-if="entry.participant.isMuted || entry.participant.isDeafened" class="h-3 w-3 shrink-0 text-red-400" />
@@ -553,17 +808,21 @@ onBeforeUnmount(() => {
           <MapPin v-if="isJoined && driveStore.locations.has(entry.participant.id)" class="h-3 w-3 shrink-0 text-indigo-400" />
           <span v-if="driveStore.getSpeedLabel(entry.participant.id, channelId)" class="shrink-0 tabular-nums text-indigo-300" title="Current GPS speed (approximate)">{{ driveStore.getSpeedLabel(entry.participant.id, channelId) }}</span>
           <span v-if="entry.distance_m !== null" class="shrink-0 tabular-nums text-zinc-400">{{ formatDistance(entry.distance_m) }}</span>
+          <button type="button" class="ml-1 inline-flex shrink-0 items-center justify-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-30" :class="[isFollowingUser(entry.participant.id) ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-400 hover:bg-white/10 hover:text-white', phoneLayout ? 'h-11 w-11' : 'h-8 w-8']" :disabled="!isJoined || !driveStore.locations.has(entry.participant.id)" :aria-pressed="isFollowingUser(entry.participant.id)" :aria-label="isFollowingUser(entry.participant.id) ? `Stop tracking ${entry.participant.username} on the map` : `Track ${entry.participant.username} on the map`" :title="isFollowingUser(entry.participant.id) ? 'Stop tracking on the map' : 'Track this driver on the map'" @click="toggleFollowUser(entry.participant.id)"><Crosshair :class="phoneLayout ? 'h-5 w-5' : 'h-4 w-4'" /></button>
         </span>
         <p v-if="!rankedParticipants.length" class="px-1 py-2 text-xs text-zinc-500">No drivers in this room yet.</p>
       </div>
     </div>
     <p v-if="driveStore.locationError && isJoined" class="drive-location-error shrink-0 bg-amber-950/30 px-4 py-3 text-sm text-amber-200" role="alert">{{ driveStore.locationError }}</p>
     <p v-if="webrtcStore.cameraShareError" class="drive-camera-error shrink-0 bg-amber-950/30 px-4 py-2 text-xs text-amber-200" role="alert">{{ webrtcStore.cameraShareError }}</p>
+    <p v-if="recordingError" class="shrink-0 bg-amber-950/30 px-4 py-2 text-xs text-amber-200" role="alert">{{ recordingError }}</p>
     <div
+      ref="workspaceElement"
       class="drive-workspace min-h-0 min-w-0 flex-1"
       :class="cameraPhoneLayout ? 'drive-workspace--phone' : `drive-workspace--${cameraView}`"
+      :style="splitGridStyle"
     >
-      <div v-show="cameraPhoneLayout || cameraView !== 'cameras'" class="drive-map-area relative min-h-0 min-w-0 flex-1 isolate">
+      <div v-show="cameraPhoneLayout || cameraView === 'map' || cameraView === 'split'" class="drive-map-area relative min-h-0 min-w-0 flex-1 isolate">
         <div ref="mapElement" class="drive-map absolute inset-0 z-0" aria-label="Dark OpenStreetMap showing participant GPS locations" />
         <div v-show="navPanelOpen" id="drive-navigation-panel" ref="navigationElement" class="drive-navigation absolute left-14 right-3 top-3 z-20 max-h-[calc(100%-1.5rem)] overflow-y-auto rounded-xl border border-white/10 bg-zinc-950/95 p-3 shadow-xl backdrop-blur md:right-auto md:w-80" @pointerdown.stop @dblclick.stop @wheel.stop>
           <form class="flex items-center gap-2" @submit.prevent="searchAddress">
@@ -585,16 +844,52 @@ onBeforeUnmount(() => {
           <p v-if="destination && isJoined" class="mt-2 text-[11px] text-zinc-400" role="status">{{ routes.size }}/{{ visibleLocations.length }} street routes<span v-if="isRouting">, updating...</span></p>
           <div v-if="routingErrors.length" class="mt-2 max-h-24 space-y-1 overflow-y-auto" role="alert"><p v-for="entry in routingErrors" :key="entry.userId" class="text-xs text-amber-300">{{ entry.username }}: {{ entry.error }}</p></div>
         </div>
-        <div v-if="(!visibleLocations.length && !destination) || mapError" class="pointer-events-none absolute inset-x-4 bottom-4 z-10 mx-auto max-w-md rounded-xl border border-white/10 bg-zinc-950/90 p-4 text-center shadow-xl backdrop-blur">
+        <div v-show="tracksPanelOpen && !isPhoneLayout" :id="isPhoneLayout ? undefined : 'drive-tracks-panel'" class="drive-tracks absolute left-14 right-3 top-3 z-20 max-h-[calc(100%-1.5rem)] overflow-y-auto rounded-xl border border-white/10 bg-zinc-950/95 p-3 shadow-xl backdrop-blur md:left-auto md:right-3 md:w-96" @pointerdown.stop @dblclick.stop @wheel.stop>
+          <div class="mb-2 flex items-center gap-2">
+            <Route class="h-4 w-4 shrink-0 text-indigo-400" />
+            <h3 class="min-w-0 flex-1 text-xs font-bold uppercase tracking-wider text-zinc-300">Server tracks</h3>
+            <button type="button" class="shrink-0 rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50" :disabled="!isJoined" @click="openTrackEditor(null)">New</button>
+          </div>
+          <DriveTracksContent :channel-id="channelId" :joined="isJoined" :active-track="activeTrack" :active-run="activeRun" @edit="openTrackEditor" />
+        </div>
+        <div v-if="trackMode && activeTrack" class="drive-track-hud pointer-events-none absolute inset-x-3 bottom-3 z-10 mx-auto max-w-md rounded-xl border border-indigo-500/30 bg-zinc-950/90 px-3 py-2 text-center shadow-xl backdrop-blur">
+          <p class="truncate text-xs font-bold text-white">{{ activeTrack.name }}</p>
+          <p class="mt-0.5 text-[11px] text-zinc-300">
+            <template v-if="trackNextGate">Next: {{ trackNextGate.name }}<span v-if="trackNextGateDistance !== null"> · {{ formatDistance(trackNextGateDistance) }}</span> · </template>
+            <span v-if="trackStarted">{{ formatDuration(trackElapsedMs) }}</span><span v-else>heading to start</span><span v-if="activeRun?.avg_speed_mps"> · avg {{ (activeRun.avg_speed_mps * 3.6).toFixed(1) }} km/h</span>
+          </p>
+        </div>
+        <div v-if="((!visibleLocations.length && !destination && !activeTrack) || mapError)" class="pointer-events-none absolute inset-x-4 bottom-4 z-10 mx-auto max-w-md rounded-xl border border-white/10 bg-zinc-950/90 p-4 text-center shadow-xl backdrop-blur">
           <MapPin class="mx-auto mb-2 h-6 w-6 text-indigo-400" />
           <p class="text-sm font-medium text-white">{{ mapError || (isJoined ? 'Waiting for shared GPS locations' : 'Join to see and share live locations') }}</p>
           <p class="mt-1 text-xs text-zinc-400">Voice works even if you do not share your location. The map always fits all known positions.</p>
         </div>
       </div>
+      <div
+        v-if="!cameraPhoneLayout && cameraView === 'split'"
+        class="drive-split-handle"
+        :class="{ 'drive-split-handle--active': splitDragging }"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize map and camera panels"
+        aria-valuemin="15"
+        aria-valuemax="85"
+        :aria-valuenow="Math.round(splitRatio * 100)"
+        tabindex="0"
+        @pointerdown="startSplitDrag"
+        @keydown="onSplitKeydown"
+        @dblclick="resetSplit"
+      >
+        <span class="drive-split-handle-grip" aria-hidden="true" />
+      </div>
       <DriveCameraStage
-        v-if="!cameraPhoneLayout && cameraView !== 'map'"
+        v-if="!cameraPhoneLayout && (cameraView === 'split' || cameraView === 'cameras')"
         :streams="webrtcStore.userCameraStreams"
         :participants="participants"
+      />
+      <DriveLeaderboardStage
+        v-if="!cameraPhoneLayout && cameraView === 'leaderboard'"
+        :active-track-id="activeTrack?.id ?? null"
       />
     </div>
     <footer class="drive-controls shrink-0 border-t border-white/5 px-4 py-3 md:px-6">
@@ -622,9 +917,21 @@ onBeforeUnmount(() => {
             <Camera v-else class="h-5 w-5" :class="webrtcStore.cameraShareStarting ? 'animate-pulse' : ''" />
             <span v-if="!cameraPhoneLayout">{{ webrtcStore.cameraShareStarting ? 'Starting camera...' : webrtcStore.cameraProducer ? 'Stop camera' : 'Share camera' }}</span>
           </button>
+          <button
+            v-if="!cameraPhoneLayout && webrtcStore.cameraProducer"
+            type="button"
+            class="inline-flex items-center justify-center rounded-lg border border-white/10 p-2 text-zinc-300 transition-colors hover:bg-zinc-800"
+            aria-label="Rotate shared camera 90 degrees"
+            title="Rotate camera 90 degrees"
+            @click="rotateCamera"
+          >
+            <RotateCw class="h-4 w-4" />
+          </button>
           <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors disabled:cursor-not-allowed disabled:opacity-40" :class="[navMode ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :disabled="!canUseNav" :aria-pressed="navMode" :aria-label="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Start navigation close-up of your position') : 'Navigation close-up needs active GPS sharing'" :title="canUseNav ? (navMode ? 'Exit navigation close-up' : 'Navigation close-up of your position') : 'Share your GPS to use navigation close-up'" @click="navMode = !navMode"><Navigation class="h-5 w-5" /></button>
         </template>
-        <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors" :class="[navPanelOpen ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-expanded="navPanelOpen" aria-controls="drive-navigation-panel" :aria-label="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" :title="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" @click="navPanelOpen = !navPanelOpen"><Flag class="h-5 w-5" /></button>
+        <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors" :class="[navPanelOpen ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-expanded="navPanelOpen" aria-controls="drive-navigation-panel" :aria-label="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" :title="navPanelOpen ? 'Hide destination panel' : 'Show destination panel'" @click="toggleNavPanel"><Flag class="h-5 w-5" /></button>
+        <button type="button" class="inline-flex items-center justify-center rounded-lg p-2 transition-colors" :class="[tracksPanelOpen ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-expanded="tracksPanelOpen" :aria-controls="isPhoneLayout ? 'drive-tracks-panel-phone' : 'drive-tracks-panel'" :aria-label="tracksPanelOpen ? 'Hide shared tracks' : 'Show shared tracks'" :title="tracksPanelOpen ? 'Hide shared tracks' : 'Show shared tracks'" @click="toggleTracksPanel"><Route class="h-5 w-5" /></button>
+        <button v-if="isPhoneLayout" type="button" class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg p-2 transition-colors" :class="leaderboardPanelOpen ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'text-zinc-300 hover:bg-zinc-800'" :aria-expanded="leaderboardPanelOpen" aria-controls="drive-leaderboard-panel-phone" aria-label="Show track leaderboard" title="Track leaderboard" @click="toggleLeaderboardPanel"><Trophy class="h-5 w-5" /></button>
         <template v-if="isJoined">
           <button class="inline-flex items-center justify-center rounded-lg p-2 hover:bg-zinc-800" :class="[webrtcStore.isMuted || webrtcStore.isDeafened ? 'text-red-400' : 'text-zinc-300', phoneLayout ? 'h-11 w-11 shrink-0' : '']" :aria-label="webrtcStore.isMuted || webrtcStore.isDeafened ? 'Unmute microphone' : 'Mute microphone'" @click="webrtcStore.toggleMute()">
             <MicOff v-if="webrtcStore.isMuted || webrtcStore.isDeafened" class="h-5 w-5" /><Mic v-else class="h-5 w-5" />
@@ -634,6 +941,74 @@ onBeforeUnmount(() => {
         </template>
       </div>
     </footer>
+    <div v-if="isPhoneLayout && tracksPanelOpen" id="drive-tracks-panel-phone" class="absolute inset-0 z-40 flex flex-col bg-zinc-950" role="dialog" aria-modal="true" aria-label="Shared tracks">
+      <header class="flex shrink-0 items-center gap-1 border-b border-white/5 px-2 py-3">
+        <button type="button" class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-zinc-300 hover:bg-zinc-800 hover:text-white" aria-label="Back to the drive map" @click="closeTracksPanel"><ArrowLeft class="h-5 w-5" /></button>
+        <h3 class="min-w-0 flex-1 truncate text-lg font-bold text-white">Tracks</h3>
+        <button type="button" class="mr-1 shrink-0 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50" :disabled="!isJoined" @click="openTrackEditor(null)">New</button>
+      </header>
+      <div class="min-h-0 flex-1 overflow-y-auto px-3 pb-10 pt-3">
+        <DriveTracksContent :channel-id="channelId" :joined="isJoined" :active-track="activeTrack" :active-run="activeRun" @edit="openTrackEditor" />
+      </div>
+    </div>
+    <div v-if="isPhoneLayout && leaderboardPanelOpen" id="drive-leaderboard-panel-phone" class="absolute inset-0 z-40 flex flex-col bg-zinc-950" role="dialog" aria-modal="true" aria-label="Track leaderboard">
+      <header class="flex shrink-0 items-center gap-1 border-b border-white/5 px-2 py-3">
+        <button type="button" class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-zinc-300 hover:bg-zinc-800 hover:text-white" aria-label="Back to the drive map" @click="leaderboardPanelOpen = false"><ArrowLeft class="h-5 w-5" /></button>
+        <h3 class="min-w-0 flex-1 truncate text-lg font-bold text-white">Leaderboard</h3>
+      </header>
+      <div class="min-h-0 flex-1 p-2">
+        <DriveLeaderboardStage :active-track-id="activeTrack?.id ?? null" />
+      </div>
+    </div>
+    <TrackEditor v-if="trackEditorOpen" :track="editingTrack" @close="trackEditorOpen = false" @saved="handleTrackSaved" />
+    <div
+      v-if="webrtcStore.cameraSharePreviewing"
+      class="absolute inset-0 z-50 flex flex-col bg-black/95"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Confirm camera orientation"
+    >
+      <header class="flex shrink-0 items-center gap-3 border-b border-white/10 px-4 py-3">
+        <Camera class="h-5 w-5 shrink-0 text-indigo-400" />
+        <div class="min-w-0 flex-1">
+          <h3 class="truncate font-bold text-white">Camera orientation</h3>
+          <p class="text-xs text-zinc-400">Rotate until the picture looks upright, then confirm.</p>
+        </div>
+      </header>
+      <div class="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-black p-3">
+        <video
+          :ref="setCameraPreviewVideo"
+          autoplay
+          muted
+          playsinline
+          class="max-h-full max-w-full bg-black object-contain"
+        />
+      </div>
+      <footer class="flex shrink-0 flex-wrap items-center gap-2 border-t border-white/10 px-4 py-3">
+        <button
+          type="button"
+          class="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-white/10 bg-zinc-900 px-4 text-sm font-semibold text-zinc-100 transition-colors hover:bg-zinc-800"
+          :aria-label="`Rotate camera 90 degrees, currently ${webrtcStore.cameraShareRotation} degrees`"
+          @click="rotateCamera"
+        >
+          <RotateCw class="h-4 w-4" /> Rotate 90&deg; ({{ webrtcStore.cameraShareRotation }}&deg;)
+        </button>
+        <button
+          type="button"
+          class="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white transition-colors hover:bg-indigo-500"
+          @click="confirmCameraRotation"
+        >
+          <Check class="h-4 w-4" /> Use this
+        </button>
+        <button
+          type="button"
+          class="inline-flex min-h-11 items-center justify-center rounded-lg border border-white/10 px-4 text-sm font-semibold text-zinc-300 transition-colors hover:bg-zinc-800"
+          @click="cancelCameraRotation"
+        >
+          Cancel
+        </button>
+      </footer>
+    </div>
   </section>
 </template>
 
@@ -652,17 +1027,56 @@ onBeforeUnmount(() => {
 }
 .drive-workspace--split {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr) 0.75rem minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
-  gap: 0.5rem;
+  gap: 0;
   padding: 0.5rem;
 }
 .drive-workspace--split > * {
   min-height: 0;
   min-width: 0;
 }
+.drive-split-handle {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+  border-radius: 9999px;
+}
+.drive-split-handle-grip {
+  width: 2px;
+  height: 100%;
+  border-radius: 9999px;
+  background: rgb(255 255 255 / 12%);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.drive-split-handle:hover .drive-split-handle-grip,
+.drive-split-handle:focus-visible .drive-split-handle-grip,
+.drive-split-handle--active .drive-split-handle-grip {
+  background: #818cf8;
+  box-shadow: 0 0 0 3px rgb(129 140 248 / 18%);
+}
+.drive-split-handle:focus-visible {
+  background: rgb(129 140 248 / 10%);
+}
+:global(body.drive-split-resizing) {
+  cursor: col-resize;
+  user-select: none;
+}
 .drive-workspace--cameras {
   display: flex;
+}
+.drive-workspace--leaderboard {
+  display: flex;
+  padding: 0.5rem;
+}
+.drive-workspace--leaderboard > * {
+  min-height: 0;
+  min-width: 0;
 }
 .drive-workspace--phone .drive-map-area {
   min-height: 0;
@@ -676,19 +1090,19 @@ onBeforeUnmount(() => {
   overflow-y: auto;
 }
 .drive-leaderboard-list {
-  max-height: 10rem;
+  max-height: 12rem;
 }
 .phone-drive-panel .drive-leaderboard-list {
-  max-height: 26vh;
-  max-height: 26dvh;
+  max-height: 30vh;
+  max-height: 30dvh;
 }
 .phone-drive-panel .drive-navigation {
   max-height: max(0px, calc(60% - 30px));
 }
 @media (max-height: 500px) {
   .phone-drive-panel .drive-leaderboard-list {
-    max-height: 20vh;
-    max-height: 20dvh;
+    max-height: 24vh;
+    max-height: 24dvh;
   }
 }
 .drive-map {

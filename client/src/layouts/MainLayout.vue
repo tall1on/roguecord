@@ -5,6 +5,7 @@ import { useRouter } from 'vue-router'
 import { ArrowLeft, Minus, Square, X, AlertCircle } from 'lucide-vue-next'
 import { useChatStore, type Channel, type ServerPermission } from '../stores/chat'
 import { useWebRtcStore } from '../stores/webrtc'
+import { useTrackRecordingUploadsStore } from '../stores/trackRecordingUploads'
 import { useDriveStore } from '../stores/drive'
 import LoginModal from '../components/layout/modals/LoginModal.vue'
 import CreateServerModal from '../components/layout/modals/CreateServerModal.vue'
@@ -32,6 +33,7 @@ type SettingsSection = 'general' | 'audio' | 'connections' | 'drive' | 'identity
 
 const chatStore = useChatStore()
 const webrtcStore = useWebRtcStore()
+const trackRecordingUploads = useTrackRecordingUploadsStore()
 useDriveStore()
 const isPhone = usePhoneLayout()
 const phoneDriveChannelId = ref<string | null>(null)
@@ -911,6 +913,8 @@ onMounted(() => {
   chatStore.addMessageListener(handleChatStoreMessage)
   chatStore.clearError()
   void webrtcStore.initAudioSystem()
+  // Resume any track recordings that were captured but not yet uploaded (e.g. after a reload).
+  trackRecordingUploads.init()
 
   const lastUsedServer = localStorage.getItem('lastUsedServer')
   if (lastUsedServer && autoConnectLastServer.value) {

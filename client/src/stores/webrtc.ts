@@ -3,6 +3,7 @@ import { computed, ref, shallowRef, watch } from 'vue';
 import { Device } from 'mediasoup-client';
 import { useChatStore } from './chat';
 import { useDriveCameraShare } from '../composables/useDriveCameraShare';
+import { useWakeLock } from '../composables/useWakeLock';
 
 type AudioElementWithSinkId = HTMLAudioElement & {
   setSinkId?: (sinkId: string) => Promise<void>;
@@ -699,9 +700,18 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     producer: cameraProducer,
     error: cameraShareError,
     starting: cameraShareStarting,
+    detached: cameraShareDetached,
+    rotation: cameraShareRotation,
+    previewing: cameraSharePreviewing,
+    previewStream: cameraSharePreviewStream,
     cleanup: cleanupCameraShareProducer,
+    detach: detachCameraShare,
+    resume: resumeCameraShare,
     start: startCameraShare,
-    stop: stopCameraShare
+    stop: stopCameraShare,
+    confirmRotation: confirmCameraRotation,
+    cancelRotation: cancelCameraRotation,
+    rotate: rotateCamera
   } = useDriveCameraShare({
     getChannelId: () => activeVoiceChannelId.value,
     isDriveChannel: () => isDriveChannel.value,
@@ -1170,10 +1180,58 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     }
   };
 
+  const isMicSuppressed = () => isMuted.value || isDeafened.value;
+
+  // While muted/deafened the browser microphone is fully released: an open capture stream makes the
+  // OS/browser treat this as an active call and duck or silence other media playback.
+  const releaseLocalMic = async () => {
+    removeSpeakingDetector('local');
+    if (producer.value) {
+      try {
+        producer.value.pause();
+      } catch (error) {
+        console.error('Failed to pause producer:', error);
+      }
+    }
+    await stopLocalInput();
+  };
+
+  const acquireLocalMic = async () => {
+    const transport = sendTransport.value;
+    if (!activeVoiceChannelId.value || !transport || isMicSuppressed()) return;
+    try {
+      const track = await createLocalAudioTrack();
+      if (!track) return;
+      if (chatStore.currentUser?.id && localStream.value) {
+        addSpeakingDetector('local', chatStore.currentUser.id, localStream.value, true);
+      }
+      if (producer.value) {
+        try {
+          await producer.value.replaceTrack({ track });
+        } catch (error) {
+          console.error('Failed to replace producer track:', error);
+          try {
+            producer.value.close();
+          } catch (_e) {
+            // no-op
+          }
+          producer.value = await transport.produce({ track });
+        }
+        producer.value.resume();
+        return;
+      }
+      producer.value = await transport.produce({ track });
+      producer.value.resume();
+    } catch (error) {
+      console.error('Failed to open microphone:', error);
+    }
+  };
+
   const setInputDevice = async (deviceId: string) => {
     selectedInputDeviceId.value = deviceId;
 
-    if (activeVoiceChannelId.value && sendTransport.value) {
+    // Do not reopen the microphone while it is intentionally released.
+    if (activeVoiceChannelId.value && sendTransport.value && !isMicSuppressed()) {
       await replaceProducerTrack();
     }
   };
@@ -1432,37 +1490,20 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     connectionQuality.value = 'good';
   };
 
-  const toggleMute = () => {
+  const toggleMute = async () => {
     if (isDeafened.value) {
       // If deafened, clicking mute will undeafen but keep muted
       isDeafened.value = false;
       isMuted.value = true;
       applyAllRemoteAudioState();
-      
-      // Mic stays disabled because isMuted is true
-      if (localStream.value) {
-        localStream.value.getAudioTracks().forEach(track => {
-          track.enabled = false;
-        });
-      }
-      if (producer.value) {
-        producer.value.pause();
-      }
     } else {
       isMuted.value = !isMuted.value;
-      
-      if (localStream.value) {
-        localStream.value.getAudioTracks().forEach(track => {
-          track.enabled = !isMuted.value;
-        });
-      }
-      if (producer.value) {
-        if (isMuted.value) {
-          producer.value.pause();
-        } else {
-          producer.value.resume();
-        }
-      }
+    }
+
+    if (isMicSuppressed()) {
+      await releaseLocalMic();
+    } else {
+      await acquireLocalMic();
     }
 
     if (activeVoiceChannelId.value) {
@@ -1474,35 +1515,14 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     }
   };
 
-  const toggleDeafen = () => {
+  const toggleDeafen = async () => {
     isDeafened.value = !isDeafened.value;
-    
-    if (isDeafened.value) {
-      // When deafened, also mute the mic
-      if (localStream.value) {
-        localStream.value.getAudioTracks().forEach(track => {
-          track.enabled = false;
-        });
-      }
-      if (producer.value) {
-        producer.value.pause();
-      }
-      applyAllRemoteAudioState();
+    applyAllRemoteAudioState();
+
+    if (isMicSuppressed()) {
+      await releaseLocalMic();
     } else {
-      // Restore mic state
-      if (localStream.value) {
-        localStream.value.getAudioTracks().forEach(track => {
-          track.enabled = !isMuted.value;
-        });
-      }
-      if (producer.value) {
-        if (isMuted.value) {
-          producer.value.pause();
-        } else {
-          producer.value.resume();
-        }
-      }
-      applyAllRemoteAudioState();
+      await acquireLocalMic();
     }
 
     if (activeVoiceChannelId.value) {
@@ -1540,14 +1560,21 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     });
   };
 
-  const leaveVoiceChannel = () => {
+  const leaveVoiceChannel = (options: { preserveCameraCapture?: boolean } = {}) => {
     if (!activeVoiceChannelId.value) return;
-    
+
+    // On a dropped connection, keep the local camera capture (and any in-progress recording)
+    // alive so it can be re-published when the connection returns. A first-run orientation
+    // preview is also kept alive so a brief outage does not hide the rotate popup.
+    const preserveCamera = options.preserveCameraCapture === true
+      && (Boolean(cameraProducer.value) || cameraShareDetached.value || cameraSharePreviewing.value);
+
     chatStore.send('leave_voice_channel', { channel_id: activeVoiceChannelId.value });
     
     stopLocalInput();
     cleanupScreenShareProducer();
-    cleanupCameraShareProducer();
+    if (preserveCamera) detachCameraShare();
+    else cleanupCameraShareProducer();
     cameraShareError.value = null;
 
     if (localStream.value) {
@@ -1598,17 +1625,34 @@ export const useWebRtcStore = defineStore('webrtc', () => {
     });
     userScreenStreams.value.clear();
     userScreenStreams.value = new Map(userScreenStreams.value);
-    userCameraStreams.value.forEach((stream) => {
-      stream.getTracks().forEach((track) => {
-        try {
-          track.stop();
-        } catch (_e) {
-          // no-op
-        }
+    if (preserveCamera) {
+      // Keep only the local driver's preserved camera stream; drop stale remote camera entries.
+      const localUserId = chatStore.currentUser?.id;
+      for (const [userId, stream] of [...userCameraStreams.value.entries()]) {
+        if (userId === localUserId) continue;
+        stream.getTracks().forEach((track) => {
+          try {
+            track.stop();
+          } catch (_e) {
+            // no-op
+          }
+        });
+        userCameraStreams.value.delete(userId);
+      }
+      userCameraStreams.value = new Map(userCameraStreams.value);
+    } else {
+      userCameraStreams.value.forEach((stream) => {
+        stream.getTracks().forEach((track) => {
+          try {
+            track.stop();
+          } catch (_e) {
+            // no-op
+          }
+        });
       });
-    });
-    userCameraStreams.value.clear();
-    userCameraStreams.value = new Map(userCameraStreams.value);
+      userCameraStreams.value.clear();
+      userCameraStreams.value = new Map(userCameraStreams.value);
+    }
 
     remoteStreams.value.clear();
     voiceParticipants.value = [];
@@ -1627,7 +1671,8 @@ export const useWebRtcStore = defineStore('webrtc', () => {
       case 'authenticated':
         if (activeVoiceChannelId.value) {
           const id = activeVoiceChannelId.value;
-          leaveVoiceChannel();
+          // Preserve the camera capture across the re-auth/rejoin so a recording is not interrupted.
+          leaveVoiceChannel({ preserveCameraCapture: true });
           // Rejoin after a short delay to ensure state is clean
           setTimeout(() => {
             joinVoiceChannel(id);
@@ -1883,31 +1928,25 @@ export const useWebRtcStore = defineStore('webrtc', () => {
           });
           
           // Start producing audio with the configured device/gain/noise-gate chain.
+          // While muted/deafened the microphone stays closed and is opened on first unmute.
           try {
-            const audioTrack = await createLocalAudioTrack();
+            const audioTrack = isMicSuppressed() ? null : await createLocalAudioTrack();
 
             if (audioTrack) {
-              // Apply current mute/deafen state
-              if (isMuted.value || isDeafened.value) {
-                localStream.value?.getAudioTracks().forEach(track => {
-                  track.enabled = false;
-                });
-              }
-
               if (chatStore.currentUser?.id && localStream.value) {
                 addSpeakingDetector('local', chatStore.currentUser.id, localStream.value, true);
               }
 
               producer.value = await sendTransport.value.produce({ track: audioTrack });
-              
-              if (isMuted.value || isDeafened.value) {
-                producer.value.pause();
-              }
             }
           } catch (error) {
             console.error('Failed to get user media or produce:', error);
           }
-          
+
+          // Re-publish a camera capture that was preserved across a reconnect so an in-progress
+          // track recording keeps running without re-acquiring the camera.
+          if (cameraShareDetached.value) void resumeCameraShare();
+
         } else if (payload.direction === 'recv') {
           recvTransport.value = device.value.createRecvTransport(payload.transportOptions);
           
@@ -2146,12 +2185,23 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
   // Register listener
   chatStore.addMessageListener(handleMessage);
 
+  // Keep the screen awake while connected to a voice or drive channel
+  const { enable: enableWakeLock, disable: disableWakeLock } = useWakeLock();
+  watch(activeVoiceChannelId, (channelId) => {
+    if (channelId) {
+      enableWakeLock();
+    } else {
+      disableWakeLock();
+    }
+  });
+
   // Watch for websocket disconnects to clean up voice state
   watch(() => chatStore.isConnected, (isConnected) => {
     if (!isConnected) {
       if (activeVoiceChannelId.value) {
         lastActiveVoiceChannelId.value = activeVoiceChannelId.value;
-        leaveVoiceChannel();
+        // Preserve the camera capture so an in-progress track recording keeps running.
+        leaveVoiceChannel({ preserveCameraCapture: true });
       }
       channelParticipants.value = new Map();
       callStartedAt.value = new Map();
@@ -2187,6 +2237,13 @@ const remoteSource = producerToSource.get(payload.producer_id) || ((payload.kind
     cameraProducer,
     cameraShareError,
     cameraShareStarting,
+    cameraShareDetached,
+    cameraShareRotation,
+    cameraSharePreviewing,
+    cameraSharePreviewStream,
+    confirmCameraRotation,
+    cancelCameraRotation,
+    rotateCamera,
     ping,
     bandwidth,
     pingHistory,

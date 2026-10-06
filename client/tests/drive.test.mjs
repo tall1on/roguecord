@@ -20,13 +20,22 @@ let usePhoneLayout
 let getDriveCameraCaptureConstraints
 let getDriveCameraProducerOptions
 let useDriveCameraShare
+let useTrackRecording
+let normalizeCameraRotation
+let hasConfiguredCameraRotation
+let markCameraRotationConfigured
+let getScreenOrientation
+let trackRecordingQueue
 before(async () => {
   server = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom' })
   ;({ useDriveStore, getGpsSpeed } = await server.ssrLoadModule('/src/stores/drive.ts'))
   ;({ getDriveMapCoordinates, searchDriveDestinations, getDriveRoute, setDriveDestination, rankDriveParticipants, pickDriveColor, getRouteHeading, DRIVE_SELF_COLOR, DRIVE_DRIVER_COLORS } = await server.ssrLoadModule('/src/utils/driveNavigation.ts'))
   ;({ getDriveCameraCaptureConstraints, getDriveCameraProducerOptions } = await server.ssrLoadModule('/src/utils/driveCamera.ts'))
+  ;({ normalizeCameraRotation, hasConfiguredCameraRotation, markCameraRotationConfigured, getScreenOrientation } = await server.ssrLoadModule('/src/utils/cameraOrientation.ts'))
   ;({ useDriveCameraShare } = await server.ssrLoadModule('/src/composables/useDriveCameraShare.ts'))
+  ;({ useTrackRecording } = await server.ssrLoadModule('/src/composables/useTrackRecording.ts'))
   ;({ usePhoneLayout } = await server.ssrLoadModule('/src/composables/usePhoneLayout.ts'))
+  trackRecordingQueue = await server.ssrLoadModule('/src/utils/trackRecordingQueue.ts')
 })
 after(async () => server?.close())
 
@@ -73,6 +82,27 @@ function setup(context, { secure = true } = {}) {
     else delete globalThis.window
   })
   return { chat, webrtc, drive, emit, sent, watches, cleared }
+}
+
+function installLocalStorage() {
+  const store = new Map()
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (key) => (store.has(key) ? store.get(key) : null),
+      setItem: (key, value) => { store.set(key, String(value)) },
+      removeItem: (key) => { store.delete(key) },
+      clear: () => { store.clear() }
+    }
+  })
+  return {
+    store,
+    restore: () => {
+      if (original) Object.defineProperty(globalThis, 'localStorage', original)
+      else delete globalThis.localStorage
+    }
+  }
 }
 
 test('GPS starts only after drive admission and keeps running when navigating away', (context) => {
@@ -480,13 +510,16 @@ test('each driver gets a distinct color while the local driver keeps neon green'
   assert.ok(extras.every((color) => /^hsl\(/.test(color)))
 })
 
-test('Drive camera capture prefers the rear camera and caps mobile upload quality', () => {
+test('Drive camera capture prefers the rear camera and bounds the frame size without forcing an aspect ratio', () => {
   const constraints = getDriveCameraCaptureConstraints()
   assert.equal(constraints.audio, false)
   assert.deepEqual(constraints.video.facingMode, { ideal: 'environment' })
-  assert.deepEqual(constraints.video.width, { ideal: 640, max: 960 })
-  assert.deepEqual(constraints.video.height, { ideal: 360, max: 540 })
   assert.deepEqual(constraints.video.frameRate, { ideal: 20, max: 24 })
+  // Only max caps: the browser's own orientation handling still decides the frame shape.
+  assert.deepEqual(constraints.video.width, { max: 1280 })
+  assert.deepEqual(constraints.video.height, { max: 1280 })
+  assert.equal(constraints.video.width.exact, undefined)
+  assert.equal(constraints.video.height.exact, undefined)
   assert.notEqual(getDriveCameraCaptureConstraints().video, constraints.video)
 
   const producerOptions = getDriveCameraProducerOptions()
@@ -494,17 +527,205 @@ test('Drive camera capture prefers the rear camera and caps mobile upload qualit
   assert.equal(producerOptions.codecOptions.videoGoogleStartBitrate, 350)
 })
 
+test('camera rotation snaps to quarter turns and stays valid', () => {
+  assert.equal(normalizeCameraRotation(0), 0)
+  assert.equal(normalizeCameraRotation(90), 90)
+  assert.equal(normalizeCameraRotation(180), 180)
+  assert.equal(normalizeCameraRotation(270), 270)
+  assert.equal(normalizeCameraRotation(360), 0)
+  assert.equal(normalizeCameraRotation(-90), 270)
+  assert.equal(normalizeCameraRotation(450), 90)
+  assert.equal(normalizeCameraRotation(Number.NaN), 0)
+})
+
+test('drive recording queue persists clips in order and removes them', async () => {
+  trackRecordingQueue.clearTrackRecordingMemoryFallback()
+  const blob = new Blob(['clip'])
+  await trackRecordingQueue.enqueueTrackRecording({ runId: 'r2', mimeType: 'video/webm', durationMs: 2000, size: 4, createdAt: 2000, blob })
+  await trackRecordingQueue.enqueueTrackRecording({ runId: 'r1', mimeType: 'video/webm', durationMs: 1000, size: 4, createdAt: 1000, blob })
+  const queued = await trackRecordingQueue.listTrackRecordings()
+  assert.deepEqual(queued.map((entry) => entry.runId), ['r1', 'r2'])
+  assert.equal(await trackRecordingQueue.countTrackRecordings(), 2)
+  await trackRecordingQueue.removeTrackRecording('r1')
+  assert.deepEqual((await trackRecordingQueue.listTrackRecordings()).map((entry) => entry.runId), ['r2'])
+  assert.equal(await trackRecordingQueue.countTrackRecordings(), 1)
+  trackRecordingQueue.clearTrackRecordingMemoryFallback()
+})
+
+function installFakeMediaRecorder(context) {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'MediaRecorder')
+  class FakeMediaRecorder {
+    static instances = []
+    static isTypeSupported() { return true }
+    constructor(stream, options) {
+      this.stream = stream
+      this.mimeType = (options && options.mimeType) || 'video/webm'
+      this.state = 'inactive'
+      this.ondataavailable = null
+      this.onerror = null
+      this.onstop = null
+      FakeMediaRecorder.instances.push(this)
+    }
+    start() { this.state = 'recording' }
+    stop() { if (this.state === 'recording') this.state = 'inactive' }
+    // The browser emits a final dataavailable before onstop; tests drive that explicitly.
+    finish(data = 'tail') {
+      if (this.ondataavailable) this.ondataavailable({ data: new Blob([data]) })
+      if (this.onstop) this.onstop()
+    }
+  }
+  Object.defineProperty(globalThis, 'MediaRecorder', { configurable: true, value: FakeMediaRecorder })
+  context.after(() => {
+    if (original) Object.defineProperty(globalThis, 'MediaRecorder', original)
+    else delete globalThis.MediaRecorder
+  })
+  return FakeMediaRecorder
+}
+
+function setupTrackRecording() {
+  const listeners = new Set()
+  const stored = []
+  const videoTrack = { readyState: 'live' }
+  const stream = { getVideoTracks: () => [videoTrack] }
+  const scope = effectScope()
+  let recording
+  scope.run(() => {
+    recording = useTrackRecording({
+      getChannelId: () => 'trip',
+      isJoined: () => true,
+      getCameraStream: () => stream,
+      getConnectionId: () => 'guild',
+      send: () => {},
+      addMessageListener: (listener) => listeners.add(listener),
+      removeMessageListener: (listener) => listeners.delete(listener),
+      storeRecording: (input) => { stored.push(input) }
+    })
+  })
+  const emit = (type, payload = {}) => {
+    for (const listener of listeners) listener({ type, payload: { channel_id: 'trip', ...payload } })
+  }
+  return { recording, stored, emit, scope }
+}
+
+test('track recording records overlapping runs concurrently on one camera stream', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'], now: 10_000 })
+  const originalNow = Date.now
+  let now = 10_000
+  Date.now = () => now
+  context.after(() => { Date.now = originalNow })
+  const FakeMediaRecorder = installFakeMediaRecorder(context)
+  const { recording, stored, emit, scope } = setupTrackRecording()
+  context.after(() => scope.stop())
+
+  emit('drive_recording_start', { run_id: 'r1', max_duration_ms: 60000 })
+  assert.equal(recording.isRecording.value, true)
+  assert.deepEqual(recording.recordingRunIds.value, ['r1'])
+  assert.equal(FakeMediaRecorder.instances.length, 1)
+  assert.equal(FakeMediaRecorder.instances[0].state, 'recording')
+
+  // A second overlapping run starts its own recorder immediately on the same camera stream.
+  emit('drive_recording_start', { run_id: 'r2', max_duration_ms: 60000 })
+  assert.equal(FakeMediaRecorder.instances.length, 2)
+  assert.equal(FakeMediaRecorder.instances[1].state, 'recording')
+  assert.deepEqual(recording.recordingRunIds.value, ['r1', 'r2'])
+  assert.equal(FakeMediaRecorder.instances[0].stream, FakeMediaRecorder.instances[1].stream)
+  // A duplicate start for an already-recording run is ignored.
+  emit('drive_recording_start', { run_id: 'r2', max_duration_ms: 60000 })
+  assert.equal(FakeMediaRecorder.instances.length, 2)
+
+  // Stopping r1 flushes only its clip; r2 keeps recording.
+  now = 12_000
+  context.mock.timers.tick(2000)
+  emit('drive_recording_stop', { run_id: 'r1', reason: 'track_finished' })
+  assert.equal(FakeMediaRecorder.instances[0].state, 'inactive')
+  assert.equal(FakeMediaRecorder.instances[1].state, 'recording')
+  FakeMediaRecorder.instances[0].finish()
+
+  assert.equal(stored.length, 1)
+  assert.equal(stored[0].runId, 'r1')
+  assert.equal(stored[0].connectionId, 'guild')
+  assert.deepEqual(recording.recordingRunIds.value, ['r2'])
+  assert.equal(recording.isRecording.value, true)
+})
+
+test('a terminal run update stops only the matching recording', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'], now: 10_000 })
+  const originalNow = Date.now
+  let now = 10_000
+  Date.now = () => now
+  context.after(() => { Date.now = originalNow })
+  const FakeMediaRecorder = installFakeMediaRecorder(context)
+  const { recording, stored, emit, scope } = setupTrackRecording()
+  context.after(() => scope.stop())
+
+  emit('drive_recording_start', { run_id: 'r9', max_duration_ms: 60000 })
+  const fake = FakeMediaRecorder.instances[0]
+  now = 11_500
+  context.mock.timers.tick(1500)
+
+  // A finish for an unrelated run must not stop this recording.
+  emit('drive_track_run_updated', { run: { id: 'other', status: 'finished', channel_id: 'trip' } })
+  assert.equal(fake.state, 'recording')
+
+  // The recorded run's authoritative terminal status stops it even without a stop message.
+  emit('drive_track_run_updated', { run: { id: 'r9', status: 'finished', channel_id: 'trip' } })
+  assert.equal(fake.state, 'inactive')
+  fake.finish()
+  assert.equal(stored.length, 1)
+  assert.equal(stored[0].runId, 'r9')
+  assert.equal(recording.isRecording.value, false)
+})
+
+test('a start that arrives before the camera stream is live is retried, not lost', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 10_000 })
+  const FakeMediaRecorder = installFakeMediaRecorder(context)
+  const listeners = new Set()
+  let live = false
+  const videoTrack = { get readyState() { return live ? 'live' : 'ended' } }
+  const stream = { getVideoTracks: () => [videoTrack] }
+  const scope = effectScope()
+  let recording
+  scope.run(() => {
+    recording = useTrackRecording({
+      getChannelId: () => 'trip',
+      isJoined: () => true,
+      getCameraStream: () => stream,
+      getConnectionId: () => 'guild',
+      send: () => {},
+      addMessageListener: (listener) => listeners.add(listener),
+      removeMessageListener: (listener) => listeners.delete(listener),
+      storeRecording: () => {}
+    })
+  })
+  context.after(() => scope.stop())
+  const emit = (type, payload = {}) => {
+    for (const listener of listeners) listener({ type, payload: { channel_id: 'trip', ...payload } })
+  }
+
+  emit('drive_recording_start', { run_id: 'r1' })
+  assert.equal(FakeMediaRecorder.instances.length, 0)
+  assert.equal(recording.isRecording.value, false)
+
+  live = true
+  context.mock.timers.tick(400)
+  assert.equal(FakeMediaRecorder.instances.length, 1)
+  assert.equal(recording.isRecording.value, true)
+  assert.deepEqual(recording.recordingRunIds.value, ['r1'])
+})
+
 test('Drive camera publishes the camera source and releases its local track on stop', async (context) => {
   const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const storage = installLocalStorage()
   let stoppedTracks = 0
   let requestedConstraints
-  const videoTrack = { contentHint: '', onended: null, stop: () => { stoppedTracks++ } }
+  const videoTrack = { contentHint: '', onended: null, readyState: 'live', stop: () => { stoppedTracks++ } }
   const stream = { getVideoTracks: () => [videoTrack], getTracks: () => [videoTrack] }
   Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
     value: { mediaDevices: { getUserMedia: async (constraints) => { requestedConstraints = constraints; return stream } } }
   })
   context.after(() => {
+    storage.restore()
     if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
     else delete globalThis.navigator
   })
@@ -532,6 +753,19 @@ test('Drive camera publishes the camera source and releases its local track on s
   })
 
   await cameraShare.start()
+  // The first run shows the orientation preview and does not publish until the user confirms.
+  assert.equal(cameraShare.previewing.value, true)
+  assert.equal(cameraShare.previewStream.value, stream)
+  assert.equal(producerOptions, undefined)
+  assert.equal(streams.has('driver'), false)
+
+  cameraShare.rotate()
+  assert.equal(cameraShare.rotation.value, 90)
+  await cameraShare.confirmRotation()
+  assert.equal(cameraShare.previewing.value, false)
+  assert.equal(storage.store.get('roguecord.driveCameraRotationConfigured'), 'true')
+  assert.equal(storage.store.get('roguecord.driveCameraRotation'), '90')
+
   assert.equal(videoTrack.contentHint, 'motion')
   assert.equal(requestedConstraints.video.facingMode.ideal, 'environment')
   assert.equal(producerOptions.track, videoTrack)
@@ -544,6 +778,62 @@ test('Drive camera publishes the camera source and releases its local track on s
   assert.equal(stoppedTracks, 1)
   assert.equal(streams.has('driver'), false)
   assert.deepEqual(messages, [{ type: 'close_producer', payload: { channel_id: 'drive', producer_id: 'camera-producer' } }])
+})
+
+test('Drive camera keeps its capture across a transport loss and resumes it', async (context) => {
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const storage = installLocalStorage()
+  storage.store.set('roguecord.driveCameraRotationConfigured', 'true')
+  let stoppedTracks = 0
+  const videoTrack = { contentHint: '', onended: null, readyState: 'live', stop: () => { stoppedTracks++ } }
+  const stream = { getVideoTracks: () => [videoTrack], getTracks: () => [videoTrack] }
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { mediaDevices: { getUserMedia: async () => stream } }
+  })
+  context.after(() => {
+    storage.restore()
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
+    else delete globalThis.navigator
+  })
+
+  const makeProducer = (id) => ({ id, closed: false, close() { this.closed = true }, on() {} })
+  const produced = []
+  let current = { produce: async (options) => { produced.push(options); return makeProducer('p1') } }
+  const streams = new Map()
+  const cameraShare = useDriveCameraShare({
+    getChannelId: () => 'drive',
+    isDriveChannel: () => true,
+    getSendTransport: () => current,
+    getDevice: () => ({ canProduce: () => true }),
+    waitForSendTransport: async () => current,
+    getUserId: () => 'driver',
+    setUserStream: (userId, userStream) => streams.set(userId, userStream),
+    deleteUserStream: (userId) => streams.delete(userId),
+    send: () => {}
+  })
+
+  await cameraShare.start()
+  assert.equal(cameraShare.producer.value.id, 'p1')
+
+  // Transport loss closes the producer but keeps the local capture so recording is uninterrupted.
+  cameraShare.detach()
+  assert.equal(cameraShare.producer.value, null)
+  assert.equal(cameraShare.detached.value, true)
+  assert.equal(streams.get('driver'), stream)
+  assert.equal(stoppedTracks, 0)
+
+  // Reconnect: a new transport re-publishes the same capture.
+  current = { produce: async (options) => { produced.push(options); return makeProducer('p2') } }
+  assert.equal(await cameraShare.resume(), true)
+  assert.equal(cameraShare.producer.value.id, 'p2')
+  assert.equal(cameraShare.detached.value, false)
+  assert.equal(produced.length, 2)
+  assert.equal(produced[1].appData.source, 'camera')
+
+  cameraShare.stop()
+  assert.equal(stoppedTracks, 1)
+  assert.equal(streams.has('driver'), false)
 })
 
 test('Drive camera permission results arriving after leave are discarded', async (context) => {
@@ -624,4 +914,150 @@ test('phone layout follows modern and legacy media changes and cleans up on unmo
   assert.equal(legacyPhone.value, true)
   legacyScope.stop()
   assert.equal(removed, true)
+})
+
+test('camera rotation is re-confirmed whenever the device orientation changes', () => {
+  const storage = installLocalStorage()
+  const originalScreen = Object.getOwnPropertyDescriptor(globalThis, 'screen')
+  let orientationType = 'portrait-primary'
+  Object.defineProperty(globalThis, 'screen', {
+    configurable: true,
+    value: { get orientation() { return { type: orientationType } } }
+  })
+  try {
+    assert.equal(getScreenOrientation(), 'portrait')
+    assert.equal(hasConfiguredCameraRotation(), false)
+
+    markCameraRotationConfigured()
+    assert.equal(hasConfiguredCameraRotation(), true)
+
+    // Turning the phone sideways invalidates the rotation that was chosen in portrait.
+    orientationType = 'landscape-primary'
+    assert.equal(getScreenOrientation(), 'landscape')
+    assert.equal(hasConfiguredCameraRotation(), false)
+
+    markCameraRotationConfigured()
+    assert.equal(hasConfiguredCameraRotation(), true)
+
+    // A configuration saved before orientation tracking existed must not suppress the preview.
+    storage.store.set('roguecord.driveCameraRotationConfigured', 'true')
+    storage.store.delete('roguecord.driveCameraRotationOrientation')
+    assert.equal(hasConfiguredCameraRotation(), false)
+  } finally {
+    storage.restore()
+    if (originalScreen) Object.defineProperty(globalThis, 'screen', originalScreen)
+    else delete globalThis.screen
+  }
+})
+
+test('Drive camera shows the rotate preview when the saved orientation no longer matches', async (context) => {
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const originalScreen = Object.getOwnPropertyDescriptor(globalThis, 'screen')
+  const storage = installLocalStorage()
+  storage.store.set('roguecord.driveCameraRotationConfigured', 'true')
+  storage.store.set('roguecord.driveCameraRotationOrientation', 'landscape')
+  Object.defineProperty(globalThis, 'screen', {
+    configurable: true,
+    value: { orientation: { type: 'portrait-primary' } }
+  })
+  let produceCalls = 0
+  const videoTrack = { contentHint: '', onended: null, readyState: 'live', stop() {} }
+  const stream = { getVideoTracks: () => [videoTrack], getTracks: () => [videoTrack] }
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { mediaDevices: { getUserMedia: async () => stream } }
+  })
+  context.after(() => {
+    storage.restore()
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
+    else delete globalThis.navigator
+    if (originalScreen) Object.defineProperty(globalThis, 'screen', originalScreen)
+    else delete globalThis.screen
+  })
+
+  const transport = { produce: async () => { produceCalls++; return { id: 'p', close() {}, on() {} } } }
+  const cameraShare = useDriveCameraShare({
+    getChannelId: () => 'drive',
+    isDriveChannel: () => true,
+    getSendTransport: () => transport,
+    getDevice: () => ({ canProduce: () => true }),
+    waitForSendTransport: async () => transport,
+    getUserId: () => 'driver',
+    setUserStream: () => {},
+    deleteUserStream: () => {},
+    send: () => {}
+  })
+
+  await cameraShare.start()
+  // Previously confirmed in landscape, but the phone is now portrait: prompt again.
+  assert.equal(cameraShare.previewing.value, true)
+  assert.equal(produceCalls, 0)
+  cameraShare.cancelRotation()
+})
+
+test('Drive camera re-acquires the camera when the capture ends unexpectedly', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
+  const storage = installLocalStorage()
+  storage.store.set('roguecord.driveCameraRotationConfigured', 'true')
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} }
+  })
+
+  let getUserMediaCalls = 0
+  let lastTrack = null
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      mediaDevices: {
+        getUserMedia: async () => {
+          getUserMediaCalls++
+          lastTrack = { contentHint: '', onended: null, readyState: 'live', stop() {} }
+          return { getVideoTracks: () => [lastTrack], getTracks: () => [lastTrack] }
+        }
+      }
+    }
+  })
+  context.after(() => {
+    storage.restore()
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
+    else delete globalThis.navigator
+    if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument)
+    else delete globalThis.document
+  })
+
+  let produceCount = 0
+  const transport = { produce: async () => { produceCount++; return { id: `p${produceCount}`, close() {}, on() {} } } }
+  const cameraShare = useDriveCameraShare({
+    getChannelId: () => 'drive',
+    isDriveChannel: () => true,
+    getSendTransport: () => transport,
+    getDevice: () => ({ canProduce: () => true }),
+    waitForSendTransport: async () => transport,
+    getUserId: () => 'driver',
+    setUserStream: () => {},
+    deleteUserStream: () => {},
+    send: () => {}
+  })
+
+  await cameraShare.start()
+  assert.equal(produceCount, 1)
+  assert.equal(getUserMediaCalls, 1)
+
+  // The OS ends the camera track (for example the phone screen locked): re-acquire instead of
+  // silently turning the share off.
+  assert.equal(typeof lastTrack.onended, 'function')
+  lastTrack.onended()
+  await new Promise((resolve) => setImmediate(resolve))
+  context.mock.timers.tick(1000)
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(getUserMediaCalls, 2)
+  assert.equal(produceCount, 2)
+  assert.equal(cameraShare.producer.value.id, 'p2')
+
+  cameraShare.stop()
+  assert.equal(cameraShare.producer.value, null)
 })

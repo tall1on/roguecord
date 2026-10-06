@@ -32,8 +32,8 @@ export interface DriveNavigationTransport {
 
 let nextRequestId = 0;
 
-const requestNavigation = (
-  transport: DriveNavigationTransport, type: string, responseType: string, channelId: string,
+export const requestDriveMessage = (
+  transport: DriveNavigationTransport, type: string, responseType: string, channelId: string | null,
   payload: Record<string, unknown>, signal: AbortSignal, timeoutMs: number
 ): Promise<any> => {
   if (signal.aborted) return Promise.reject(new DOMException('Navigation request cancelled', 'AbortError'));
@@ -62,7 +62,7 @@ const requestNavigation = (
       if (message.payload?.request_id !== requestId || transport.activeConnectionId !== connectionId || transport.currentUser?.id !== userId) return;
       if (message.type === 'error') {
         finish(new Error(typeof message.payload.message === 'string' ? message.payload.message : 'Navigation request failed.'));
-      } else if (message.type === responseType && message.payload.channel_id === channelId) {
+      } else if (message.type === responseType && (channelId === null || message.payload.channel_id === channelId)) {
         finish(typeof message.payload.error === 'string' ? new Error(message.payload.error) : null, message.payload);
       }
     };
@@ -76,7 +76,7 @@ const requestNavigation = (
     signal.addEventListener('abort', abort, { once: true });
     try {
       if (signal.aborted) abort();
-      else transport.send(type, { ...payload, request_id: requestId, channel_id: channelId });
+      else transport.send(type, { ...payload, request_id: requestId, ...(channelId ? { channel_id: channelId } : {}) });
     } catch {
       finish(new Error('Could not send the navigation request.'));
     }
@@ -242,7 +242,7 @@ export const setDriveDestination = async (
   transport: DriveNavigationTransport, channelId: string, destination: DriveDestination | null, signal: AbortSignal
 ): Promise<DriveDestination | null> => {
   if (destination !== null && !isDriveDestination(destination)) throw new Error('Choose a valid room destination.');
-  const response = await requestNavigation(transport, 'drive_set_destination', 'drive_destination_set', channelId, {
+  const response = await requestDriveMessage(transport, 'drive_set_destination', 'drive_destination_set', channelId, {
     destination: destination ? { latitude: destination.latitude, longitude: destination.longitude, label: destination.label } : null
   }, signal, 10000);
   if (response.destination !== null && !isDriveDestination(response.destination)) throw new Error('Invalid room destination response.');
@@ -254,7 +254,7 @@ export const searchDriveDestinations = async (
 ): Promise<DriveDestination[]> => {
   const address = query.trim();
   if (address.length < 2 || address.length > 250) throw new Error('Enter an address between 2 and 250 characters.');
-  const response = await requestNavigation(transport, 'drive_search_destinations', 'drive_destinations', channelId, { query: address }, signal, 20000);
+  const response = await requestDriveMessage(transport, 'drive_search_destinations', 'drive_destinations', channelId, { query: address }, signal, 20000);
   if (!Array.isArray(response.destinations) || response.destinations.length > 5
     || response.destinations.some((entry: any) => !validPosition(entry) || typeof entry.label !== 'string' || !entry.label.trim() || entry.label.length > 2000)) {
     throw new Error('Address search returned an invalid response.');
@@ -263,11 +263,11 @@ export const searchDriveDestinations = async (
 };
 
 export const getDriveRoute = async (
-  transport: DriveNavigationTransport, channelId: string, userId: string, destination: MapPosition, signal: AbortSignal
+  transport: DriveNavigationTransport, channelId: string, userId: string, destination: MapPosition, signal: AbortSignal, personal = false
 ): Promise<DriveRoute> => {
   if (!validPosition(destination)) throw new Error('Choose a valid destination.');
-  const response = await requestNavigation(transport, 'drive_get_route', 'drive_route', channelId, {
-    user_id: userId, destination: { latitude: destination.latitude, longitude: destination.longitude }
+  const response = await requestDriveMessage(transport, 'drive_get_route', 'drive_route', channelId, {
+    user_id: userId, destination: { latitude: destination.latitude, longitude: destination.longitude }, ...(personal ? { personal: true } : {})
   }, signal, 60000);
   const route = response.route;
   if (response.user_id !== userId || !route || route.provider !== 'osrm'

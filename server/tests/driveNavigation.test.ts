@@ -360,3 +360,33 @@ test('routes require the nonnull shared room goal; spoofed matchRoomTarget canno
     }
   }
 });
+
+test('personal routes accept an explicit start target without a shared room goal', async () => {
+  const participants = new DriveParticipants();
+  const targets: unknown[] = [];
+  const services = {
+    search: async () => [],
+    route: async (_origin: unknown, destination: unknown) => {
+      targets.push(destination);
+      return { ...streetRoute, destination: destination as { latitude: number; longitude: number } };
+    }
+  };
+  const handler = createDriveNavigationHandler({ ready: Promise.resolve(), participants, channel: async () => ({ type: 'drive' }), services: () => services });
+  const requester = makeClient('requester');
+  const driver = makeClient('driver');
+  participants.admit('drive', requester.client);
+  participants.admit('drive', driver.client);
+  participants.update('drive', driver.client, point, 1000);
+  const start = { latitude: 50, longitude: 8 };
+  await handler(requester.client, 'drive_get_route', { request_id: 'personal', channel_id: 'drive', user_id: 'driver', destination: start, personal: true });
+  const personal = requester.messages.at(-1).payload;
+  assert.equal(personal.error, undefined);
+  assert.deepEqual(targets, [start]);
+  assert.deepEqual(personal.route.destination, start);
+  // Without the personal flag the same target is rejected because it is not the room goal.
+  const viewer = makeClient('viewer');
+  participants.admit('drive', viewer.client);
+  await handler(viewer.client, 'drive_get_route', { request_id: 'shared', channel_id: 'drive', user_id: 'driver', destination: start });
+  assert.match(viewer.messages.at(-1).payload.error, /shared room destination/);
+  assert.equal(targets.length, 1);
+});

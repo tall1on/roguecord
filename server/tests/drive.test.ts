@@ -197,7 +197,51 @@ test('drive signaling rejects unrelated sockets and screen media while allowing 
     deleteChannel: async () => {}
   } } as NodeModule;
   const dbPath = require.resolve('../src/db');
-  require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: { dataDir: process.cwd() } } as NodeModule;
+  const leaderboardRows = [
+    {
+      id: 'run-1', track_id: 'track-1', user_id: 'driver', channel_id: 'drive', started_at: 1000,
+      finished_at: 5000, next_gate: 3, gates_total: 3, gate_times_json: '[1000,3000,5000]',
+      distance_m: 222, duration_ms: 4000, avg_speed_mps: 55.5, max_speed_mps: 71.2, status: 'finished', updated_at: 5000
+    },
+    {
+      id: 'run-2', track_id: 'track-1', user_id: 'driver', channel_id: 'drive', started_at: 2000,
+      finished_at: 7000, next_gate: 3, gates_total: 3, gate_times_json: '[2000,4000,7000]',
+      distance_m: 222, duration_ms: 5000, avg_speed_mps: 44.4, max_speed_mps: 60, status: 'finished', updated_at: 7000
+    }
+  ];
+  require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: {
+    dataDir: process.cwd(), channelsSchemaReady: Promise.resolve(),
+    db: {
+      all: (sql: string, params: unknown[], callback: (error: Error | null, rows: unknown[]) => void) => {
+        if (/FROM drive_tracks\b/.test(sql)) { callback(null, []); return; }
+        assert.match(sql, /FROM drive_track_runs/);
+        if (!/ROW_NUMBER|ORDER BY duration_ms/.test(sql)) { callback(null, []); return; }
+        const best: unknown[] = [];
+        const seen = new Set<string>();
+        for (const row of leaderboardRows) {
+          if (/ROW_NUMBER/i.test(sql)) {
+            if (seen.has(row.user_id)) continue;
+            seen.add(row.user_id);
+          }
+          best.push(row);
+        }
+        const offset = typeof params[2] === 'number' ? params[2] : 0;
+        callback(null, best.slice(offset, offset + 50));
+      },
+      get: (sql: string, _params: unknown[], callback: (error: Error | null, row?: unknown) => void) => {
+        if (/COUNT/i.test(sql)) {
+          const total = /DISTINCT user_id/i.test(sql)
+            ? new Set(leaderboardRows.map((row) => row.user_id)).size
+            : leaderboardRows.length;
+          callback(null, { total });
+        } else {
+          // No active run for the cleanup paths (endRun/getActiveRun).
+          callback(null);
+        }
+      },
+      run: (_sql: string, _params: unknown[], callback: (error: Error | null) => void) => callback(null)
+    }
+  } } as NodeModule;
   const { handleMessage, handleClientDisconnect } = require('../src/ws/handlers') as typeof import('../src/ws/handlers');
   const owner = makeClient('owner');
   const tab = makeClient('owner');
@@ -207,6 +251,32 @@ test('drive signaling rejects unrelated sockets and screen media while allowing 
   const room = { id: 'drive', router: { rtpCapabilities: {}, close: () => closes++ }, peers: new Map() } as unknown as Room;
   rooms.set('drive', room);
   const send = (client: ClientConnection, type: string, payload: any) => handleMessage(client, JSON.stringify({ type, payload }));
+  const previousMessageCount = owner.messages.length;
+  await send(owner.client, 'drive_track_leaderboard', { request_id: 'leaderboard-request', track_id: 'track-1' });
+  assert.equal(owner.messages.length, previousMessageCount + 1);
+  assert.deepEqual(owner.messages.at(-1), {
+    type: 'drive_track_leaderboard',
+    payload: {
+      request_id: 'leaderboard-request', track_id: 'track-1', offset: 0, total: 1, has_more: false,
+      entries: [{ user_id: 'driver', run_id: 'run-1', duration_ms: 4000, avg_speed_mps: 55.5, max_speed_mps: 71.2, distance_m: 222, finished_at: 5000, has_recording: false }]
+    }
+  });
+  await send(owner.client, 'drive_track_leaderboard', {
+    request_id: 'leaderboard-all-request', track_id: 'track-1', all_times: true
+  });
+  assert.deepEqual(owner.messages.at(-1).payload, {
+    request_id: 'leaderboard-all-request', track_id: 'track-1', offset: 0, total: 2, has_more: false,
+    entries: [
+      { user_id: 'driver', run_id: 'run-1', duration_ms: 4000, avg_speed_mps: 55.5, max_speed_mps: 71.2, distance_m: 222, finished_at: 5000, has_recording: false },
+      { user_id: 'driver', run_id: 'run-2', duration_ms: 5000, avg_speed_mps: 44.4, max_speed_mps: 60, distance_m: 222, finished_at: 7000, has_recording: false }
+    ]
+  });
+  await send(owner.client, 'drive_track_leaderboard', {
+    request_id: 'leaderboard-page-request', track_id: 'track-1', all_times: true, offset: 1
+  });
+  assert.equal(owner.messages.at(-1).payload.offset, 1);
+  assert.deepEqual(owner.messages.at(-1).payload.entries.map((entry: any) => entry.run_id), ['run-2']);
+  assert.equal(owner.messages.at(-1).payload.has_more, false);
   await send(owner.client, 'drive_search_destinations', { request_id: 'invalid-search', channel_id: 'drive', query: '' });
   assert.equal(owner.messages.at(-1).type, 'drive_destinations');
   assert.equal(owner.messages.at(-1).payload.request_id, 'invalid-search');

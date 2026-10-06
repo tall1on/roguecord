@@ -34,7 +34,8 @@ test('startup waits for schema before listening and never logs GPS payloads', as
     './models': {},
     './storage/s3Storage': {},
     './storage/userAvatarStorage': {},
-    './storage/driverAvatarStorage': {}
+    './storage/driverAvatarStorage': {},
+    './storage/trackRecordingStorage': {}
   };
   vm.runInNewContext(compiled, {
     exports: {},
@@ -81,6 +82,7 @@ test('database readiness includes the geocode migration and rejects migration fa
         if (fail) throw new Error('mock cache migration failure');
         await migrateDriveGeocodeCache(db);
       } };
+      if (id === './driveTracksMigration') return require('../src/driveTracksMigration');
       // The dedicated channel connection has its own :memory: DB; channel migration is tested separately.
       if (id === './channelMigration') return { migrateChannelsSchema: async () => {} };
       if (id === './permissions') return require('../src/permissions');
