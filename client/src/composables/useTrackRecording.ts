@@ -1,4 +1,4 @@
-import { onScopeDispose, ref, shallowRef } from 'vue'
+import { onScopeDispose, ref } from 'vue'
 
 type RecordingStopReason = 'track_finished' | 'track_abandoned' | 'camera_off' | 'timeout' | 'driver_left' | 'run_ended'
 
@@ -59,28 +59,33 @@ const pickRecordingMimeType = (): string | null => {
 }
 
 /**
- * Records the driver's own camera feed while the server keeps a track recording session open.
+ * Records the driver's own camera feed while the server keeps track recording sessions open.
  *
- * Capture happens on the driver's device (the only place the raw camera stream exists) and the
+ * Capture happens on the driver's device (the only place the raw camera stream exists) and each
  * finished clip is uploaded to the server, which stores it in the data directory or S3 and links
- * it to the run for download from the leaderboard.
+ * it to its run for download from the leaderboard.
  *
- * Sessions are modelled explicitly so a stop/start hand-off (which happens whenever the recorded
- * run finishes and another active run — for example the reversed layout of the same track — takes
- * over) cannot strand a recording: the next start is queued until the previous recorder has
- * delivered its final data, and every stop is idempotent and matched by run id.
+ * A driver can time several overlapping tracks at once, so one session (and one MediaRecorder) is
+ * kept per run id. Every session is independent: its own cap timer, its own chunks and its own
+ * upload, so a stop for one run never disturbs another. Starts are idempotent and matched by run
+ * id, and a start that arrives before the camera stream is live is retried rather than dropped.
  */
 export const useTrackRecording = (options: TrackRecordingOptions) => {
   const isRecording = ref(false)
   const error = ref<string | null>(null)
-  const recordingRunId = ref<string | null>(null)
+  const recordingRunIds = ref<string[]>([])
   const isUploading = ref(false)
-  const recorder = shallowRef<MediaRecorder | null>(null)
-  let session: RecordingSession | null = null
-  let pendingStart: PendingStart | null = null
+  const sessions = new Map<string, RecordingSession>()
+  const pendingStarts = new Map<string, PendingStart>()
   let retryTimer: ReturnType<typeof setTimeout> | null = null
   let retryAttempts = 0
   let uploadsInFlight = 0
+
+  const syncRecordingState = () => {
+    const ids = [...sessions.keys()]
+    recordingRunIds.value = ids
+    isRecording.value = ids.length > 0
+  }
 
   const clearRetry = () => {
     if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null }
@@ -94,11 +99,9 @@ export const useTrackRecording = (options: TrackRecordingOptions) => {
     if (target.finalized) return
     target.finalized = true
     clearCap(target)
-    if (session === target) {
-      session = null
-      recorder.value = null
-      isRecording.value = false
-      recordingRunId.value = null
+    if (sessions.get(target.runId) === target) {
+      sessions.delete(target.runId)
+      syncRecordingState()
     }
 
     const runId = target.runId
@@ -117,7 +120,7 @@ export const useTrackRecording = (options: TrackRecordingOptions) => {
         if (uploadsInFlight === 0) isUploading.value = false
       }
       // Store durably; the uploads store retries until the server acknowledges the clip. The call
-      // is made synchronously so the clip reaches the queue before a queued next recording starts.
+      // is made synchronously so the clip reaches the queue before anything else finalizes.
       try {
         const pending = options.storeRecording({ runId, file: blob, mimeType, durationMs, connectionId })
         Promise.resolve(pending).then(undefined, (cause) => {
@@ -131,8 +134,8 @@ export const useTrackRecording = (options: TrackRecordingOptions) => {
       }
     }
 
-    // A start that arrived while this session was stopping now runs against an idle recorder.
-    attemptPendingStart()
+    // A start that arrived while the camera stream was not live yet gets another chance.
+    attemptPendingStarts()
   }
 
   const stopSession = (target: RecordingSession, reason: RecordingStopReason): void => {
@@ -154,7 +157,8 @@ export const useTrackRecording = (options: TrackRecordingOptions) => {
   }
 
   const beginRecording = (runId: string, maxMs: number): boolean => {
-    if (session) return false
+    // Already recording this run: nothing to do.
+    if (sessions.has(runId)) return true
     const stream = options.getCameraStream()
     const videoTrack = stream?.getVideoTracks()[0]
     if (!stream || !videoTrack || videoTrack.readyState !== 'live') return false
@@ -189,56 +193,51 @@ export const useTrackRecording = (options: TrackRecordingOptions) => {
       }
       nextRecorder.onstop = () => { finalize(created) }
 
-      session = created
-      recorder.value = nextRecorder
-      recordingRunId.value = runId
+      sessions.set(runId, created)
+      syncRecordingState()
       error.value = null
       nextRecorder.start(1000)
-      isRecording.value = true
       const effectiveMax = Number.isFinite(maxMs) && maxMs > 0 ? Math.min(maxMs, DEFAULT_MAX_DURATION_MS) : DEFAULT_MAX_DURATION_MS
       created.capTimer = setTimeout(() => stopSession(created, 'timeout'), effectiveMax)
       return true
     } catch (cause) {
       error.value = 'Could not start camera recording.'
       console.error('[Drive][recording] Failed to start recorder:', cause)
-      session = null
-      recorder.value = null
-      recordingRunId.value = null
-      isRecording.value = false
+      sessions.delete(runId)
+      syncRecordingState()
       return false
     }
   }
 
-  const attemptPendingStart = (): void => {
-    if (!pendingStart || session) return
-    if (beginRecording(pendingStart.runId, pendingStart.maxMs)) {
-      pendingStart = null
-      retryAttempts = 0
-      clearRetry()
-      return
+  const attemptPendingStarts = (): void => {
+    if (!pendingStarts.size) { clearRetry(); retryAttempts = 0; return }
+    let anyPending = false
+    for (const [runId, pending] of [...pendingStarts]) {
+      if (sessions.has(runId)) { pendingStarts.delete(runId); continue }
+      if (beginRecording(runId, pending.maxMs)) { pendingStarts.delete(runId); continue }
+      anyPending = true
     }
+    if (!anyPending) { clearRetry(); retryAttempts = 0; return }
     if (retryTimer !== null) return
     retryAttempts++
     if (retryAttempts > START_MAX_ATTEMPTS) {
-      pendingStart = null
+      // Give up until the run changes; the server keeps the session but the local camera never
+      // produced a track, so there is nothing more to record here.
+      pendingStarts.clear()
       retryAttempts = 0
       return
     }
     // The local camera stream can lag the server's producer notification by a moment.
-    retryTimer = setTimeout(() => { retryTimer = null; attemptPendingStart() }, START_RETRY_DELAY_MS)
+    retryTimer = setTimeout(() => { retryTimer = null; attemptPendingStarts() }, START_RETRY_DELAY_MS)
   }
 
   const tryStart = (runId: string, maxMs: number): void => {
     // Already recording this run: a duplicate start is a no-op.
-    if (session?.runId === runId) return
-    if (pendingStart?.runId !== runId) {
-      pendingStart = { runId, maxMs }
-      retryAttempts = 0
-      clearRetry()
-    }
-    // While another run is being recorded (or is still finalizing) the start is queued and will
-    // run as soon as the current session finishes; nothing is silently discarded.
-    attemptPendingStart()
+    if (sessions.has(runId)) return
+    if (!pendingStarts.has(runId)) retryAttempts = 0
+    pendingStarts.set(runId, { runId, maxMs })
+    clearRetry()
+    attemptPendingStarts()
   }
 
   const handleMessage = (message: any) => {
@@ -254,11 +253,9 @@ export const useTrackRecording = (options: TrackRecordingOptions) => {
     }
 
     if (type === 'drive_recording_stop' && typeof payload.run_id === 'string') {
-      if (pendingStart?.runId === payload.run_id) pendingStart = null
-      const active = session
-      if (active && active.runId === payload.run_id) {
-        stopSession(active, (payload.reason as RecordingStopReason) || 'run_ended')
-      }
+      pendingStarts.delete(payload.run_id)
+      const active = sessions.get(payload.run_id)
+      if (active) stopSession(active, (payload.reason as RecordingStopReason) || 'run_ended')
       return
     }
 
@@ -266,8 +263,9 @@ export const useTrackRecording = (options: TrackRecordingOptions) => {
     // state still ends the matching recording instead of leaving it to the hard cap.
     if (type === 'drive_track_run_updated' && payload.run && typeof payload.run.id === 'string') {
       const run = payload.run
-      const active = session
-      if (active && run.status !== 'active' && active.runId === run.id) {
+      if (run.status !== 'active') pendingStarts.delete(run.id)
+      const active = sessions.get(run.id)
+      if (active && run.status !== 'active') {
         stopSession(active, run.status === 'finished' ? 'track_finished' : 'track_abandoned')
       }
     }
@@ -277,11 +275,13 @@ export const useTrackRecording = (options: TrackRecordingOptions) => {
   const dispose = () => {
     options.removeMessageListener(handleMessage)
     clearRetry()
-    pendingStart = null
+    pendingStarts.clear()
     retryAttempts = 0
-    if (session && !session.finalized) stopSession(session, 'run_ended')
+    for (const session of [...sessions.values()]) {
+      if (!session.finalized) stopSession(session, 'run_ended')
+    }
   }
   onScopeDispose(dispose)
 
-  return { isRecording, isUploading, error, recordingRunId, dispose }
+  return { isRecording, isUploading, error, recordingRunIds, dispose }
 }

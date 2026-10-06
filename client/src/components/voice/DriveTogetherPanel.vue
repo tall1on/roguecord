@@ -130,8 +130,13 @@ const trackRecording = useTrackRecording({
   removeMessageListener: (listener) => chatStore.removeMessageListener(listener),
   storeRecording: (input) => trackRecordingUploads.enqueue(input)
 })
-const showRecordingBadge = computed(() => trackRecording.isRecording.value || trackRecording.isUploading.value)
-const recordingUploading = computed(() => trackRecording.isUploading.value)
+const recordingCount = computed(() => trackRecording.recordingRunIds.value.length)
+const showRecordingBadge = computed(() => recordingCount.value > 0 || trackRecording.isUploading.value)
+const recordingUploading = computed(() => trackRecording.isUploading.value && recordingCount.value === 0)
+const recordingLabel = computed(() => recordingCount.value > 1 ? `Recording ${recordingCount.value}` : recordingCount.value === 1 ? 'Recording' : 'Uploading')
+const recordingBadgeTitle = computed(() => recordingCount.value > 0
+  ? `Recording your camera for ${recordingCount.value} active track run${recordingCount.value === 1 ? '' : 's'}`
+  : 'Uploading the track recording')
 const recordingError = computed(() => trackRecording.error.value)
 const cameraView = ref<'map' | 'split' | 'cameras' | 'leaderboard'>('map')
 const desktopViews = [
@@ -750,11 +755,11 @@ onBeforeUnmount(() => {
         v-if="showRecordingBadge"
         class="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-red-500/40 bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold text-red-300"
         role="status"
-        :title="recordingUploading ? 'Uploading the track recording' : 'Recording your camera for the active track run'"
-        :aria-label="recordingUploading ? 'Uploading track recording' : 'Recording camera for the active track run'"
+        :title="recordingBadgeTitle"
+        :aria-label="recordingBadgeTitle"
       >
         <span class="h-2 w-2 rounded-full" :class="recordingUploading ? 'bg-sky-400' : 'animate-pulse bg-red-500'" aria-hidden="true" />
-        {{ recordingUploading ? 'Uploading' : 'Recording' }}
+        {{ recordingLabel }}
       </span>
       <button
         v-if="cameraPhoneLayout && isJoined"

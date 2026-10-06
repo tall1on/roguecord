@@ -37,39 +37,45 @@ const setup = () => {
   return { manager, sent, camera };
 };
 
-test('records at most one run per driver and rolls over when the recorded run ends', () => {
+test('records every overlapping run concurrently and stops each session independently', () => {
   const { manager, sent, camera } = setup();
 
-  // Two active runs (a forward and its reversed layout) must not open two sessions.
+  // Two overlapping active runs each get their own session.
   const forward = run({ id: 'fwd', track_id: 'fwd-track', next_gate: 2 });
   const reverse = run({ id: 'rev', track_id: 'rev-track', next_gate: 1, started_at: 2000, gate_times: [2000] });
   manager.sync('room', 'driver', [forward, reverse]);
 
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0]!.type, 'drive_recording_start');
-  // The furthest-along run wins so a finishing forward run is not abandoned for a new reverse run.
-  assert.equal(sent[0]!.payload.run_id, 'fwd');
+  assert.deepEqual(sent.map((entry) => entry.type), ['drive_recording_start', 'drive_recording_start']);
+  assert.deepEqual(sent.map((entry) => entry.payload.run_id), ['fwd', 'rev']);
 
-  // A duplicate sync does not start a second session.
+  // A duplicate sync does not start extra sessions.
   manager.sync('room', 'driver', [forward, reverse]);
-  assert.equal(sent.length, 1);
+  assert.equal(sent.length, 2);
 
-  // The recorded run finishes: stop it, then start the remaining active run.
+  // A newly eligible overlapping run starts a third session without disturbing the others.
+  const extra = run({ id: 'extra', track_id: 'extra-track', started_at: 2500, gate_times: [2500] });
+  manager.sync('room', 'driver', [forward, reverse, extra]);
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2]!.payload.run_id, 'extra');
+
+  // One run finishing stops only its own session; the others keep recording.
   manager.sync('room', 'driver', [
     run({ id: 'fwd', track_id: 'fwd-track', next_gate: 3, status: 'finished', finished_at: 5000 }),
-    reverse
+    reverse,
+    extra
   ]);
-  assert.deepEqual(sent.slice(1).map((entry) => entry.type), ['drive_recording_stop', 'drive_recording_start']);
-  assert.equal(sent[1]!.payload.run_id, 'fwd');
-  assert.equal(sent[1]!.payload.reason, 'track_finished');
-  assert.equal(sent[2]!.payload.run_id, 'rev');
+  const afterFinish = sent.slice(3);
+  assert.deepEqual(afterFinish.map((entry) => entry.type), ['drive_recording_stop']);
+  assert.equal(afterFinish[0]!.payload.run_id, 'fwd');
+  assert.equal(afterFinish[0]!.payload.reason, 'track_finished');
 
-  // Turning the camera off stops the current session.
+  // Turning the camera off stops every remaining session for the driver.
   camera.on = false;
-  manager.sync('room', 'driver', [reverse]);
-  assert.equal(sent[sent.length - 1]!.type, 'drive_recording_stop');
-  assert.equal(sent[sent.length - 1]!.payload.run_id, 'rev');
-  assert.equal(sent[sent.length - 1]!.payload.reason, 'camera_off');
+  manager.sync('room', 'driver', [reverse, extra]);
+  const afterCameraOff = sent.slice(4);
+  assert.deepEqual(afterCameraOff.map((entry) => entry.type), ['drive_recording_stop', 'drive_recording_stop']);
+  assert.deepEqual(afterCameraOff.map((entry) => entry.payload.run_id), ['rev', 'extra']);
+  assert.ok(afterCameraOff.every((entry) => entry.payload.reason === 'camera_off'));
 });
 
 test('reconcile stops a run that is no longer active without starting a replacement', () => {
